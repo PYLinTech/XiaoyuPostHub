@@ -1,0 +1,145 @@
+package server
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// flushRecorder 包装 httptest.ResponseRecorder，统计 Flush 调用次数。
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	flushCount int
+}
+
+func (f *flushRecorder) Flush() {
+	f.flushCount++
+	f.ResponseRecorder.Flush()
+}
+
+// --- interceptWriter 边界条件（白盒） ---
+
+func TestInterceptWriter_DefaultsTo200(t *testing.T) {
+	w := httptest.NewRecorder()
+	iw := &interceptWriter{ResponseWriter: w}
+
+	n, err := iw.Write([]byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Errorf("Write returned n = %d, want 5", n)
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("default status = %d, want 200", w.Code)
+	}
+	if w.Body.String() != "hello" {
+		t.Errorf("body = %q, want 'hello'", w.Body.String())
+	}
+}
+
+func TestInterceptWriter_DiscardBodyOnError(t *testing.T) {
+	w := httptest.NewRecorder()
+	iw := &interceptWriter{ResponseWriter: w}
+
+	iw.WriteHeader(http.StatusInternalServerError)
+	n, err := iw.Write([]byte("this should be discarded"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len("this should be discarded") {
+		t.Errorf("Write returned n = %d, want %d", n, len("this should be discarded"))
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("body should be empty before writeNotFound, got %d bytes", w.Body.Len())
+	}
+
+	iw.writeNotFound()
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+	if w.Body.String() != string(notFoundHTML) {
+		t.Errorf("body mismatch")
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", w.Header().Get("Content-Type"))
+	}
+}
+
+// TestInterceptWriter_PreservesFirstStatus 重复调用 WriteHeader 时只采纳第一次。
+func TestInterceptWriter_PreservesFirstStatus(t *testing.T) {
+	w := httptest.NewRecorder()
+	iw := &interceptWriter{ResponseWriter: w}
+
+	iw.WriteHeader(http.StatusForbidden)
+	iw.WriteHeader(http.StatusInternalServerError) // 应被忽略
+	iw.writeNotFound()
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 (first WriteHeader 应保留)", w.Code)
+	}
+}
+
+func TestInterceptWriter_FlushOnlyOnSuccess(t *testing.T) {
+	// 错误状态：Flush 不应触达底层
+	wErr := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	iwErr := &interceptWriter{ResponseWriter: wErr}
+	iwErr.WriteHeader(http.StatusInternalServerError)
+	iwErr.Flush()
+	if wErr.flushCount != 0 {
+		t.Errorf("Flush called %d times on error path, want 0", wErr.flushCount)
+	}
+
+	// 成功状态：Flush 应透传
+	wOK := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	iwOK := &interceptWriter{ResponseWriter: wOK}
+	iwOK.Flush()
+	if wOK.flushCount != 1 {
+		t.Errorf("Flush called %d times on success path, want 1", wOK.flushCount)
+	}
+}
+
+func TestInterceptWriter_WriteNotFoundIdempotent(t *testing.T) {
+	w := httptest.NewRecorder()
+	iw := &interceptWriter{ResponseWriter: w}
+	iw.WriteHeader(http.StatusNotFound)
+	iw.writeNotFound()
+	firstLen := w.Body.Len()
+	iw.writeNotFound() // 重复调用应无副作用
+	if w.Body.Len() != firstLen {
+		t.Errorf("body grew on repeated writeNotFound: %d -> %d", firstLen, w.Body.Len())
+	}
+}
+
+// --- StaticHandler traversal 拒绝（白盒） ---
+
+func TestStaticHandler_RejectsTraversal(t *testing.T) {
+	h := StaticHandler(t.TempDir())
+	req := httptest.NewRequest(http.MethodGet, "/../etc/passwd", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("traversal: status = %d, want 404", w.Code)
+	}
+}
+
+// --- embed 完整性 sanity check（白盒） ---
+
+func TestNotFoundHTML_Embedded(t *testing.T) {
+	if len(notFoundHTML) == 0 {
+		t.Fatal("notFoundHTML is empty — //go:embed failed")
+	}
+	head := string(notFoundHTML[:min(80, len(notFoundHTML))])
+	if !strings.Contains(head, "<html") && !strings.Contains(head, "<!DOCTYPE") {
+		t.Errorf("notFoundHTML doesn't look like HTML (head=%q)", head)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
