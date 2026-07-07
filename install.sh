@@ -187,10 +187,14 @@ volumes:
 EOF_COMPOSE
 }
 
-env_quote() {
+env_value() {
     local value="$1"
-    value="${value//\'/\'\\\'\'}"
-    printf "'%s'" "${value}"
+
+    if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+        die ".env 配置值不能包含换行"
+    fi
+
+    printf "%s" "${value}"
 }
 
 hash_password() {
@@ -279,12 +283,26 @@ create_env_file() {
     image="${XIAOYUPOSTHUB_IMAGE:-${IMAGE_DEFAULT}}"
 
     cat > "${ENV_FILE}" <<EOF_ENV
-# XiaoyuPostHub 配置
-DATABASE_URL=$(env_quote "${database_url}")
-SUPER_ADMIN_USERNAME=$(env_quote "${admin_username}")
-SUPER_ADMIN_PASSWORD_HASH=$(env_quote "${admin_password_hash}")
-XIAOYUPOSTHUB_IMAGE=$(env_quote "${image}")
-XIAOYUPOSTHUB_PORT=$(env_quote "${port}")
+# XiaoyuPostHub 运行配置
+
+# 数据库连接地址：包含协议、用户、密码、地址、端口、数据库名等完整信息。
+# PostgreSQL 示例：postgres://user:password@host:5432/database?sslmode=disable
+# MySQL 示例：user:password@tcp(host:3306)/database?charset=utf8mb4&parseTime=True&loc=Local
+DATABASE_URL=$(env_value "${database_url}")
+
+# 超级管理员账号
+SUPER_ADMIN_USERNAME=$(env_value "${admin_username}")
+
+# 超级管理员密码
+# 格式：sha256:<salt>:<hash>
+# 推荐使用 install.sh 首次运行时交互生成；不要手写明文密码。
+SUPER_ADMIN_PASSWORD_HASH=$(env_value "${admin_password_hash}")
+
+# 可选：手动指定使用的镜像
+XIAOYUPOSTHUB_IMAGE=$(env_value "${image}")
+
+# 可选：指定宿主机访问端口
+XIAOYUPOSTHUB_PORT=$(env_value "${port}")
 EOF_ENV
 
     chmod 600 "${ENV_FILE}" || true
