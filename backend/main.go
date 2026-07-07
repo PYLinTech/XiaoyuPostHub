@@ -1,5 +1,5 @@
 // Package main 启动 XiaoyuPostHub 后端：监听 :8080，
-// 将 /api/* 反向代理到后端 API handler，其余路径反代到同级 static 目录。
+// 将 /api/* 反向代理到后端 API handler，其余路径反代到同级 web 目录。
 package main
 
 import (
@@ -51,11 +51,11 @@ func main() {
 	}
 }
 
-// resolveStaticDir 返回二进制同级目录下的 static 路径。
+// resolveStaticDir 返回二进制同级目录下的 web 路径。
 // 找不到也无所谓：FileServer 返回 404，由 server.WithErrorPage 替换为内置 404 页。
 func resolveStaticDir() string {
 	if exe, err := os.Executable(); err == nil {
-		return filepath.Join(filepath.Dir(exe), "static")
+		return filepath.Join(filepath.Dir(exe), "web")
 	}
-	return "static"
+	return "web"
 }
