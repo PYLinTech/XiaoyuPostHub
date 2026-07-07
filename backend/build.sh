@@ -265,7 +265,7 @@ build_binary() {
         build_args=(go build -trimpath -ldflags="-s -w" -o "${OUTPUT_PATH}" .)
     fi
 
-    run_command 3 3 "编译后端" "go-build" env \
+    run_command 4 4 "编译后端" "go-build" env \
         GOOS="${TARGET_GOOS}" \
         GOARCH="${TARGET_GOARCH}" \
         CGO_ENABLED="${cgo_enabled}" \
@@ -273,11 +273,12 @@ build_binary() {
 }
 
 main() {
-    parse_args "$@"
+	parse_args "$@"
 
-    command_exists go || fail "未找到 go 命令"
+	command_exists go || fail "未找到 go 命令"
+	command_exists sqlc || fail "未找到 sqlc 命令"
 
-    TARGET_GOOS="${TARGET_GOOS:-$(go env GOOS)}"
+	TARGET_GOOS="${TARGET_GOOS:-$(go env GOOS)}"
     TARGET_GOARCH="${TARGET_GOARCH:-$(go env GOARCH)}"
     TARGET_GOARCH="$(normalize_goarch "${TARGET_GOARCH}")"
 
@@ -288,9 +289,10 @@ main() {
     printf "  目标系统：%s\n" "${TARGET_GOOS}"
     printf "  目标架构：%s\n" "${TARGET_GOARCH}"
 
-    run_command 1 3 "执行代码检查" "go-vet" go vet ./...
-    run_command 2 3 "执行单元测试" "go-test" go test ./...
-    build_binary
+run_command 1 4 "生成 sqlc 代码" "sqlc-generate" sqlc generate
+	run_command 2 4 "执行代码检查" "go-vet" go vet ./...
+	run_command 3 4 "执行单元测试" "go-test" go test ./...
+	build_binary
 
     [[ -f "${OUTPUT_PATH}" ]] || fail "未找到后端产物：${OUTPUT_PATH}"
 

@@ -10,5 +10,11 @@
 /bin/
 /dist/
 
+# sqlc generated code (本地 sqlc generate 重新生成)
+db/generated/
+
+# Build script logs
+.build-logs/
+
 # Test coverage
 coverage.txt

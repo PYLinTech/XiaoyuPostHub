@@ -23,7 +23,9 @@ import (
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/config"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/server"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
 func main() {
@@ -37,6 +39,10 @@ func main() {
 	}
 	log.Printf("配置加载成功：env-file=%s", displayEnvFile(*envFile))
 
+	// 把 .env 中的超管信息同步到运行时全局变量
+	config.EnvSuperAdmin = cfg.SuperAdminUsername
+	config.EnvSuperAdminPasswordHash = cfg.SuperAdminPasswordHash
+
 	bootCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	database, err := db.Open(bootCtx, cfg.DatabaseURL)
 	cancel()
@@ -46,6 +52,35 @@ func main() {
 	// 启动期 Ping 由 db.Open 完成；此处仅打印一条对运维有用的确认日志，
 	// 绝不输出密码或完整连接串。
 	log.Printf("数据库已连接：%s", db.DescribeURL(cfg.DatabaseURL))
+
+	// 启动期初始化序列（顺序重要）
+	// 1. 应用 schema（建表，幂等）
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := db.ApplySchema(schemaCtx, database.Pool(), "db/schema"); err != nil {
+		schemaCancel()
+		log.Fatalf("应用 schema 失败：%v", err)
+	}
+	schemaCancel()
+
+	q := sqlcgen.New(database.Pool())
+
+	// 2. 自愈清理：扫描库中残留的 'all'（篡改/脏数据兜底）
+	healCtx, healCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := user.HealAllGroup(healCtx, q); err != nil {
+		healCancel()
+		log.Fatalf("自愈清理失败：%v", err)
+	}
+	healCancel()
+
+	// 3. 初始化超管账号（创建/覆盖/不动）
+	bootCtx2, bootCancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := user.BootstrapSuperAdmin(bootCtx2, q); err != nil {
+		bootCancel2()
+		log.Fatalf("初始化超管失败：%v", err)
+	}
+	bootCancel2()
+
+	_ = user.NewRepo(q) // TODO: 接入 HTTP handler 时把这个 _ 去掉,userRepo 传给 server 包
 
 	srv := &http.Server{
 		Addr:              ":8080",

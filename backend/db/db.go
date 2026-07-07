@@ -16,7 +16,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -143,4 +146,25 @@ func pickMinConns(fallback int32) int32 {
 		return fallback
 	}
 	return 2
+}
+
+// ApplySchema 按文件名顺序执行 schema 目录下的所有 .sql 文件。
+// 文件名约定 001_xxx.sql、002_xxx.sql,字典序即执行顺序。
+// 推荐所有 CREATE TABLE 用 IF NOT EXISTS,以保证幂等。
+func ApplySchema(ctx context.Context, pool *pgxpool.Pool, schemaDir string) error {
+	files, err := filepath.Glob(filepath.Join(schemaDir, "*.sql"))
+	if err != nil {
+		return fmt.Errorf("扫描 schema 目录失败: %w", err)
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		sqlBytes, readErr := os.ReadFile(f)
+		if readErr != nil {
+			return fmt.Errorf("读取 %s 失败: %w", f, readErr)
+		}
+		if _, execErr := pool.Exec(ctx, string(sqlBytes)); execErr != nil {
+			return fmt.Errorf("执行 %s 失败: %w", f, execErr)
+		}
+	}
+	return nil
 }
