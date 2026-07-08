@@ -1,8 +1,8 @@
 package user_test
 
-// 集成测试:BootstrapSuperAdmin 三种情况。
-// 需要真 PG;缺 DB fail-fast。
-// TestMain 在本文件定义,repo_test.go 共享 testPool。
+// 集成测试：BootstrapSuperAdmin 三种情况。
+// 需要真 PG；缺 DB fail-fast。
+// TestMain 在本文件定义，repo_test.go 共享 testPool。
 
 import (
 	"bufio"
@@ -24,11 +24,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// testPool 是包内共享的连接池,所有 user_test 测试都用它。
+// testPool 是包内共享的连接池，所有 user_test 测试都用它。
 var testPool *pgxpool.Pool
 
-// TestMain 在所有测试开始前建一次池,结束关掉。
-// DATABASE_URL 查找顺序:进程 env → deploy/.env,缺一就 fail-fast。
+// TestMain 在所有测试开始前建一次池，结束关掉。
+// DATABASE_URL 查找顺序：进程 env → deploy/.env，缺一就 fail-fast。
 func TestMain(m *testing.M) {
 	url := requireDBURL()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -41,8 +41,8 @@ func TestMain(m *testing.M) {
 	}
 	testPool = d.Pool()
 
-	// 应用 schema,确保 users 表存在(schema 用 CREATE TABLE IF NOT EXISTS 幂等)。
-	// 路径用绝对路径:从本测试文件位置回溯到 backend/ 根,避免 cwd 依赖。
+	// 应用 schema，确保 users 表存在（schema 用 CREATE TABLE IF NOT EXISTS 幂等）。
+	// 路径用绝对路径：从本测试文件位置回溯到 backend/ 根，避免 cwd 依赖。
 	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer schemaCancel()
 	if err := db.ApplySchema(schemaCtx, testPool, resolveSchemaDir()); err != nil {
@@ -55,9 +55,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// resolveSchemaDir 从本测试源码位置回溯到 backend/db/schema 的绝对路径,
-// 不依赖 go test 的 cwd。注意:user_test 在 backend/user/ 下,
-// 回溯 1 级到 module root (backend/),不是项目根。
+// resolveSchemaDir 从本测试源码位置回溯到 backend/db/schema 的绝对路径，
+// 不依赖 go test 的 cwd。注意：user_test 在 backend/user/ 下，
+// 回溯 1 级到 module root (backend/)，不是项目根。
 func resolveSchemaDir() string {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -76,14 +76,14 @@ func requireDBURL() string {
 		url = readDeployEnv()
 	}
 	if url == "" {
-		fmt.Fprintln(os.Stderr, "user_test: 未找到 DATABASE_URL,测试 fail-fast")
+		fmt.Fprintln(os.Stderr, "user_test: 未找到 DATABASE_URL，测试 fail-fast")
 		os.Exit(1)
 	}
 	return url
 }
 
 // readDeployEnv 从项目根 deploy/.env 读 DATABASE_URL。
-// 简化版解析器(空行/注释/export/KEY=VALUE),不展开引号转义,
+// 简化版解析器（空行/注释/export/KEY=VALUE），不展开引号转义，
 // 因为现有 .env 不会在 DATABASE_URL 上用引号。
 func readDeployEnv() string {
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -118,7 +118,7 @@ func readDeployEnv() string {
 	return ""
 }
 
-// setEnvSuperAdmin 在测试期间覆盖全局,测完恢复。
+// setEnvSuperAdmin 在测试期间覆盖全局，测完恢复。
 func setEnvSuperAdmin(t *testing.T, name, hash string) {
 	t.Helper()
 	origName := config.EnvSuperAdmin
@@ -131,7 +131,7 @@ func setEnvSuperAdmin(t *testing.T, name, hash string) {
 	})
 }
 
-// uniqueUsername 用 crypto/rand 生成 8 字节后缀,避免测试间用户名冲突。
+// uniqueUsername 用 crypto/rand 生成 8 字节后缀，避免测试间用户名冲突。
 func uniqueUsername(t *testing.T, prefix string) string {
 	t.Helper()
 	b := make([]byte, 8)
@@ -141,7 +141,7 @@ func uniqueUsername(t *testing.T, prefix string) string {
 	return fmt.Sprintf("%s_%s", prefix, hex.EncodeToString(b))
 }
 
-// cleanupUser 测试结束删掉这个 username,保持库干净。
+// cleanupUser 测试结束删掉这个 username，保持库干净。
 func cleanupUser(t *testing.T, name string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -151,15 +151,16 @@ func cleanupUser(t *testing.T, name string) {
 	}
 }
 
-// insertUser 先清理再插入,保证测试起点干净。
-func insertUser(t *testing.T, name, hash string, groups []string) {
+// insertUser 先清理再插入，保证测试起点干净。
+// 接收独立的 roles 和 groups 两个数组，对应数据库 schema 的两个字段。
+func insertUser(t *testing.T, name, hash string, roles, groups []string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _ = testPool.Exec(ctx, "DELETE FROM users WHERE username = $1", name)
 	_, err := testPool.Exec(ctx,
-		"INSERT INTO users (username, password_hash, groups) VALUES ($1, $2, $3)",
-		name, hash, groups)
+		"INSERT INTO users (username, password_hash, roles, groups) VALUES ($1, $2, $3, $4)",
+		name, hash, roles, groups)
 	if err != nil {
 		t.Fatalf("INSERT user %q: %v", name, err)
 	}
@@ -174,7 +175,7 @@ func contains(s []string, item string) bool {
 	return false
 }
 
-// --- BootstrapSuperAdmin:不存在 → 创建 ---
+// --- BootstrapSuperAdmin：不存在 → 创建 ---
 
 func TestBootstrapSuperAdmin_CreateWhenMissing(t *testing.T) {
 	name := uniqueUsername(t, "create_when_missing")
@@ -193,19 +194,22 @@ func TestBootstrapSuperAdmin_CreateWhenMissing(t *testing.T) {
 	if got.PasswordHash != "sha256:salt:hash_create" {
 		t.Errorf("PasswordHash = %q, want sha256:salt:hash_create", got.PasswordHash)
 	}
-	if !contains(got.Groups, "user") {
-		t.Errorf("Groups = %v, want contains 'user'", got.Groups)
+	if !contains(got.Roles, "user") {
+		t.Errorf("Roles = %v, want contains 'user'", got.Roles)
 	}
-	if contains(got.Groups, "all") {
-		t.Errorf("Groups = %v, must NOT contain 'all'", got.Groups)
+	if contains(got.Roles, "all") {
+		t.Errorf("Roles = %v, must NOT contain 'all'", got.Roles)
+	}
+	if len(got.Groups) != 0 {
+		t.Errorf("Groups = %v, want empty", got.Groups)
 	}
 }
 
-// --- BootstrapSuperAdmin:存在 + hash 不一致 → 覆盖 ---
+// --- BootstrapSuperAdmin：存在 + hash 不一致 → 覆盖 ---
 
 func TestBootstrapSuperAdmin_OverwriteHashWhenMismatch(t *testing.T) {
 	name := uniqueUsername(t, "overwrite_hash")
-	insertUser(t, name, "sha256:old_salt:old_hash", []string{"user"})
+	insertUser(t, name, "sha256:old_salt:old_hash", []string{"user"}, []string{})
 	t.Cleanup(func() { cleanupUser(t, name) })
 	setEnvSuperAdmin(t, name, "sha256:new_salt:new_hash")
 
@@ -223,11 +227,11 @@ func TestBootstrapSuperAdmin_OverwriteHashWhenMismatch(t *testing.T) {
 	}
 }
 
-// --- BootstrapSuperAdmin:存在 + hash 一致 → 不动 ---
+// --- BootstrapSuperAdmin：存在 + hash 一致 → 不动 ---
 
 func TestBootstrapSuperAdmin_NoOpWhenMatch(t *testing.T) {
 	name := uniqueUsername(t, "noop_when_match")
-	insertUser(t, name, "sha256:same_salt:same_hash", []string{"user"})
+	insertUser(t, name, "sha256:same_salt:same_hash", []string{"user"}, []string{})
 	t.Cleanup(func() { cleanupUser(t, name) })
 	setEnvSuperAdmin(t, name, "sha256:same_salt:same_hash")
 
@@ -243,7 +247,7 @@ func TestBootstrapSuperAdmin_NoOpWhenMatch(t *testing.T) {
 	if got.PasswordHash != "sha256:same_salt:same_hash" {
 		t.Errorf("PasswordHash = %q, want unchanged", got.PasswordHash)
 	}
-	if !contains(got.Groups, "user") {
-		t.Errorf("Groups = %v, want contains 'user'", got.Groups)
+	if !contains(got.Roles, "user") {
+		t.Errorf("Roles = %v, want contains 'user'", got.Roles)
 	}
 }

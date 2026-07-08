@@ -66,7 +66,7 @@ func main() {
 
 	// 2. 自愈清理：扫描库中残留的 'all'（篡改/脏数据兜底）
 	healCtx, healCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := user.HealAllGroup(healCtx, q); err != nil {
+	if err := user.HealAllRole(healCtx, q); err != nil {
 		healCancel()
 		log.Fatalf("自愈清理失败：%v", err)
 	}
