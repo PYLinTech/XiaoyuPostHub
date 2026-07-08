@@ -148,15 +148,75 @@ func pickMinConns(fallback int32) int32 {
 	return 2
 }
 
-// ApplySchema 按文件名顺序执行 schema 目录下的所有 .sql 文件。
-// 文件名约定 001_xxx.sql、002_xxx.sql,字典序即执行顺序。
-// 推荐所有 CREATE TABLE 用 IF NOT EXISTS,以保证幂等。
+// ApplyEmbeddedSchema 按文件名顺序执行编译进二进制的 schema SQL。
+//
+// 与 ApplySchema 的区别：
+//   - 数据源：embeddedSchemaFS（go:embed 编进二进制，运行时无需任何磁盘路径）
+//   - 调用方：main.go 启动期 + 集成测试 SetupOrExit
+//
+// 部署产物只需要 xph-backend 二进制和 web/ 目录，不再需要 db/schema。
+//
+// 行为约束：
+//   - 文件名按字典序排序执行，保证 000 → 001 → 002 → 003 的依赖顺序
+//   - 如果嵌入的 schema 目录里一个 .sql 文件都没有（开发期被人删空），返回 error
+//     而非静默成功——静默成功会让 bootstrap 在空库上跑出更混乱的报错
+//   - 任意一条 SQL 执行失败立即返回，错误信息包含具体文件名
+func ApplyEmbeddedSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	entries, err := embeddedSchemaFS.ReadDir("schema")
+	if err != nil {
+		return fmt.Errorf("读取 embedded schema 目录失败: %w", err)
+	}
+
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".sql") {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	if len(names) == 0 {
+		return fmt.Errorf("embedded schema 目录为空，没有任何 .sql 文件被编译进二进制")
+	}
+
+	for _, name := range names {
+		path := "schema/" + name
+		sqlBytes, err := embeddedSchemaFS.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("读取 embedded schema 文件 %s 失败: %w", path, err)
+		}
+		if _, execErr := pool.Exec(ctx, string(sqlBytes)); execErr != nil {
+			return fmt.Errorf("执行 embedded schema 文件 %s 失败: %w", path, execErr)
+		}
+	}
+	return nil
+}
+
+// ApplySchema 从磁盘目录读取并按文件名顺序执行 .sql 文件。
+//
+// **运行时启动期不应调用本函数**——改用 ApplyEmbeddedSchema。
+// 磁盘版保留只为了以下场景：
+//   - 开发者本地手工跑一个临时 SQL 目录做调试
+//   - 未来如果引入独立的迁移工具（当前不引入，见 bootstrap/auth.go 设计原则）
+//
+// 行为约束：
+//   - 按文件名排序执行
+//   - 如果目录下一个 .sql 都没有，返回 error（避免静默"成功"导致后续
+//     bootstrap 在空库上跑出更混乱的报错）
+//   - 推荐所有 CREATE TABLE 用 IF NOT EXISTS 以保证幂等
 func ApplySchema(ctx context.Context, pool *pgxpool.Pool, schemaDir string) error {
 	files, err := filepath.Glob(filepath.Join(schemaDir, "*.sql"))
 	if err != nil {
 		return fmt.Errorf("扫描 schema 目录失败: %w", err)
 	}
 	sort.Strings(files)
+	if len(files) == 0 {
+		return fmt.Errorf("在 %s 下没有找到任何 .sql schema 文件", schemaDir)
+	}
 	for _, f := range files {
 		sqlBytes, readErr := os.ReadFile(f)
 		if readErr != nil {

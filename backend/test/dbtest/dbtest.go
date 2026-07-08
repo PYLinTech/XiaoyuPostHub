@@ -44,9 +44,11 @@ func Queries() *sqlcgen.Queries { return queries }
 // 任何一步失败直接 os.Exit(1)——缺 DB 时绝不能 skip，否则测的是空气。
 //
 // reset 行为：DROP SCHEMA public CASCADE + CREATE SCHEMA public，
-// 把项目自建的所有表清空，再按文件名顺序 apply 三个 schema 文件。
-// 这样**每个测试包都从干净状态开始**，避免跨包 schema 状态污染
-// （也是因为 schema 文件用纯 DDL、不带 IF EXISTS 守卫）。
+// 把项目自建的所有表清空，再通过 db.ApplyEmbeddedSchema 按文件名顺序 apply。
+// 这样**每个测试包都从干净状态开始**，避免跨包 schema 状态污染。
+//
+// Schema 来源走 embed.FS（与运行时启动期完全一致），不再依赖磁盘路径，
+// 确保测试用的就是"装进 xph-backend 二进制"的那一份。
 func SetupOrExit(m *testing.M) {
 	url := requireDBURL()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -68,7 +70,7 @@ func SetupOrExit(m *testing.M) {
 
 	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer schemaCancel()
-	if err := db.ApplySchema(schemaCtx, pool, resolveSchemaDir()); err != nil {
+	if err := db.ApplyEmbeddedSchema(schemaCtx, pool); err != nil {
 		fmt.Fprintf(os.Stderr, "dbtest: 应用 schema 失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -129,18 +131,4 @@ func readDeployEnv(key string) string {
 		}
 	}
 	return ""
-}
-
-// resolveSchemaDir 从 dbtest 源码位置回溯到 backend/db/schema 的绝对路径。
-// 路径：test/dbtest/ → test/ → backend/ → 项目根；schema 在 backend/db/schema/。
-func resolveSchemaDir() string {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		return "db/schema"
-	}
-	backendDir, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	if err != nil {
-		return "db/schema"
-	}
-	return filepath.Join(backendDir, "db", "schema")
 }

@@ -1,4 +1,4 @@
-// 集成测试：连真 PG，验证 ApplySchema 连续执行两次不报错。
+// 集成测试：连真 PG，验证 ApplyEmbeddedSchema 连续执行不报错。
 // 这才是"启动期 schema 幂等"的真正验证。
 //
 // 独立子包（test/db_applytest/）避免和 db 包的内部测试 import cycle。
@@ -9,8 +9,6 @@ package db_applytest
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -25,38 +23,24 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// resolveSchemaDir 从本测试源码位置回溯到 backend/db/schema。
-// 路径：test/db_applytest/db_apply_test.go → 回溯两级到 backend/。
-func resolveSchemaDir() string {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		return "db/schema"
-	}
-	backendDir, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	if err != nil {
-		return "db/schema"
-	}
-	return filepath.Join(backendDir, "db", "schema")
-}
-
-func TestApplySchema_IdempotentSecondRun(t *testing.T) {
+func TestApplyEmbeddedSchema_IdempotentSecondRun(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// TestMain 已经 apply 一次（reset + apply），这是第二次。
-	if err := db.ApplySchema(ctx, dbtest.Pool(), resolveSchemaDir()); err != nil {
-		t.Fatalf("ApplySchema 第二次执行失败（schema 非幂等）：%v", err)
+	if err := db.ApplyEmbeddedSchema(ctx, dbtest.Pool()); err != nil {
+		t.Fatalf("ApplyEmbeddedSchema 第二次执行失败（schema 非幂等）：%v", err)
 	}
 }
 
-func TestApplySchema_IdempotentThirdRun(t *testing.T) {
+func TestApplyEmbeddedSchema_IdempotentThirdRun(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := db.ApplySchema(ctx, dbtest.Pool(), resolveSchemaDir()); err != nil {
-		t.Fatalf("ApplySchema 第三次执行失败：%v", err)
+	if err := db.ApplyEmbeddedSchema(ctx, dbtest.Pool()); err != nil {
+		t.Fatalf("ApplyEmbeddedSchema 第三次执行失败：%v", err)
 	}
 }
 
-func TestApplySchema_AllExpectedTablesExist(t *testing.T) {
+func TestApplyEmbeddedSchema_AllExpectedTablesExist(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	expected := []string{
@@ -79,7 +63,7 @@ func TestApplySchema_AllExpectedTablesExist(t *testing.T) {
 	}
 }
 
-func TestApplySchema_RolesNoSuperAdminConstraintExists(t *testing.T) {
+func TestApplyEmbeddedSchema_RolesNoSuperAdminConstraintExists(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var exists bool
@@ -93,7 +77,7 @@ func TestApplySchema_RolesNoSuperAdminConstraintExists(t *testing.T) {
 	}
 }
 
-func TestApplySchema_UsersQuotaProfileFKExists(t *testing.T) {
+func TestApplyEmbeddedSchema_UsersQuotaProfileFKExists(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var exists bool

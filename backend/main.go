@@ -5,7 +5,7 @@
 //  1. 解析命令行 flag（env-file 路径）
 //  2. 加载与校验配置（config.Load）
 //  3. 连接 PostgreSQL（db.Open，启动期 Ping 一次）
-//  4. 应用 schema（db.ApplySchema，幂等）
+//  4. 应用 schema（db.ApplyEmbeddedSchema，SQL 通过 go:embed 编进二进制，幂等）
 //  5. BootstrapAuthCatalog（permissions / 系统 role / quota / user group）
 //  6. BootstrapSuperAdmin（创建/同步超管账号，不加入 default_user group、不分配 role）
 //  7. 构造 permissionRepo / roleRepo / groupRepo / quotaRepo / userRepo
@@ -59,9 +59,9 @@ func main() {
 	}
 	log.Printf("数据库已连接：%s", db.DescribeURL(cfg.DatabaseURL))
 
-	// 1. 应用 schema
+	// 1. 应用 schema（SQL 通过 go:embed 编进二进制，部署产物不再需要 db/schema 目录）
 	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := db.ApplySchema(schemaCtx, database.Pool(), "db/schema"); err != nil {
+	if err := db.ApplyEmbeddedSchema(schemaCtx, database.Pool()); err != nil {
 		schemaCancel()
 		log.Fatalf("应用 schema 失败：%v", err)
 	}
