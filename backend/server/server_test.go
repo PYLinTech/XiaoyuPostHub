@@ -3,6 +3,8 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -112,10 +114,22 @@ func TestInterceptWriter_WriteNotFoundIdempotent(t *testing.T) {
 	}
 }
 
-// --- StaticHandler traversal 拒绝（白盒） ---
+// --- NewStaticHandler traversal 拒绝(端到端) ---
+// httptest.NewRequest 会把 .. 规范化掉;SPA 关闭后,/etc/passwd 不存在 → 404。
 
-func TestStaticHandler_RejectsTraversal(t *testing.T) {
-	h := StaticHandler(t.TempDir())
+func TestNewStaticHandler_RejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	// NewStaticHandler 启动期校验 IndexFile 必须存在,先放个 dummy
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html></html>"), 0o644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	h, err := NewStaticHandler(StaticConfig{
+		Dir:         dir,
+		SPAFallback: false, // 关闭 fallback,让 /etc/passwd 拿到 404
+	})
+	if err != nil {
+		t.Fatalf("NewStaticHandler: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/../etc/passwd", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

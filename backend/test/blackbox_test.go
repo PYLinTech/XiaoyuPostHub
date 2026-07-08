@@ -23,7 +23,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(server.NewRouter(dir, nil, nil, nil, nil, nil))
+	h, err := server.NewRouter(dir, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	return httptest.NewServer(h)
 }
 
 // --- NewRouter：路由分流 ---
@@ -46,21 +50,24 @@ func TestNewRouter_ServesStaticRoot(t *testing.T) {
 	}
 }
 
-func TestNewRouter_StaticMissingReturns404Page(t *testing.T) {
+// TestNewRouter_StaticMissingFallsBackToIndex 验证 SPA fallback:
+// GET /settings/profile(前端路由)→ 200 + 根 index.html,React Router 接管。
+// SPA 部署核心契约:后端只兜底首页,不区分"路径是否存在"。
+func TestNewRouter_StaticMissingFallsBackToIndex(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/nope.html")
+	resp, err := http.Get(srv.URL + "/settings/profile")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 (SPA fallback)", resp.StatusCode)
 	}
-	if !strings.HasPrefix(string(body), "<!DOCTYPE html>") && !strings.HasPrefix(string(body), "<!doctype html>") {
-		t.Errorf("body doesn't start with HTML doctype: %q", string(body[:min(80, len(body))]))
+	if string(body) != "<h1>home</h1>" {
+		t.Errorf("body = %q, want root index.html", string(body))
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
 		t.Errorf("Content-Type = %q, want text/html", resp.Header.Get("Content-Type"))

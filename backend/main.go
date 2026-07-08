@@ -92,9 +92,17 @@ func main() {
 	quotaRepo := quota.NewRepo(q)
 	userRepo := user.NewRepo(database.Pool(), q, roleRepo, groupRepo)
 
+	handler, err := server.NewRouter(
+		resolveStaticDir(cfg.StaticDir),
+		userRepo, roleRepo, permRepo, groupRepo, quotaRepo,
+	)
+	if err != nil {
+		log.Fatalf("初始化 HTTP 路由失败：%v", err)
+	}
+
 	srv := &http.Server{
 		Addr:              ":8080",
-		Handler:           server.NewRouter(resolveStaticDir(cfg.StaticDir), userRepo, roleRepo, permRepo, groupRepo, quotaRepo),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

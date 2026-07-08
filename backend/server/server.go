@@ -2,8 +2,8 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
@@ -22,12 +22,9 @@ type Deps struct {
 	QuotaRepo      *quota.Repo
 }
 
-// NewRouter 构造分流路由：
-//
-//	/api/*  → API handler（后端业务入口）
-//	其余    → staticDir 下的静态文件
-//
-// 所有响应再经 WithErrorPage 包裹，错误状态统一替换为内置 404 页。
+// NewRouter 构造分流路由:/api/* → APIHandler,其余 → NewStaticHandler(SPA fallback on)。
+// 启动期校验失败(staticDir 不存在 / 缺 index.html)返回 error,由 main.go 处理;
+// 本函数不自行终止进程——构造函数边界。
 func NewRouter(
 	staticDir string,
 	userRepo *user.Repo,
@@ -35,7 +32,15 @@ func NewRouter(
 	permRepo *permission.Repo,
 	groupRepo *group.Repo,
 	quotaRepo *quota.Repo,
-) http.Handler {
+) (http.Handler, error) {
+	staticH, err := NewStaticHandler(StaticConfig{
+		Dir:         staticDir,
+		SPAFallback: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("初始化静态文件服务失败：%w", err)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/api/", APIHandler(Deps{
 		UserRepo:       userRepo,
@@ -44,20 +49,8 @@ func NewRouter(
 		GroupRepo:      groupRepo,
 		QuotaRepo:      quotaRepo,
 	}))
-	mux.Handle("/", StaticHandler(staticDir))
-	return WithErrorPage(mux)
-}
-
-// StaticHandler 提供静态文件服务；拒绝包含 .. 的路径以防穿越。
-func StaticHandler(staticDir string) http.Handler {
-	fs := http.FileServer(http.Dir(staticDir))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "..") {
-			http.NotFound(w, r)
-			return
-		}
-		fs.ServeHTTP(w, r)
-	})
+	mux.Handle("/", staticH)
+	return WithErrorPage(mux), nil
 }
 
 // APIHandler 注册后端 API。

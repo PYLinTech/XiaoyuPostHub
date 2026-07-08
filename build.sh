@@ -143,38 +143,25 @@ parse_args() {
     done
 }
 
-make_bar() {
-    local percent="$1"
-    local width=30
-    local filled=$((percent * width / 100))
-    local empty=$((width - filled))
-    local bar=""
-    local i
+print_step_start() {
+    local step_no="$1"
+    local step_total="$2"
+    local title="$3"
 
-    for ((i = 0; i < filled; i++)); do bar+="#"; done
-    for ((i = 0; i < empty; i++)); do bar+="-"; done
-
-    printf "%s" "${bar}"
+    printf "%b执行：[%d/%d] %s%b\n" "${BLUE}" "${step_no}" "${step_total}" "${title}" "${RESET}"
 }
 
-draw_progress() {
-    local percent="$1"
-    local title="$2"
-    local bar
+print_step_success() {
+    local step_no="$1"
+    local step_total="$2"
+    local title="$3"
+    local detail="${4:-}"
 
-    bar="$(make_bar "${percent}")"
-    printf "\r%b[%s] %3d%% %s%b" "${BLUE}" "${bar}" "${percent}" "${title}" "${RESET}"
-}
-
-clear_progress() {
-    if [[ -n "${CLEAR_LINE}" ]]; then
-        printf "%b" "${CLEAR_LINE}"
+    if [[ -n "${detail}" ]]; then
+        printf "%b完成：[%d/%d] %s（%s）%b\n" "${GREEN}" "${step_no}" "${step_total}" "${title}" "${detail}" "${RESET}"
+    else
+        printf "%b完成：[%d/%d] %s%b\n" "${GREEN}" "${step_no}" "${step_total}" "${title}" "${RESET}"
     fi
-}
-
-print_start() {
-    local title="$1"
-    printf "%b执行：%s%b\n" "${BLUE}" "${title}" "${RESET}"
 }
 
 print_success() {
@@ -204,36 +191,17 @@ run_command() {
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
 
-    local start_percent=$(((CURRENT_STEP - 1) * 100 / TOTAL_STEPS))
-    local end_percent=$((CURRENT_STEP * 100 / TOTAL_STEPS))
-    local percent="${start_percent}"
     local log_file="${LOG_DIR}/${log_name}.log"
-    local pid
 
     mkdir -p "${LOG_DIR}"
     rm -f "${log_file}"
 
-    "$@" >"${log_file}" 2>&1 &
-    pid=$!
+    print_step_start "${CURRENT_STEP}" "${TOTAL_STEPS}" "${title}"
 
-    if [[ -t 1 ]]; then
-        while kill -0 "${pid}" 2>/dev/null; do
-            draw_progress "${percent}" "${title}"
-            if [[ "${percent}" -lt $((end_percent - 1)) ]]; then
-                percent=$((percent + 1))
-            fi
-            sleep 0.08
-        done
-    else
-        print_start "${title}"
-    fi
-
-    if wait "${pid}"; then
+    if "$@" >"${log_file}" 2>&1; then
         rm -f "${log_file}"
-        clear_progress
-        print_success "${title}"
+        print_step_success "${CURRENT_STEP}" "${TOTAL_STEPS}" "${title}"
     else
-        clear_progress >&2
         show_log "${log_file}"
         fail "${title} 失败"
     fi
@@ -245,17 +213,9 @@ run_step() {
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
 
-    local start_percent=$(((CURRENT_STEP - 1) * 100 / TOTAL_STEPS))
-
-    if [[ -t 1 ]]; then
-        draw_progress "${start_percent}" "${title}"
-    else
-        print_start "${title}"
-    fi
-
+    print_step_start "${CURRENT_STEP}" "${TOTAL_STEPS}" "${title}"
     "$@"
-    clear_progress
-    print_success "${title}"
+    print_step_success "${CURRENT_STEP}" "${TOTAL_STEPS}" "${title}"
 }
 
 dir_size() {
@@ -275,7 +235,7 @@ check_project() {
 }
 
 prepare_variables() {
-    TOTAL_STEPS=$((2 + (${#TARGET_ARCHES[@]} * 3)))
+    TOTAL_STEPS=$((2 + (${#TARGET_ARCHES[@]} * 4)))
 }
 
 prepare_frontend_app() {
