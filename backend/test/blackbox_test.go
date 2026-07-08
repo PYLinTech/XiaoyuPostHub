@@ -14,13 +14,16 @@ import (
 )
 
 // newTestServer 构造一个完整 router + 含 index.html 的 static 目录。
+//
+// 传入 nil repo 集合：黑盒测试只覆盖路由分流与错误页，repo 还没接业务 handler。
+// 后续接登录链路后，这里会构造真 repo 注入。
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(server.NewRouter(dir))
+	return httptest.NewServer(server.NewRouter(dir, nil, nil, nil, nil, nil))
 }
 
 // --- NewRouter：路由分流 ---

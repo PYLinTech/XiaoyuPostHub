@@ -1,19 +1,20 @@
 -- name: GetUserByUsername :one
-SELECT id, username, password_hash, roles, groups, created_at
+SELECT id, username, password_hash, quota_profile_id, created_at
 FROM users
 WHERE username = $1;
 
 -- name: CreateUser :one
-INSERT INTO users (username, password_hash, roles, groups)
-VALUES ($1, $2, $3, $4)
-RETURNING id, username, password_hash, roles, groups, created_at;
+-- v2：去掉 groups 参数；权限通过 user_group_memberships → group_roles 表达。
+INSERT INTO users (username, password_hash)
+VALUES ($1, $2)
+RETURNING id, username, password_hash, quota_profile_id, created_at;
 
 -- name: UpdatePasswordHashByUsername :execrows
 UPDATE users
 SET password_hash = $2
 WHERE username = $1;
 
--- name: RemoveAllFromAllUsers :execrows
+-- name: UpdateUserQuotaProfile :execrows
 UPDATE users
-SET roles = ARRAY_REMOVE(roles, 'all')
-WHERE 'all' = ANY(roles);
+SET quota_profile_id = $2
+WHERE id = $1;

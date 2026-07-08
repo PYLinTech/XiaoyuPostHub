@@ -78,7 +78,20 @@ on_error() {
 trap 'on_error "$LINENO"' ERR
 
 command_exists() {
-    command -v "$1" >/dev/null 2>&1
+	command -v "$1" >/dev/null 2>&1
+}
+
+# sqlc 通常装在 $(go env GOPATH)/bin（默认 ~/go/bin），但用户 PATH 可能不含它。
+# 优先在 GOPATH/bin 找一下，PATH 上没有就从这里取。
+ensure_sqlc_in_path() {
+	if command_exists sqlc; then
+		return 0
+	fi
+	local gopath
+	gopath="$(go env GOPATH 2>/dev/null || echo "")"
+	if [[ -n "$gopath" && -x "${gopath}/bin/sqlc" ]]; then
+		export PATH="${gopath}/bin:${PATH}"
+	fi
 }
 
 validate_goos() {
@@ -276,6 +289,7 @@ main() {
 	parse_args "$@"
 
 	command_exists go || fail "未找到 go 命令"
+	ensure_sqlc_in_path
 	command_exists sqlc || fail "未找到 sqlc 命令"
 
 	TARGET_GOOS="${TARGET_GOOS:-$(go env GOOS)}"
@@ -291,7 +305,8 @@ main() {
 
 run_command 1 4 "生成 sqlc 代码" "sqlc-generate" sqlc generate
 	run_command 2 4 "执行代码检查" "go-vet" go vet ./...
-	run_command 3 4 "执行单元测试" "go-test" go test ./...
+	# -p=1 串行跑包：dbtest 每个包都 reset schema 并发跑会互踩
+	run_command 3 4 "执行单元测试" "go-test" go test -p=1 ./...
 	build_binary
 
     [[ -f "${OUTPUT_PATH}" ]] || fail "未找到后端产物：${OUTPUT_PATH}"
