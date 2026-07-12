@@ -11,19 +11,20 @@ import (
 	"testing"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/server"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/session"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
 // newTestServer 构造一个完整 router + 含 index.html 的 static 目录。
 //
-// 传入 nil repo 集合：黑盒测试只覆盖路由分流与错误页，repo 还没接业务 handler。
-// 后续接登录链路后，这里会构造真 repo 注入。
+// 黑盒测试只覆盖路由分流与错误页，用非 nil 空 Repo 满足构造期依赖校验。
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h, err := server.NewRouter(dir, nil, nil, nil, nil, nil)
+	h, err := server.NewRouter(dir, &user.Repo{}, &session.Repo{}, nil, nil, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}

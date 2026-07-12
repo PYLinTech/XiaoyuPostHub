@@ -103,8 +103,7 @@ func TestLoad_FromFile(t *testing.T) {
 		"# 测试 env",
 		"DATABASE_URL=postgresql://u:p@host:5432/db",
 		"SUPER_ADMIN_USERNAME=admin",
-		"SUPER_ADMIN_PASSWORD_HASH=sha256:salt:hash",
-		"XPH_STATIC_DIR=/tmp/static",
+		"SUPER_ADMIN_PASSWORD_HASH=" + bcryptCost12Hash,
 	}, "\n"))
 
 	cfg, err := Load(envPath)
@@ -117,11 +116,8 @@ func TestLoad_FromFile(t *testing.T) {
 	if cfg.SuperAdminUsername != "admin" {
 		t.Errorf("SuperAdminUsername = %q", cfg.SuperAdminUsername)
 	}
-	if cfg.SuperAdminPasswordHash != "sha256:salt:hash" {
+	if cfg.SuperAdminPasswordHash != bcryptCost12Hash {
 		t.Errorf("SuperAdminPasswordHash = %q", cfg.SuperAdminPasswordHash)
-	}
-	if cfg.StaticDir != "/tmp/static" {
-		t.Errorf("StaticDir = %q", cfg.StaticDir)
 	}
 	if cfg.EnvFile != envPath {
 		t.Errorf("EnvFile = %q", cfg.EnvFile)
@@ -132,7 +128,7 @@ func TestLoad_FromFile(t *testing.T) {
 func TestLoad_EnvOverridesFile(t *testing.T) {
 	dir := t.TempDir()
 	envPath := filepath.Join(dir, ".env")
-	mustWrite(t, envPath, "DATABASE_URL=from-file\nSUPER_ADMIN_USERNAME=admin\nSUPER_ADMIN_PASSWORD_HASH=sha256:salt:hash\n")
+	mustWrite(t, envPath, "DATABASE_URL=from-file\nSUPER_ADMIN_USERNAME=admin\nSUPER_ADMIN_PASSWORD_HASH="+bcryptCost12Hash+"\n")
 
 	t.Setenv("DATABASE_URL", "from-env")
 
@@ -181,7 +177,7 @@ func TestLoad_ValidationError(t *testing.T) {
 			missing: []string{"DATABASE_URL", "SUPER_ADMIN_USERNAME", "SUPER_ADMIN_PASSWORD_HASH"},
 		},
 		{
-			name: "only db",
+			name:    "only db",
 			content: "DATABASE_URL=postgresql://x\n",
 			missing: []string{"SUPER_ADMIN_USERNAME", "SUPER_ADMIN_PASSWORD_HASH"},
 		},
@@ -217,7 +213,7 @@ func TestLoad_PartialFromEnv(t *testing.T) {
 	mustWrite(t, envPath, "DATABASE_URL=postgresql://x\n")
 
 	t.Setenv("SUPER_ADMIN_USERNAME", "env-admin")
-	t.Setenv("SUPER_ADMIN_PASSWORD_HASH", "sha256:salt:hash")
+	t.Setenv("SUPER_ADMIN_PASSWORD_HASH", bcryptCost12Hash)
 
 	cfg, err := Load(envPath)
 	if err != nil {
@@ -243,6 +239,39 @@ func TestLoad_EmptyPathOnlyEnv(t *testing.T) {
 }
 
 // --- 辅助 ---
+
+// bcryptCost12Hash 是合法的 bcrypt cost=12 测试用 hash 字符串。
+//
+//   - 前缀 $2a$12$ (7 字符) + 53 字符 base64 = 60 字符总长，符合 bcrypt 输出格式
+//   - 不对应任何真实密码（仅做格式占位，测试只验证 Load 把它原样读出）
+const bcryptCost12Hash = "$2a$12$" +
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZ" +
+	"abcdefghijklmnopqrstuvwxyz" +
+	"0"
+
+// TestBcryptCost12Hash_Format 自检：确保测试用常量本身格式合法。
+// 如果有人误改了它，这个测试会先 fail，提示"测试数据坏了，不是 bcrypt 解析逻辑坏了"。
+func TestBcryptCost12Hash_Format(t *testing.T) {
+	if len(bcryptCost12Hash) != 60 {
+		t.Fatalf("bcrypt cost=12 hash 长度应为 60，得到 %d", len(bcryptCost12Hash))
+	}
+	if !strings.HasPrefix(bcryptCost12Hash, "$2a$12$") {
+		t.Fatalf("bcrypt cost=12 hash 必须以 $2a$12$ 开头，得到 %q", bcryptCost12Hash[:10])
+	}
+}
+
+func TestLoad_SingleQuotedValues(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	mustWrite(t, envPath, "DATABASE_URL='postgresql://local/test'\nSUPER_ADMIN_USERNAME='admin'\nSUPER_ADMIN_PASSWORD_HASH='"+bcryptCost12Hash+"'\n")
+	cfg, err := Load(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DatabaseURL != "postgresql://local/test" || cfg.SuperAdminUsername != "admin" || cfg.SuperAdminPasswordHash != bcryptCost12Hash {
+		t.Fatalf("单引号配置解析错误：%+v", cfg)
+	}
+}
 
 func mustWrite(t *testing.T, path, body string) {
 	t.Helper()

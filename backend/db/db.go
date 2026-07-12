@@ -182,7 +182,6 @@ func ApplyEmbeddedSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if len(names) == 0 {
 		return fmt.Errorf("embedded schema 目录为空，没有任何 .sql 文件被编译进二进制")
 	}
-
 	for _, name := range names {
 		path := "schema/" + name
 		sqlBytes, err := embeddedSchemaFS.ReadFile(path)

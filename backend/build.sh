@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build.sh — 构建 XiaoyuPostHub 后端
 #
-# 流程：代码检查 → 单元测试 → 编译后端
+# 流程：下载 Go 依赖 → 生成 sqlc 代码 → 代码检查 → 单元测试 → 编译后端
 # 输出：./bin/xph-backend
 #
 # 用法：
@@ -246,7 +246,7 @@ build_binary() {
         build_args=(go build -trimpath -ldflags="-s -w" -o "${OUTPUT_PATH}" .)
     fi
 
-    run_command 4 4 "编译后端" "go-build" env \
+    run_command 5 5 "编译后端" "go-build" env \
         GOOS="${TARGET_GOOS}" \
         GOARCH="${TARGET_GOARCH}" \
         CGO_ENABLED="${cgo_enabled}" \
@@ -271,10 +271,11 @@ main() {
     printf "  目标系统：%s\n" "${TARGET_GOOS}"
     printf "  目标架构：%s\n" "${TARGET_GOARCH}"
 
-run_command 1 4 "生成 sqlc 代码" "sqlc-generate" sqlc generate
-	run_command 2 4 "执行代码检查" "go-vet" go vet ./...
+run_command 1 5 "下载 Go 依赖" "go-mod-download" go mod download
+	run_command 2 5 "生成 sqlc 代码" "sqlc-generate" sqlc generate
+	run_command 3 5 "执行代码检查" "go-vet" go vet ./...
 	# -p=1 串行跑包：dbtest 每个包都 reset schema 并发跑会互踩
-	run_command 3 4 "执行单元测试" "go-test" go test -p=1 ./...
+	run_command 4 5 "执行单元测试" "go-test" go test -p=1 ./...
 	build_binary
 
     [[ -f "${OUTPUT_PATH}" ]] || fail "未找到后端产物：${OUTPUT_PATH}"

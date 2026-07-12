@@ -21,8 +21,8 @@ RUN apk add --no-cache ca-certificates tzdata \
     && adduser -S -D -H -u ${APP_UID} -G ${APP_GROUP} -s /sbin/nologin ${APP_USER} \
     && mkdir -p "${APP_HOME}" "${DATA_DIR}" \
     && chown root:${APP_GROUP} "${APP_HOME}" \
-    && chown ${APP_USER}:${APP_GROUP} "${DATA_DIR}" \
     && chmod 550 "${APP_HOME}" \
+    && chown ${APP_USER}:${APP_GROUP} "${DATA_DIR}" \
     && chmod 750 "${DATA_DIR}"
 
 COPY app/xph-backend /app/xph-backend
@@ -32,9 +32,7 @@ RUN chown root:${APP_GROUP} /app/xph-backend \
     && chmod 550 /app/xph-backend \
     && chown -R root:${APP_GROUP} /app/web \
     && find /app/web -type d -exec chmod 550 {} \; \
-    && find /app/web -type f -exec chmod 440 {} \; \
-    && chown ${APP_USER}:${APP_GROUP} /data \
-    && chmod 750 /data
+    && find /app/web -type f -exec chmod 440 {} \;
 
 USER ${APP_USER}:${APP_GROUP}
 

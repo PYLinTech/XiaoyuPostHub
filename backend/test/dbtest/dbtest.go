@@ -83,30 +83,30 @@ func Teardown() {
 	}
 }
 
-// requireDBURL 找 DATABASE_URL，顺序：进程 env → deploy/.env。
+// requireDBURL 只读取测试专用连接，避免污染应用配置测试。
 func requireDBURL() string {
-	url := os.Getenv("DATABASE_URL")
+	url := os.Getenv("TEST_DATABASE_URL")
 	if url != "" {
 		return url
 	}
-	url = readDeployEnv("DATABASE_URL")
+	url = readTestEnv("TEST_DATABASE_URL")
 	if url == "" {
-		fmt.Fprintln(os.Stderr, "dbtest: 未找到 DATABASE_URL，测试 fail-fast")
+		fmt.Fprintln(os.Stderr, "dbtest: 未找到 TEST_DATABASE_URL，测试 fail-fast")
 		os.Exit(1)
 	}
 	return url
 }
 
-// readDeployEnv 简化的 .env 解析器：空行/注释/export/KEY=VALUE，不展开引号。
+// readTestEnv 读取 backend/.test.env。
 // 测试内不复用 config 包：那是为测试而生的形态。
-// 路径从 dbtest.go 回溯三级到项目根（test/dbtest/ → test/ → backend/ → <root>）。
-func readDeployEnv(key string) string {
+// 路径从 dbtest.go 回溯到 backend/.test.env。
+func readTestEnv(key string) string {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		return ""
 	}
-	root := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
-	path := filepath.Join(root, "deploy", ".env")
+	backendDir := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	path := filepath.Join(backendDir, ".test.env")
 	f, err := os.Open(path)
 	if err != nil {
 		return ""

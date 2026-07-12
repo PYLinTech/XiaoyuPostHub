@@ -12,10 +12,12 @@ import rootReducer from './store';
 import PageLayout from './layout';
 import { GlobalContext } from './context';
 import Login from './pages/login';
-import checkLogin from './utils/checkLogin';
 import changeTheme from './utils/changeTheme';
 import useStorage from './utils/useStorage';
-import './mock';
+
+if (process.env.REACT_APP_ENABLE_MOCKS === 'true') {
+  import('./mock');
+}
 
 const store = createStore(rootReducer);
 
@@ -39,19 +41,24 @@ function Index() {
       type: 'update-userInfo',
       payload: { userLoading: true },
     });
-    axios.get('/api/user/userInfo').then((res) => {
-      store.dispatch({
-        type: 'update-userInfo',
-        payload: { userInfo: res.data, userLoading: false },
+    axios
+      .get('/api/user/userInfo')
+      .then((res) => {
+        store.dispatch({
+          type: 'update-userInfo',
+          payload: { userInfo: res.data, userLoading: false },
+        });
+      })
+      .catch(() => {
+        if (window.location.pathname !== '/login') {
+          window.location.replace('/login');
+        }
       });
-    });
   }
 
   useEffect(() => {
-    if (checkLogin()) {
+    if (window.location.pathname !== '/login') {
       fetchUserInfo();
-    } else if (window.location.pathname.replace(/\//g, '') !== 'login') {
-      window.location.pathname = '/login';
     }
   }, []);
 

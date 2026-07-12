@@ -214,7 +214,7 @@ func TestAssignRoleToUser_RejectsNonAssignable(t *testing.T) {
 	// 这里用 0 让它走 ErrRoleNotFound 的路径——但 ErrRoleNotFound 来自 GetByID
 	// 我们要测的是 assignable 拒绝。建一个临时 user 走完流程。
 	username := uniqueName(t, "u_assign_rej")
-	hash := "sha256:salt:hash"
+	hash := "$2a$12$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0"
 	_, err = dbtest.Pool().Exec(ctx,
 		"INSERT INTO users (username, password_hash) VALUES ($1, $2)", username, hash)
 	if err != nil {

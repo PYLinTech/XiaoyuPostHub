@@ -5,7 +5,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -88,12 +87,12 @@ func TestPickMinConns_DefaultsAndOverrides(t *testing.T) {
 func requireDB(t *testing.T) string {
 	t.Helper()
 
-	url := os.Getenv("DATABASE_URL")
+	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
-		url = readDeployEnv(t, "DATABASE_URL")
+		url = readTestEnv(t, "TEST_DATABASE_URL")
 	}
 	if url == "" {
-		t.Fatal("未找到 DATABASE_URL：请设置环境变量或在 deploy/.env 中提供")
+		t.Fatal("未找到 TEST_DATABASE_URL：请设置环境变量或 backend/.test.env")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -104,15 +103,15 @@ func requireDB(t *testing.T) string {
 	return url
 }
 
-// readDeployEnv 从项目根 deploy/.env 中按 key 取值。这是测试内部的解析器：
+// readTestEnv 从 backend/.test.env 中按 key 取值。
 //
 //   - **不复用 config 包**：配置层不该为测试提供"按 key 查"之类的便利 API，
 //     那是为测试而生的形态。测试自己实现一个够用的子集解析器。
-//   - **足够支持现有 deploy/.env**：空行 / 整行 # 注释 / 可选 export 前缀 / KEY=VALUE。
+//   - 支持空行 / 整行 # 注释 / 可选 export 前缀 / KEY=VALUE。
 //     引号与转义不展开（现有 .env 里没用过），保持 20 行内可审计。
-func readDeployEnv(t *testing.T, key string) string {
+func readTestEnv(t *testing.T, key string) string {
 	t.Helper()
-	path := deployEnvPath(t)
+	path := filepath.Join("..", ".test.env")
 	f, err := os.Open(path)
 	if err != nil {
 		return "" // 文件不存在 / 读不开 → 视为"无"，让调用方决定
@@ -138,20 +137,6 @@ func readDeployEnv(t *testing.T, key string) string {
 		return strings.TrimSpace(line[eq+1:])
 	}
 	return ""
-}
-
-// deployEnvPath 从本测试源码位置回溯到 deploy/.env 的绝对路径。
-func deployEnvPath(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("无法定位 db_test.go 路径")
-	}
-	root, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
-	if err != nil {
-		t.Fatalf("解析 project root 失败：%v", err)
-	}
-	return filepath.Join(root, "deploy", ".env")
 }
 
 func TestOpen_SuccessPing(t *testing.T) {

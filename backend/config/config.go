@@ -26,6 +26,8 @@ import (
 //
 // 字段对外暴露以便测试与 main.go 直接读取；
 // 任何打印或日志都不应输出 Config / 包含其中的密码哈希。
+//
+// Config 承载后端进程运行需要的数据库、超管、静态目录和 Cookie 配置。
 type Config struct {
 	// DatabaseURL 是 PostgreSQL 连接字符串，
 	// 形如：postgresql://user:password@host:5432/dbname?sslmode=disable。
@@ -35,12 +37,13 @@ type Config struct {
 	SuperAdminUsername string
 
 	// SuperAdminPasswordHash 是超级管理员密码的存储哈希，
-	// 推荐格式：sha256:<salt>:<hash>。
+	// 必须是 bcrypt cost=12 完整字符串（$2a$12$...）。
+	// 启动期 user.BootstrapSuperAdmin 会用 user.ValidatePasswordHash 强校验。
 	SuperAdminPasswordHash string
+	StaticDir              string
 
-	// StaticDir 是前端构建产物所在目录；留空时由 main.go 用解析可执行文件
-	// 同级目录的 web/ 作为默认值，便于单二进制内置静态资源。
-	StaticDir string
+	// SessionCookieSecure 默认为 true；仅在明确使用 HTTP 时配置为 false。
+	SessionCookieSecure bool
 
 	// EnvFile 是实际加载的 .env 路径，可能为空（表示完全依赖环境变量）。
 	EnvFile string
@@ -64,8 +67,22 @@ func Load(envFile string) (*Config, error) {
 		DatabaseURL:            pickValue("DATABASE_URL", fileKeys),
 		SuperAdminUsername:     pickValue("SUPER_ADMIN_USERNAME", fileKeys),
 		SuperAdminPasswordHash: pickValue("SUPER_ADMIN_PASSWORD_HASH", fileKeys),
-		StaticDir:              pickValue("XPH_STATIC_DIR", fileKeys),
+		StaticDir:              pickValue("STATIC_DIR", fileKeys),
+		SessionCookieSecure:    true,
 		EnvFile:                envFile,
+	}
+	if strings.TrimSpace(c.StaticDir) == "" {
+		c.StaticDir = "/app/web"
+	}
+	if raw, ok := pickOptionalValue("SESSION_COOKIE_SECURE", fileKeys); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "true":
+			c.SessionCookieSecure = true
+		case "false":
+			c.SessionCookieSecure = false
+		default:
+			return nil, fmt.Errorf("SESSION_COOKIE_SECURE 只能是 true 或 false")
+		}
 	}
 
 	if err := c.validate(); err != nil {
@@ -107,6 +124,14 @@ func pickValue(key string, file map[string]string) string {
 		return v
 	}
 	return file[key]
+}
+
+func pickOptionalValue(key string, file map[string]string) (string, bool) {
+	if v, ok := os.LookupEnv(key); ok {
+		return v, true
+	}
+	v, ok := file[key]
+	return v, ok
 }
 
 // readEnvFile 逐行解析 .env 文件。
@@ -159,7 +184,7 @@ func parseEnvReader(r io.Reader, out map[string]string) (map[string]string, erro
 //   - 行首允许 "export "
 //   - 行内注释 "# foo" 不支持（避免误杀 URL 里的 #）
 //   - 右侧空白会被 trim
-//   - VALUE 若首尾都是 " 则去引号，"\\" 与 "\"" 转义被还原
+//   - VALUE 支持单引号字面量和双引号转义值
 func parseEnvLine(line string) (key, value string, ok bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -180,8 +205,11 @@ func parseEnvLine(line string) (key, value string, ok bool) {
 	return key, value, true
 }
 
-// unquote 处理双引号包围 / 转义。输入已 trim 两侧空白。
+// unquote 处理单引号字面量和双引号转义值。输入已 trim 两侧空白。
 func unquote(s string) string {
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1]
+	}
 	const quote = '"'
 	if len(s) >= 2 && s[0] == quote && s[len(s)-1] == quote {
 		body := s[1 : len(s)-1]

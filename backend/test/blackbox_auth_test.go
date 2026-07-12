@@ -34,10 +34,28 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "blackbox_auth_test: bootstrap 失败: %v\n", err)
 		os.Exit(1)
 	}
+	// 共享一个合法 bcrypt cost=12 测试哈希：
+	//   - 给直接 INSERT users.password_hash 的测试用
+	//   - 给 config.EnvSuperAdminPasswordHash 用（BootstrapSuperAdmin 强校验 cost=12）
+	// bcrypt 较慢（~250ms/次），所以 TestMain 只生成一次，所有 Test* 共享。
+	var err error
+	testBcryptHash, err = user.HashPassword("test-password")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "blackbox_auth_test: 生成 bcrypt 测试哈希失败: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	dbtest.Teardown()
 	os.Exit(code)
 }
+
+// testBcryptHash 是 TestMain 启动时一次性生成的合法 bcrypt cost=12 哈希。
+//
+// 所有"需要往 users.password_hash 写入合法哈希"的测试都直接用这个常量：
+//   - 既保证所有写入的 hash 都能通过 user.ValidatePasswordHash
+//   - 又避免每个 Test* 各自调 user.HashPassword（bcrypt 单次 ~250ms）
+//   - 不依赖任何固定字符串，未来 password 算法再演进也不会失效
+var testBcryptHash string
 
 // ---------- 测试工具 ----------
 
@@ -320,7 +338,7 @@ func TestBlackbox_NonAssignableRoleBindingsCleanedUp(t *testing.T) {
 	// 创建测试 user + group
 	username := uniqueName(t, "u_clean")
 	t.Cleanup(func() { cleanupUser(t, username) })
-	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2)", username, "hash"); err != nil {
+	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2)", username, testBcryptHash); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	var userID int64
@@ -408,7 +426,7 @@ func TestBlackbox_AnonymousNotAssignable(t *testing.T) {
 	username := uniqueName(t, "u_anon_reject")
 	t.Cleanup(func() { cleanupUser(t, username) })
 
-	u, err := userRepo.CreateUser(ctx, username, "hash")
+	u, err := userRepo.CreateUser(ctx, username, "test-password")
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -496,7 +514,7 @@ func TestBlackbox_NewUserJoinsDefaultUserGroup(t *testing.T) {
 	username := uniqueName(t, "u_new")
 	t.Cleanup(func() { cleanupUser(t, username) })
 
-	if _, err := userRepo.CreateUser(ctx, username, "hash"); err != nil {
+	if _, err := userRepo.CreateUser(ctx, username, "test-password"); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	u, err := userRepo.GetByUsername(ctx, username)
@@ -525,7 +543,7 @@ func TestBlackbox_UserAllowOverride(t *testing.T) {
 	username := uniqueName(t, "u_allow")
 	t.Cleanup(func() { cleanupUser(t, username) })
 
-	if _, err := userRepo.CreateUser(ctx, username, "hash"); err != nil {
+	if _, err := userRepo.CreateUser(ctx, username, "test-password"); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	u, err := userRepo.GetByUsername(ctx, username)
@@ -561,7 +579,7 @@ func TestBlackbox_UserDenyOverride(t *testing.T) {
 	username := uniqueName(t, "u_deny")
 	t.Cleanup(func() { cleanupUser(t, username) })
 
-	if _, err := userRepo.CreateUser(ctx, username, "hash"); err != nil {
+	if _, err := userRepo.CreateUser(ctx, username, "test-password"); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	u, err := userRepo.GetByUsername(ctx, username)
@@ -615,7 +633,7 @@ func TestBlackbox_QuotaPriority(t *testing.T) {
 	// 准备 user1：无 user quota，加入 high group → 应得 high
 	user1 := uniqueName(t, "u1")
 	t.Cleanup(func() { cleanupUser(t, user1) })
-	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2)", user1, "hash"); err != nil {
+	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2)", user1, testBcryptHash); err != nil {
 		t.Fatalf("insert u1: %v", err)
 	}
 	var u1ID int64
@@ -637,7 +655,7 @@ func TestBlackbox_QuotaPriority(t *testing.T) {
 	// 准备 user2：设 user_own quota → 应得 own
 	user2 := uniqueName(t, "u2")
 	t.Cleanup(func() { cleanupUser(t, user2) })
-	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash, quota_profile_id) VALUES ($1, $2, $3)", user2, "hash", quotaUserOwn.ID); err != nil {
+	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash, quota_profile_id) VALUES ($1, $2, $3)", user2, testBcryptHash, quotaUserOwn.ID); err != nil {
 		t.Fatalf("insert u2: %v", err)
 	}
 	var u2ID int64
@@ -656,7 +674,7 @@ func TestBlackbox_QuotaPriority(t *testing.T) {
 	// 准备 user3：无 user quota、无 group quota → 应得 default_user
 	user3 := uniqueName(t, "u3")
 	t.Cleanup(func() { cleanupUser(t, user3) })
-	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2)", user3, "hash"); err != nil {
+	if _, err := dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash) VALUES ($1, $2)", user3, testBcryptHash); err != nil {
 		t.Fatalf("insert u3: %v", err)
 	}
 	var u3ID int64
@@ -695,7 +713,7 @@ func TestBlackbox_SuperAdmin(t *testing.T) {
 
 	username := uniqueName(t, "admin")
 	config.EnvSuperAdmin = username
-	config.EnvSuperAdminPasswordHash = "hash"
+	config.EnvSuperAdminPasswordHash = testBcryptHash
 
 	if err := user.BootstrapSuperAdmin(context.Background(), dbtest.Pool()); err != nil {
 		t.Fatalf("BootstrapSuperAdmin: %v", err)

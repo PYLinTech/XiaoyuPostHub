@@ -18,6 +18,9 @@ import (
 //   - 账号存在 + 哈希不一致 → UPDATE password_hash 直接覆盖
 //   - 账号存在 + 哈希一致 → 不动
 //
+// 哈希格式：bcrypt cost=12（用 ValidatePasswordHash 在入口校验）。
+// 不再支持旧的 sha256:<salt>:<hash>，启动期直接报错。
+//
 // **关键**：超管账号**不**分配任何 role、**不**加入 default_user group、**不**保留
 // 任何 user_permission_overrides。如果该 username 之前是普通用户（带残留关系），
 // 升级为超管时**全部清掉**。所有操作在**单事务**里完成，避免中途失败导致半成品。
@@ -29,6 +32,12 @@ import (
 func BootstrapSuperAdmin(ctx context.Context, pool *pgxpool.Pool) error {
 	name := config.EnvSuperAdmin
 	hash := config.EnvSuperAdminPasswordHash
+
+	// 入口即校验 .env 中的 password_hash 是合法 bcrypt cost=12；
+	// 不合法直接拒绝启动，避免把错误格式写进 DB。
+	if err := ValidatePasswordHash(hash); err != nil {
+		return fmt.Errorf("SUPER_ADMIN_PASSWORD_HASH 无效：%w", err)
+	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -86,6 +95,9 @@ func BootstrapSuperAdmin(ctx context.Context, pool *pgxpool.Pool) error {
 				PasswordHash: hash,
 			}); err != nil {
 				return fmt.Errorf("同步超管密码哈希失败: %w", err)
+			}
+			if err := qtx.DeleteUserSessionsByUserID(ctx, existing.ID); err != nil {
+				return fmt.Errorf("使超管旧会话失效失败: %w", err)
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return fmt.Errorf("commit: %w", err)

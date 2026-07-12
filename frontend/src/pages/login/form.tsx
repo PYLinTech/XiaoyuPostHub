@@ -33,8 +33,6 @@ export default function LoginForm() {
     } else {
       removeLoginParams();
     }
-    // 记录登录状态
-    localStorage.setItem('userStatus', 'login');
     // 跳转首页
     window.location.href = '/';
   }
@@ -51,6 +49,10 @@ export default function LoginForm() {
         } else {
           setErrorMessage(msg || t['login.form.login.errMsg']);
         }
+      })
+      .catch((error) => {
+        const msg = error?.response?.data?.msg;
+        setErrorMessage(msg || t['login.form.login.errMsg']);
       })
       .finally(() => {
         setLoading(false);

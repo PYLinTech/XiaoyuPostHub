@@ -19,6 +19,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/role"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/test/dbtest"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -31,10 +32,23 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "quota_test: bootstrap 失败: %v\n", err)
 		os.Exit(1)
 	}
+	// 共享一个合法 bcrypt cost=12 测试哈希：
+	//   - 直接 INSERT users.password_hash 时使用；
+	//   - 避免后续 password 算法演进时硬编码字符串失效。
+	// bcrypt 较慢（~250ms/次），TestMain 只生成一次。
+	var err error
+	testBcryptHash, err = user.HashPassword("test-password")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "quota_test: 生成 bcrypt 测试哈希失败: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	dbtest.Teardown()
 	os.Exit(code)
 }
+
+// testBcryptHash 是 TestMain 启动时一次性生成的合法 bcrypt cost=12 哈希。
+var testBcryptHash string
 
 func uniqueName(t *testing.T, prefix string) string {
 	t.Helper()
@@ -180,7 +194,7 @@ func TestGetEffectiveQuotaByUser_PriorityUserOwn(t *testing.T) {
 
 	// 准备 user，绑 high group + user_own quota
 	username := uniqueName(t, "u")
-	_, err = dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash, quota_profile_id) VALUES ($1, $2, $3)", username, "hash", quotaUserOwn.ID)
+	_, err = dbtest.Pool().Exec(ctx, "INSERT INTO users (username, password_hash, quota_profile_id) VALUES ($1, $2, $3)", username, testBcryptHash, quotaUserOwn.ID)
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

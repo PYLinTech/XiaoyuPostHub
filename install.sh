@@ -8,7 +8,7 @@
 #   ./install.sh --stop              停止服务，保留数据
 #   ./install.sh --restart           重启服务
 #   ./install.sh --uninstall         卸载，保留数据卷
-#   ./install.sh --uninstall --purge 卸载，并删除数据卷
+#   ./install.sh --uninstall --purge 卸载并删除数据卷
 #
 # 环境变量：
 #   XIAOYUPOSTHUB_HOME=/srv/xiaoyuposthub ./install.sh
@@ -21,7 +21,6 @@ PROJECT_NAME="xiaoyuposthub"
 CONTAINER_NAME="XiaoyuPostHub"
 IMAGE_DEFAULT="pylintech/xiaoyuposthub:latest"
 PORT_DEFAULT="8080"
-DATA_VOLUME="xiaoyuposthub_data"
 
 INSTALL_DIR="${XIAOYUPOSTHUB_HOME:-/opt/xiaoyuposthub}"
 COMPOSE_FILE="${INSTALL_DIR}/compose.yaml"
@@ -51,10 +50,10 @@ usage() {
   ./install.sh                     安装或更新 ${APP_NAME}
   ./install.sh --logs              查看日志
   ./install.sh --status            查看状态
-  ./install.sh --stop              停止服务，保留数据
+  ./install.sh --stop              停止服务
   ./install.sh --restart           重启服务
   ./install.sh --uninstall         卸载，保留数据卷
-  ./install.sh --uninstall --purge 卸载，并删除数据卷
+  ./install.sh --uninstall --purge 卸载并删除数据卷
   ./install.sh -h|--help           查看帮助
 
 环境变量：
@@ -64,7 +63,6 @@ usage() {
 默认值：
   访问端口：${PORT_DEFAULT}
   配置文件：${ENV_FILE}
-  数据卷：${DATA_VOLUME}
 EOF_USAGE
 }
 
@@ -74,6 +72,22 @@ warn() { printf "%b%s%b\n" "${YELLOW}" "$*" "${RESET}"; }
 die() {
     printf "%b错误：%s%b\n" "${RED}" "$*" "${RESET}" >&2
     exit 1
+}
+
+run_step() {
+    local title="$1"
+    local log=""
+    shift
+    log="$(mktemp)"
+    info "执行：${title}"
+    if ! "$@" >"${log}" 2>&1; then
+        printf "%b错误：%s失败%b\n" "${RED}" "${title}" "${RESET}" >&2
+        sed 's/^/    /' "${log}" >&2
+        rm -f "${log}"
+        exit 1
+    fi
+    rm -f "${log}"
+    ok "完成：${title}"
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -142,8 +156,7 @@ require_compose_file() {
 
 prepare_install_dir() {
     if [[ ! -d "${INSTALL_DIR}" ]]; then
-        info "创建目录：${INSTALL_DIR}"
-        run_privileged mkdir -p "${INSTALL_DIR}"
+        run_step "创建安装目录" run_privileged mkdir -p "${INSTALL_DIR}"
     fi
 
     if [[ "$(id -u)" -ne 0 && ! -w "${INSTALL_DIR}" && -n "$(command -v sudo || true)" ]]; then
@@ -158,7 +171,6 @@ write_compose_file() {
 services:
   xiaoyuposthub:
     image: ${XIAOYUPOSTHUB_IMAGE:-pylintech/xiaoyuposthub:latest}
-    pull_policy: always
     container_name: XiaoyuPostHub
     restart: unless-stopped
 
@@ -167,12 +179,6 @@ services:
 
     env_file:
       - .env
-
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?请在 .env 中配置 DATABASE_URL}
-      SUPER_ADMIN_USERNAME: ${SUPER_ADMIN_USERNAME:?请在 .env 中配置 SUPER_ADMIN_USERNAME}
-      SUPER_ADMIN_PASSWORD_HASH: ${SUPER_ADMIN_PASSWORD_HASH:?请在 .env 中配置 SUPER_ADMIN_PASSWORD_HASH}
-      DATA_DIR: /data
 
     volumes:
       - xiaoyuposthub_data:/data
@@ -183,38 +189,17 @@ services:
 volumes:
   xiaoyuposthub_data:
     name: xiaoyuposthub_data
-    external: true
 EOF_COMPOSE
 }
 
-env_value() {
+# env_quote 使用单引号字面量，避免 bcrypt 中的 $ 被 Compose 插值。
+env_quote() {
     local value="$1"
-
-    if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
-        die ".env 配置值不能包含换行"
-    fi
-
-    printf "%s" "${value}"
+    [[ "${value}" != *"'"* ]] || die ".env 配置值不能包含单引号"
+    printf "'%s'" "${value}"
 }
 
-hash_password() {
-    local password="$1"
-    local salt=""
-    local hash=""
-
-    if has_cmd openssl; then
-        salt="$(openssl rand -hex 16)"
-        hash="$(printf "%s:%s" "${salt}" "${password}" | openssl dgst -sha256 -binary | od -An -vtx1 | tr -d ' \n')"
-    elif [[ -r /dev/urandom ]] && has_cmd od && has_cmd sha256sum; then
-        salt="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-        hash="$(printf "%s:%s" "${salt}" "${password}" | sha256sum | awk '{print $1}')"
-    else
-        die "无法生成密码哈希，请安装 openssl 或 sha256sum"
-    fi
-
-    printf "sha256:%s:%s" "${salt}" "${hash}"
-}
-
+# prompt_required 通用必填项交互读取。
 prompt_required() {
     local name="$1"
     local label="$2"
@@ -229,6 +214,7 @@ prompt_required() {
     printf "%s" "${value}"
 }
 
+# prompt_default 带默认值交互读取；空输入时使用默认值。
 prompt_default() {
     local label="$1"
     local default_value="$2"
@@ -239,28 +225,23 @@ prompt_default() {
     printf "%s" "${value:-${default_value}}"
 }
 
-prompt_password() {
-    local first=""
-    local second=""
-
+prompt_bcrypt_hash() {
+    local image="$1" first="" second="" hash=""
     while true; do
-        printf "管理员密码: " >&2
-        IFS= read -r -s first
-        printf "\n" >&2
-
+        printf "管理员密码: " >&2; IFS= read -r -s first; printf "\n" >&2
         [[ -n "${first}" ]] || { warn "密码不能为空" >&2; continue; }
-
-        printf "确认密码: " >&2
-        IFS= read -r -s second
-        printf "\n" >&2
-
+        printf "确认密码: " >&2; IFS= read -r -s second; printf "\n" >&2
         [[ "${first}" == "${second}" ]] || { warn "两次密码不一致" >&2; continue; }
-
-        printf "%s" "${first}"
-        return 0
+        hash="$(printf %s "${first}" | docker run --rm -i -e XPH_INTERNAL_HASH_PASSWORD=true --entrypoint /app/xph-backend "${image}")" || die "生成 bcrypt 哈希失败"
+        unset first second
+        [[ -n "${hash}" ]] || die "生成 bcrypt 哈希失败"
+        printf "%s" "${hash}"; return 0
     done
 }
 
+# create_env_file 首次运行时生成部署配置。
+#
+# 配置值统一使用单引号字面量。
 create_env_file() {
     [[ -f "${ENV_FILE}" ]] && return 0
     [[ -t 0 ]] || die "未找到 .env，且当前不是交互终端"
@@ -269,53 +250,42 @@ create_env_file() {
 
     local database_url
     local admin_username
-    local admin_password
     local admin_password_hash
-    local port
-    local image
+    local host_port
+    local image_name
 
     database_url="$(prompt_required "DATABASE_URL" "数据库地址 DATABASE_URL")"
     admin_username="$(prompt_default "管理员账号" "admin")"
-    admin_password="$(prompt_password)"
-    admin_password_hash="$(hash_password "${admin_password}")"
-    unset admin_password
-    port="$(prompt_default "访问端口" "${PORT_DEFAULT}")"
-    image="${XIAOYUPOSTHUB_IMAGE:-${IMAGE_DEFAULT}}"
+    image_name="${XIAOYUPOSTHUB_IMAGE:-${IMAGE_DEFAULT}}"
+    admin_password_hash="$(prompt_bcrypt_hash "${image_name}")"
+    host_port="$(prompt_default "对外暴露端口" "${PORT_DEFAULT}")"
 
     cat > "${ENV_FILE}" <<EOF_ENV
-# XiaoyuPostHub 运行配置
+# XiaoyuPostHub 配置
 
-# 数据库连接地址：包含协议、用户、密码、地址、端口、数据库名等完整信息。
-# PostgreSQL 示例：postgres://user:password@host:5432/database?sslmode=disable
-# MySQL 示例：user:password@tcp(host:3306)/database?charset=utf8mb4&parseTime=True&loc=Local
-DATABASE_URL=$(env_value "${database_url}")
+# 数据库
+DATABASE_URL=$(env_quote "${database_url}")
 
-# 超级管理员账号
-SUPER_ADMIN_USERNAME=$(env_value "${admin_username}")
+# 超级管理员
+SUPER_ADMIN_USERNAME=$(env_quote "${admin_username}")
+SUPER_ADMIN_PASSWORD_HASH=$(env_quote "${admin_password_hash}")
 
-# 超级管理员密码
-# 格式：sha256:<salt>:<hash>
-# 推荐使用 install.sh 首次运行时交互生成；不要手写明文密码。
-SUPER_ADMIN_PASSWORD_HASH=$(env_value "${admin_password_hash}")
+# Docker
+XIAOYUPOSTHUB_IMAGE=$(env_quote "${image_name}")
+XIAOYUPOSTHUB_PORT=$(env_quote "${host_port}")
 
-# 可选：手动指定使用的镜像
-XIAOYUPOSTHUB_IMAGE=$(env_value "${image}")
+# 前端
+STATIC_DIR=/app/web
 
-# 可选：指定宿主机访问端口
-XIAOYUPOSTHUB_PORT=$(env_value "${port}")
+# HTTPS 使用 true，直接 HTTP 使用 false
+SESSION_COOKIE_SECURE=true
 EOF_ENV
 
     chmod 600 "${ENV_FILE}" || true
     ok "配置已创建：${ENV_FILE}"
 }
 
-prepare_volume() {
-    if ! docker volume inspect "${DATA_VOLUME}" >/dev/null 2>&1; then
-        info "创建数据卷：${DATA_VOLUME}"
-        docker volume create "${DATA_VOLUME}" >/dev/null
-    fi
-}
-
+# remove_conflicting_container 删除旧容器（不在本 compose 项目下的同名容器）。
 remove_conflicting_container() {
     local id=""
     local project=""
@@ -326,48 +296,62 @@ remove_conflicting_container() {
     project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "${id}" 2>/dev/null || true)"
     [[ "${project}" == "${PROJECT_NAME}" ]] && return 0
 
-    warn "发现同名旧容器，将重新创建，数据保留"
+    warn "发现同名旧容器，将重新创建"
     docker rm -f "${CONTAINER_NAME}" >/dev/null
 }
 
-current_port() {
+read_env_value() {
+    local key="$1"
     local line=""
+    [[ -f "${ENV_FILE}" ]] || return 0
+    line="$(grep -E "^${key}=" "${ENV_FILE}" | tail -n 1 || true)"
+    [[ -n "${line}" ]] || return 0
+    line="${line#*=}"
+    line="${line%\'}"; line="${line#\'}"
+    line="${line%\"}"; line="${line#\"}"
+    printf "%s" "${line}"
+}
 
-    if [[ -f "${ENV_FILE}" ]]; then
-        line="$(grep -E '^XIAOYUPOSTHUB_PORT=' "${ENV_FILE}" | tail -n 1 || true)"
-        if [[ -n "${line}" ]]; then
-            line="${line#XIAOYUPOSTHUB_PORT=}"
-            line="${line%\'}"; line="${line#\'}"
-            line="${line%\"}"; line="${line#\"}"
-            printf "%s" "${line}"
-            return 0
-        fi
-    fi
+write_env_value() {
+    local key="$1"
+    local value="$2"
+    local tmp=""
+    [[ -f "${ENV_FILE}" ]] || return 0
+    tmp="$(mktemp "${ENV_FILE}.XXXXXX")"
+    awk -v key="${key}" -v value="${value}" '
+        BEGIN { quote=sprintf("%c", 39) }
+        index($0, key "=") == 1 { print key "=" quote value quote; found=1; next }
+        { print }
+        END { if (!found) print key "=" quote value quote }
+    ' "${ENV_FILE}" > "${tmp}"
+    chmod 600 "${tmp}"
+    mv "${tmp}" "${ENV_FILE}"
+}
 
-    printf "%s" "${PORT_DEFAULT}"
+current_port() {
+    local port=""
+    port="$(read_env_value XIAOYUPOSTHUB_PORT)"
+    printf "%s" "${port:-${PORT_DEFAULT}}"
 }
 
 install_or_update() {
-    local image="${XIAOYUPOSTHUB_IMAGE:-${IMAGE_DEFAULT}}"
+    local configured_image=""
+    local image=""
 
     check_docker
     prepare_install_dir
     write_compose_file
+    configured_image="$(read_env_value XIAOYUPOSTHUB_IMAGE)"
+    image="${XIAOYUPOSTHUB_IMAGE:-${configured_image:-${IMAGE_DEFAULT}}}"
+    export XIAOYUPOSTHUB_IMAGE="${image}"
+    run_step "拉取镜像 ${image}" docker pull "${image}"
     create_env_file
-    prepare_volume
+    write_env_value XIAOYUPOSTHUB_IMAGE "${image}"
     remove_conflicting_container
 
-    info "拉取镜像：${image}"
-    compose pull
+    run_step "启动服务" compose up -d --remove-orphans
 
-    info "启动服务"
-    compose up -d --remove-orphans
-
-    ok "${APP_NAME} 已启动"
-    printf "访问地址：http://localhost:%s\n" "$(current_port)"
-    printf "安装目录：%s\n" "${INSTALL_DIR}"
-    printf "配置文件：%s\n" "${ENV_FILE}"
-    printf "数据卷：%s\n" "${DATA_VOLUME}"
+    ok "完成：${APP_NAME} 已启动（http://localhost:$(current_port)）"
 }
 
 show_logs() {
@@ -379,45 +363,42 @@ show_logs() {
 show_status() {
     check_docker
     require_compose_file
-    compose ps
+    local status=""
+    status="$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
+    [[ -n "${status}" ]] || die "容器不存在：${CONTAINER_NAME}"
+    printf "容器：%s\n状态：%s\n端口：%s\n" "${CONTAINER_NAME}" "${status}" "$(current_port)"
 }
 
 stop_service() {
     check_docker
     require_compose_file
-    compose down --remove-orphans
-    ok "服务已停止，数据已保留"
+    run_step "停止服务" compose down --remove-orphans
 }
 
 restart_service() {
     check_docker
     require_compose_file
-    compose restart
-    ok "服务已重启"
+    run_step "重启服务" compose restart
 }
 
 uninstall_service() {
     check_docker
 
     if [[ -f "${COMPOSE_FILE}" ]]; then
-        compose down --remove-orphans || true
+        if [[ "${PURGE}" == true ]]; then
+            run_step "停止服务并删除数据卷" compose down --remove-orphans --volumes
+        else
+            run_step "停止服务" compose down --remove-orphans
+        fi
     else
         docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
     fi
 
-    if [[ "${PURGE}" == true ]]; then
-        warn "删除数据卷：${DATA_VOLUME}"
-        docker volume rm "${DATA_VOLUME}" >/dev/null 2>&1 || true
-    else
-        warn "数据卷已保留：${DATA_VOLUME}"
-    fi
-
     if [[ -d "${INSTALL_DIR}" ]]; then
-        info "删除目录：${INSTALL_DIR}"
-        run_privileged rm -rf "${INSTALL_DIR}"
+        run_step "删除安装目录" run_privileged rm -rf "${INSTALL_DIR}"
     fi
 
-    ok "卸载完成"
+    ok "完成：卸载"
 }
 
 main() {
