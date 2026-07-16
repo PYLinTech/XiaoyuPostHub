@@ -87,14 +87,30 @@ func Teardown() {
 func requireDBURL() string {
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url != "" {
-		return url
+		return requireDedicatedTestDatabase(url)
 	}
 	url = readTestEnv("TEST_DATABASE_URL")
 	if url == "" {
 		fmt.Fprintln(os.Stderr, "dbtest: 未找到 TEST_DATABASE_URL，测试 fail-fast")
 		os.Exit(1)
 	}
-	return url
+	return requireDedicatedTestDatabase(url)
+}
+
+// 测试初始化会删除整个 public schema，因此数据库名必须明确带 test。
+// 这道硬保护优先于便利性，防止误把应用数据库配置成测试数据库。
+func requireDedicatedTestDatabase(rawURL string) string {
+	parsed, err := pgxpool.ParseConfig(rawURL)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "dbtest: TEST_DATABASE_URL 格式无效")
+		os.Exit(1)
+	}
+	name := strings.ToLower(parsed.ConnConfig.Database)
+	if !strings.Contains(name, "test") {
+		fmt.Fprintf(os.Stderr, "dbtest: 拒绝清空非测试数据库 %q；数据库名必须包含 test\n", parsed.ConnConfig.Database)
+		os.Exit(1)
+	}
+	return rawURL
 }
 
 // readTestEnv 读取 backend/.test.env。

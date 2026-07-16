@@ -26,12 +26,21 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at
     ON user_sessions(expires_at);
 
-CREATE TABLE IF NOT EXISTS login_failures (
-    failure_key TEXT PRIMARY KEY,
-    failure_count INTEGER NOT NULL DEFAULT 0,
-    locked_until TIMESTAMPTZ,
-    last_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+-- 一次失败只记录一行，同时保留账号和来源 IP 两个限流维度。旧结构按两个
+-- failure_key 写两行高度重复数据，因此直接清除旧的瞬时限流状态后迁移。
+DROP TABLE IF EXISTS login_failures;
+
+CREATE TABLE IF NOT EXISTS login_failure_events (
+    id          BIGSERIAL   PRIMARY KEY,
+    account_key TEXT        NOT NULL,
+    client_ip   TEXT        NOT NULL,
+    failed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT login_failure_events_account_not_blank CHECK (BTRIM(account_key) <> ''),
+    CONSTRAINT login_failure_events_ip_not_blank CHECK (BTRIM(client_ip) <> '')
 );
 
-CREATE INDEX IF NOT EXISTS idx_login_failures_last_failed_at
-    ON login_failures(last_failed_at);
+CREATE INDEX IF NOT EXISTS login_failure_events_account_idx
+    ON login_failure_events(account_key, failed_at DESC);
+CREATE INDEX IF NOT EXISTS login_failure_events_ip_idx
+    ON login_failure_events(client_ip, failed_at DESC);

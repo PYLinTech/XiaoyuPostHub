@@ -7,6 +7,7 @@
 # 用法：
 #   ./build.sh
 #   ./build.sh --race
+#   ./build.sh --integration-tests
 #   ./build.sh --arch amd64
 #   ./build.sh --arch arm64
 #   ./build.sh --os linux --arch amd64
@@ -22,6 +23,8 @@ BINARY_NAME="xph-backend"
 TARGET_GOOS="${GOOS:-}"
 TARGET_GOARCH="${GOARCH:-}"
 RACE_ENABLED=false
+INTEGRATION_TESTS_REQUIRED=false
+INTEGRATION_TESTS_ENABLED=false
 OUTPUT_PATH=""
 
 cd "${SCRIPT_DIR}"
@@ -45,6 +48,7 @@ usage() {
 用法：
   ./build.sh
   ./build.sh --race
+  ./build.sh --integration-tests
   ./build.sh --arch amd64
   ./build.sh --arch arm64
   ./build.sh --os linux --arch amd64
@@ -55,12 +59,14 @@ usage() {
   --os <linux|darwin|windows>   目标系统，默认当前系统
   --arch <amd64|arm64>          目标架构，默认当前架构；也支持 1 表示 amd64、2 表示 arm64
   --race                        启用竞态检测，仅支持当前系统和当前架构
+  --integration-tests           强制执行 PostgreSQL 集成测试；缺少测试数据库时失败
   -h, --help                    查看帮助
 
 说明：
   正常构建只显示阶段进度；命令详细输出会被隐藏。
   如果某一步失败，会自动打印该步骤的错误日志。
   参数统一使用空格形式，例如：--os linux --arch amd64
+  检测到 TEST_DATABASE_URL 或 backend/.test.env 时会自动执行数据库集成测试。
 EOF_USAGE
 }
 
@@ -114,6 +120,10 @@ parse_args() {
         case "$1" in
             --race)
                 RACE_ENABLED=true
+                shift
+                ;;
+            --integration-tests)
+                INTEGRATION_TESTS_REQUIRED=true
                 shift
                 ;;
             --os)
@@ -225,6 +235,28 @@ check_race() {
     fi
 }
 
+configure_integration_tests() {
+    if [[ -n "${TEST_DATABASE_URL:-}" || -f "${SCRIPT_DIR}/.test.env" ]]; then
+        INTEGRATION_TESTS_ENABLED=true
+        return 0
+    fi
+
+    if ${INTEGRATION_TESTS_REQUIRED}; then
+        fail "缺少测试数据库配置：请设置 TEST_DATABASE_URL 或创建 backend/.test.env"
+    fi
+}
+
+run_tests() {
+    local -a args=(go test -p=1)
+
+    if ${INTEGRATION_TESTS_ENABLED}; then
+        args+=(-tags=integration)
+    fi
+    args+=(./...)
+
+    run_command 4 5 "执行单元测试" "go-test" "${args[@]}"
+}
+
 build_binary() {
     mkdir -p bin
 
@@ -266,16 +298,22 @@ main() {
 
     validate_goos "${TARGET_GOOS}"
     check_race
+    configure_integration_tests
 
     printf "%b后端构建配置%b\n" "${BLUE}" "${RESET}"
     printf "  目标系统：%s\n" "${TARGET_GOOS}"
     printf "  目标架构：%s\n" "${TARGET_GOARCH}"
+    if ${INTEGRATION_TESTS_ENABLED}; then
+        printf "  数据库测试：启用\n"
+    else
+        printf "  数据库测试：跳过（未配置测试数据库）\n"
+    fi
 
 run_command 1 5 "下载 Go 依赖" "go-mod-download" go mod download
 	run_command 2 5 "生成 sqlc 代码" "sqlc-generate" sqlc generate
 	run_command 3 5 "执行代码检查" "go-vet" go vet ./...
-	# -p=1 串行跑包：dbtest 每个包都 reset schema 并发跑会互踩
-	run_command 4 5 "执行单元测试" "go-test" go test -p=1 ./...
+	# -p=1 串行跑包：启用 integration 时，各包会重置测试 schema，不能并发。
+	run_tests
 	build_binary
 
     [[ -f "${OUTPUT_PATH}" ]] || fail "未找到后端产物：${OUTPUT_PATH}"

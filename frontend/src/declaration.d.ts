@@ -1,6 +1,6 @@
 declare module '*.svg' {
-  const content: React.FunctionComponent<React.SVGAttributes<SVGElement>>;
-  export default content;
+  const url: string;
+  export default url;
 }
 
 declare module '*.less' {
@@ -10,10 +10,7 @@ declare module '*.less' {
 
 declare module '*/settings.json' {
   const value: {
-    colorWeek: boolean;
-    navbar: boolean;
-    menu: boolean;
-    footer: boolean;
+    theme: 'light' | 'dark';
     themeColor: string;
     menuWidth: number;
   };

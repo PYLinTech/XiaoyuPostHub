@@ -1,0 +1,435 @@
+.page {
+  min-height: 100vh;
+  background: radial-gradient(
+      circle at 18% 0%,
+      rgb(var(--primary-6) / 10%),
+      transparent 34%
+    ),
+    var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--color-border);
+  box-sizing: border-box;
+  background: var(--color-bg-2);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 19px;
+  font-weight: 500;
+
+  img {
+    width: 32px;
+    height: 32px;
+    margin-right: 9px;
+    object-fit: contain;
+  }
+
+  span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+
+.header-label {
+  color: var(--color-text-3);
+}
+
+.main {
+  width: min(960px, calc(100% - 32px));
+  min-height: calc(100vh - 128px);
+  margin: 0 auto;
+  padding: 44px 0 28px;
+  box-sizing: border-box;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding-top: 120px;
+}
+
+.hero {
+  :global(.arco-card-body) {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 28px;
+  }
+}
+
+.resource-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 68px;
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  color: rgb(var(--primary-6));
+  background: rgb(var(--primary-1));
+  font-size: 34px;
+}
+
+.resource-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.title {
+  margin: 0 0 8px !important;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  color: var(--color-text-3);
+  font-size: 13px;
+
+  span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+}
+
+.owner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--color-text-2);
+  font-size: 13px;
+}
+
+.hero-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 10px;
+}
+
+.preview-modal :global(.arco-modal-content) {
+  padding: 0;
+}
+
+.preview-modal :global(.arco-modal-body) {
+  padding: 0;
+  overflow: hidden;
+}
+
+.preview-frame {
+  position: relative;
+  width: 100%;
+  height: min(76vh, 860px);
+  min-height: 520px;
+  overflow: hidden;
+  background: var(--color-fill-1);
+}
+
+.viewer {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.preview-loading,
+.preview-unsupported {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-unsupported {
+  flex-direction: column;
+  gap: 18px;
+  color: var(--color-text-2);
+  font-size: 15px;
+
+  > svg {
+    color: var(--color-text-4);
+    font-size: 46px;
+  }
+}
+
+.password-card {
+  width: min(480px, 100%);
+  margin: 24px auto 0;
+  text-align: center;
+
+  :global(.arco-card-body) {
+    padding: 36px;
+  }
+}
+
+.download-card {
+  width: min(480px, 100%);
+  margin: 44px auto 0;
+  text-align: center;
+
+  :global(.arco-card-body) {
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    padding: 42px 32px;
+  }
+
+  :global(.arco-btn) {
+    margin-top: 24px;
+  }
+}
+
+.download-icon {
+  color: rgb(var(--primary-6));
+  font-size: 42px;
+}
+
+.lock-icon {
+  color: rgb(var(--primary-6));
+  font-size: 38px;
+}
+
+.password-form {
+  display: flex;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.password-error {
+  margin-top: 10px;
+  color: rgb(var(--red-6));
+  font-size: 13px;
+}
+
+.content,
+.progress {
+  margin-top: 18px;
+}
+
+.progress {
+  :global(.arco-card-body) {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    align-items: center;
+    gap: 16px;
+  }
+}
+
+.file-list {
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+}
+
+.folder-breadcrumb {
+  margin-bottom: 14px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 46px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--color-border-2);
+  box-sizing: border-box;
+
+  &:last-child {
+    border-bottom: 0;
+  }
+}
+
+.folder-row {
+  cursor: pointer;
+}
+
+.file-name {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  gap: 9px;
+
+  > svg {
+    flex: 0 0 auto;
+    color: rgb(var(--primary-6));
+    font-size: 18px;
+  }
+
+  span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+
+.file-size {
+  flex: 0 0 auto;
+  margin-left: 16px;
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
+.empty {
+  padding: 40px;
+  color: var(--color-text-3);
+  text-align: center;
+}
+
+.description {
+  overflow-wrap: anywhere;
+  line-height: 1.75;
+
+  > :first-child {
+    margin-top: 0;
+  }
+
+  > :last-child {
+    margin-bottom: 0;
+  }
+
+  img {
+    max-width: 100%;
+  }
+
+  pre {
+    overflow-x: auto;
+    padding: 14px;
+    border-radius: 6px;
+    background: var(--color-fill-2);
+  }
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  blockquote {
+    margin-left: 0;
+    padding-left: 14px;
+    border-left: 3px solid var(--color-border-3);
+    color: var(--color-text-3);
+  }
+}
+
+.footer {
+  height: 64px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 64px;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .header {
+    height: 56px;
+    padding: 0 16px;
+  }
+
+  .brand {
+    max-width: calc(100vw - 116px);
+    font-size: clamp(15px, 4.5vw, 18px);
+
+    img {
+      width: 28px;
+      height: 28px;
+      margin-right: 7px;
+    }
+  }
+
+  .main {
+    width: calc(100% - 20px);
+    min-height: calc(100vh - 112px);
+    padding-top: 18px;
+  }
+
+  .hero {
+    :global(.arco-card-body) {
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 14px;
+      padding: 18px;
+    }
+
+    .hero-actions,
+    :global(.arco-btn) {
+      width: 100%;
+    }
+
+    .hero-actions {
+      gap: 8px;
+
+      :global(.arco-btn) {
+        flex: 1;
+        width: auto;
+      }
+    }
+  }
+
+  .resource-icon {
+    flex-basis: 50px;
+    width: 50px;
+    height: 50px;
+    border-radius: 13px;
+    font-size: 26px;
+  }
+
+  .resource-info {
+    width: calc(100% - 64px);
+  }
+
+  .meta {
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .password-card {
+    :global(.arco-card-body) {
+      padding: 28px 18px;
+    }
+  }
+
+  .download-card {
+    margin-top: 18px;
+
+    :global(.arco-card-body) {
+      padding: 34px 18px;
+    }
+  }
+
+  .password-form {
+    flex-direction: column;
+  }
+
+  .progress {
+    :global(.arco-card-body) {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+  }
+
+  .file-row {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .preview-frame {
+    height: calc(100dvh - 112px);
+    min-height: 420px;
+  }
+}

@@ -59,14 +59,14 @@ func staticFixture(t *testing.T) string {
 	root := t.TempDir()
 
 	files := map[string]string{
-		"index.html":                "<html><body>Root</body></html>",
-		"settings/profile.html":     "<html><body>SettingsProfile</body></html>",
+		"index.html":                 "<html><body>Root</body></html>",
+		"settings/profile.html":      "<html><body>SettingsProfile</body></html>",
 		"static/js/main.abc12345.js": "console.log('hashed');",
-		"static/js/main.js":         "console.log('plain');",
-		"static/css/main.css":       "body { color: red; }",
-		"static/img/logo.svg":       "<svg></svg>",
-		"static/sub/index.html":     "<html><body>Sub</body></html>",
-		"static/.git/config":        "[core]\n\trepositoryformatversion = 0",
+		"static/js/main.js":          "console.log('plain');",
+		"static/css/main.css":        "body { color: red; }",
+		"static/img/logo.svg":        "<svg></svg>",
+		"static/sub/index.html":      "<html><body>Sub</body></html>",
+		"static/.git/config":         "[core]\n\trepositoryformatversion = 0",
 	}
 
 	for rel, content := range files {
@@ -211,8 +211,11 @@ func TestStatic_SPAFallback_Off(t *testing.T) {
 // 客户端无法构造真正穿越的 URL:
 //   - httptest.NewRequest 会把 URL.Path 里的 .. 自动 normalize 掉
 //   - path.Clean 也会拆掉 ..
+//
 // 因此端到端测试只能验证"normalize 后不存在的路径"——SPA 开启会被 fallback 接住 200,
-//   关闭时才返回 404,这才是"穿越防御"语义。
+//
+//	关闭时才返回 404,这才是"穿越防御"语义。
+//
 // 真正的边界检查走 TestStatic_IsPathTraversal(unexported 方法直接验证)。
 // =====================================================================
 func TestStatic_PathTraversal(t *testing.T) {
@@ -673,8 +676,8 @@ func TestContentTypeFor(t *testing.T) {
 		{".html", "text/html; charset=utf-8"},
 		{".js", "text/javascript; charset=utf-8"},
 		{".css", "text/css; charset=utf-8"},
-		{".json", "application/json"},     // nginx 默认也不加,保持一致
-		{".svg", "image/svg+xml"},         // image/* 不加 charset
+		{".json", "application/json"}, // nginx 默认也不加,保持一致
+		{".svg", "image/svg+xml"},     // image/* 不加 charset
 		{".png", "image/png"},
 		{".unknown", "application/octet-stream"},
 		{"", "application/octet-stream"},

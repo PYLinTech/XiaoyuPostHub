@@ -29,6 +29,13 @@
   align-items: center;
   z-index: 1;
 
+  > img,
+  > svg {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+  }
+
   &-text {
     margin-left: 4px;
     margin-right: 4px;
@@ -80,8 +87,14 @@
   }
 
   &-image {
-    margin-top: 30px;
-    width: 320px;
+    width: 390px;
+    height: 280px;
+    margin-top: 8px;
+    object-fit: contain;
+  }
+
+  &-indicator-static {
+    pointer-events: none;
   }
 }
 
@@ -109,12 +122,50 @@
     color: rgb(var(--red-6));
   }
 
-  &-password-actions {
-    display: flex;
-    justify-content: space-between;
-  }
-
   &-register-btn {
     color: var(--color-text-3) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .container {
+    min-height: 100vh;
+    height: auto;
+
+    .banner {
+      display: none;
+    }
+
+    .content {
+      width: 100%;
+      min-height: 100vh;
+      padding: 76px 20px 64px;
+      box-sizing: border-box;
+    }
+  }
+
+  .logo {
+    top: 18px;
+    left: 18px;
+
+    &-text {
+      color: var(--color-text-1);
+    }
+  }
+
+  .login-form-wrapper {
+    width: min(100%, 360px);
+  }
+}
+
+@media (max-width: 420px) {
+  .container .content {
+    justify-content: flex-start;
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .login-form-wrapper {
+    width: 100%;
   }
 }

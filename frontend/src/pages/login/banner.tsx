@@ -10,31 +10,36 @@ export default function LoginBanner() {
     {
       slogan: t['login.banner.slogan1'],
       subSlogan: t['login.banner.subSlogan1'],
-      image:
-        'http://p1-arco.byteimg.com/tos-cn-i-uwbnlip3yd/6c85f43aed61e320ebec194e6a78d6d3.png~tplv-uwbnlip3yd-png.png',
+      image: '/assets/login/organize.svg',
     },
     {
       slogan: t['login.banner.slogan2'],
       subSlogan: t['login.banner.subSlogan2'],
-      image:
-        'http://p1-arco.byteimg.com/tos-cn-i-uwbnlip3yd/6c85f43aed61e320ebec194e6a78d6d3.png~tplv-uwbnlip3yd-png.png',
+      image: '/assets/login/access.svg',
     },
     {
       slogan: t['login.banner.slogan3'],
       subSlogan: t['login.banner.subSlogan3'],
-      image:
-        'http://p1-arco.byteimg.com/tos-cn-i-uwbnlip3yd/6c85f43aed61e320ebec194e6a78d6d3.png~tplv-uwbnlip3yd-png.png',
+      image: '/assets/login/collaborate.svg',
     },
   ];
   return (
-    <Carousel className={styles.carousel} animation="fade">
+    <Carousel
+      className={styles.carousel}
+      animation="fade"
+      autoPlay={{ interval: 3000, hoverToPause: false }}
+      showArrow="never"
+      indicatorType="dot"
+      indicatorClassName={styles['carousel-indicator-static']}
+    >
       {data.map((item, index) => (
         <div key={`${index}`}>
           <div className={styles['carousel-item']}>
             <div className={styles['carousel-title']}>{item.slogan}</div>
             <div className={styles['carousel-sub-title']}>{item.subSlogan}</div>
             <img
-              alt="banner-image"
+              alt=""
+              aria-hidden="true"
               className={styles['carousel-image']}
               src={item.image}
             />

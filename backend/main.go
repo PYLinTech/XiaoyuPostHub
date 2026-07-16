@@ -1,16 +1,16 @@
-// Package main 启动 XiaoyuPostHub 后端：监听 :8080，
-// 将 /api/* 反向代理到后端 API handler，其余路径反代到同级 web 目录。
+// Package main 启动 XiaoyuPostHub 后端：监听 :8080，提供 API 与前端静态文件。
 //
 // 启动流程：
 //  1. 加载 ENV_FILE 指定的配置文件（默认 deploy/.env）
 //  2. 加载与校验配置（config.Load）
 //  3. 连接 PostgreSQL（db.Open，启动期 Ping 一次）
 //  4. 应用 schema（db.ApplyEmbeddedSchema，SQL 通过 go:embed 编进二进制，幂等）
-//  5. BootstrapAuthCatalog（permissions / 系统 role / quota / user group）
-//  6. BootstrapSuperAdmin（创建/同步超管账号，不加入 default_user group、不分配 role）
-//  7. 构造 permissionRepo / roleRepo / groupRepo / quotaRepo / userRepo
-//  8. 启动 HTTP server（注入 repo）
-//  9. 收到 SIGINT/SIGTERM 优雅关闭
+//  5. 初始化 system_settings 默认行（不覆盖已有配置）
+//  6. BootstrapAuthCatalog（默认配额方案和默认用户组）
+//  7. BootstrapSuperAdmin（创建/同步超管账号并绑定默认用户组）
+//  8. 构造 group / quota / user 等仓库
+//  9. 启动 HTTP server（注入 repo）
+//  10. 收到 SIGINT/SIGTERM 优雅关闭
 package main
 
 import (
@@ -25,16 +25,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub/backend/admin"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/bootstrap"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/config"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
-	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/inbox"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
-	"github.com/PYLinTech/XiaoyuPostHub/backend/role"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/server"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/session"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/sharing"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
@@ -80,7 +84,15 @@ func main() {
 
 	q := sqlcgen.New(database.Pool())
 
-	// 2. BootstrapAuthCatalog：permissions / 系统 role / quota / user group
+	// 2. 初始化程序自身的非敏感运行期配置；已有值不会被默认值覆盖。
+	settingsCtx, settingsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	settingsRepo := systemsetting.NewRepo(q)
+	if err := settingsRepo.EnsureDefaults(settingsCtx); err != nil {
+		settingsCancel()
+		log.Fatalf("初始化系统配置失败：%v", err)
+	}
+	settingsCancel()
+	// 3. BootstrapAuthCatalog：默认配额方案和默认用户组
 	bootCtx2, bootCancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := bootstrap.NewAuthCatalog(database.Pool()).Run(bootCtx2); err != nil {
 		bootCancel2()
@@ -88,7 +100,7 @@ func main() {
 	}
 	bootCancel2()
 
-	// 3. BootstrapSuperAdmin：不加入 default_user group、不分配 role
+	// 4. BootstrapSuperAdmin：固定绑定 default_user，确保权限和配额都有组来源
 	bootCtx3, bootCancel3 := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := user.BootstrapSuperAdmin(bootCtx3, database.Pool()); err != nil {
 		bootCancel3()
@@ -96,20 +108,31 @@ func main() {
 	}
 	bootCancel3()
 
-	// 4. 构造 Repo
-	permRepo := permission.NewRepo(q)
-	roleRepo := role.NewRepo(q)
-	groupRepo := group.NewRepo(q, roleRepo) // group.Repo 需要 role reader 校验 assignable
+	// 5. 构造 Repo
+	groupRepo := group.NewRepo(q)
 	quotaRepo := quota.NewRepo(q)
-	userRepo := user.NewRepo(database.Pool(), q, roleRepo, groupRepo)
+	userRepo := user.NewRepo(database.Pool(), q, groupRepo)
 	sessionRepo := session.NewRepo(database.Pool())
+	resourceRepo := resource.NewRepo(database.Pool())
+	sharingRepo := sharing.NewRepo(database.Pool())
+	fileStore := filestore.New(settingsRepo)
+	adminRepo := admin.NewRepo(database.Pool())
+	inboxRepo := inbox.NewRepo(database.Pool())
 	staticPath := cfg.StaticDir
 
-	handler, err := server.NewRouter(
-		staticPath,
-		userRepo, sessionRepo, roleRepo, permRepo, groupRepo, quotaRepo,
-		cfg.SessionCookieSecure,
-	)
+	handler, err := server.NewRouterWithDeps(staticPath, server.Deps{
+		UserRepo:       userRepo,
+		SessionRepo:    sessionRepo,
+		GroupRepo:      groupRepo,
+		QuotaRepo:      quotaRepo,
+		ResourceRepo:   resourceRepo,
+		SharingRepo:    sharingRepo,
+		FileStore:      fileStore,
+		SystemSettings: settingsRepo,
+		AdminRepo:      adminRepo,
+		InboxRepo:      inboxRepo,
+		CookieSecure:   cfg.SessionCookieSecure,
+	})
 	if err != nil {
 		log.Fatalf("初始化 HTTP 路由失败：%v", err)
 	}
@@ -118,15 +141,17 @@ func main() {
 		Addr:              ":8080",
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// 文件传输由请求体大小、配额和校验约束；不使用全局短超时截断大文件。
+		ReadTimeout:  0,
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()
 	go sessionRepo.StartCleanup(cleanupCtx)
+	go sharingRepo.StartDownloadJobCleanup(cleanupCtx)
 	go func() {
 		log.Printf("XiaoyuPostHub 后端已启动，监听 %s，静态目录：%s", srv.Addr, staticPath)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

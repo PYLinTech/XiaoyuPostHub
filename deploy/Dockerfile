@@ -19,11 +19,11 @@ RUN apk add --no-cache ca-certificates tzdata \
     && echo "${TZ}" > /etc/timezone \
     && addgroup -S -g ${APP_GID} ${APP_GROUP} \
     && adduser -S -D -H -u ${APP_UID} -G ${APP_GROUP} -s /sbin/nologin ${APP_USER} \
-    && mkdir -p "${APP_HOME}" "${DATA_DIR}" \
+    && mkdir -p "${APP_HOME}" "${DATA_DIR}/uploads" \
     && chown root:${APP_GROUP} "${APP_HOME}" \
     && chmod 550 "${APP_HOME}" \
-    && chown ${APP_USER}:${APP_GROUP} "${DATA_DIR}" \
-    && chmod 750 "${DATA_DIR}"
+    && chown -R ${APP_USER}:${APP_GROUP} "${DATA_DIR}" \
+    && chmod 750 "${DATA_DIR}" "${DATA_DIR}/uploads"
 
 COPY app/xph-backend /app/xph-backend
 COPY app/web /app/web

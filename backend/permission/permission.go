@@ -1,9 +1,9 @@
 // Package permission 定义系统所有的原子权限（permission code），
-// 并提供只读访问 permissions 表的 Repo。
+// 权限 code 的权威来源仅在此处，不再在数据库维护重复目录。
 //
 // 设计要点：
 //
-//   - Permission 是**原子动作**，不可再分。"组合"由 role 完成。
+//   - Permission 是**原子动作**，用户组直接组合这些权限。
 //   - 所有 permission code + 展示文案集中在 Definitions；业务代码禁止散落字符串。
 //   - All 是从 Definitions 派生的纯 code 列表，避免两套手写不同步。
 //   - Repo 仅做只读查询；写入只在启动 seed（bootstrap.AuthCatalog）发生。
@@ -11,8 +11,7 @@ package permission
 
 // 系统预设的 12 个 permission code。
 //
-// 新增规则：code 一旦发布只能新增，**不要重命名/删除**已有 code。
-// （已有 role/role_permissions 关联会变成悬挂引用，业务层要避免破坏性变更。）
+// 新增规则：code 一旦发布只能新增，避免现有用户组绑定失效。
 const (
 	// 认证
 	Login = "login" // 登录系统
@@ -21,7 +20,7 @@ const (
 	Upload    = "upload"     // 上传
 	Download  = "download"   // 下载（资源管理界面内）
 	Preview   = "preview"    // 预览
-	Rename    = "rename"     // 重命名/移动
+	Rename    = "rename"     // 重命名
 	DeleteOwn = "delete_own" // 删自己的资源
 
 	// 分享/直链（卡的是"创建动作"，不是"我能不能下载"）
@@ -29,10 +28,9 @@ const (
 	DirectLink = "direct_link" // 创建直链（curl 友好 + 有效期）
 
 	// 管理员
-	DeleteAny    = "delete_any"     // 删任意资源（资源审查组用）
 	ManageUsers  = "manage_users"   // 用户管理
 	ReadAuditLog = "read_audit_log" // 审计日志查看（审计审查组用）
-	ManageRoles  = "manage_roles"   // 管理 role（伪超管用：定义/修改 role 与 role→permission 绑定）
+	ManageRoles  = "manage_roles"   // 管理用户组的权限与配额
 )
 
 // Definition 是 permission 的完整定义：code + 中文说明。
@@ -42,22 +40,19 @@ type Definition struct {
 	Description string
 }
 
-// Definitions 是启动 seed 时唯一写入 permissions 表的来源。
-// description 在每次启动会**更新**到 DB（ON CONFLICT DO UPDATE），
-// 这样改文案不需要迁移，role 的 permission 绑定不受影响。
+// Definitions 供权限配置界面展示，数据库只保存 code。
 var Definitions = []Definition{
 	{Login, "登录系统"},
 	{Upload, "上传资源"},
 	{Download, "下载资源"},
 	{Preview, "预览资源"},
-	{Rename, "重命名或移动自己的资源"},
+	{Rename, "重命名自己的资源"},
 	{DeleteOwn, "删除自己的资源"},
 	{Share, "创建分享页"},
 	{DirectLink, "创建直链"},
-	{DeleteAny, "删除任意用户资源"},
 	{ManageUsers, "管理用户"},
 	{ReadAuditLog, "查看审计日志"},
-	{ManageRoles, "管理角色、用户组和权限绑定"},
+	{ManageRoles, "管理用户组权限与配额"},
 }
 
 // All 是从 Definitions 派生的 code 列表，顺序固定。

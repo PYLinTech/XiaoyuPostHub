@@ -141,10 +141,10 @@ dir_size() {
 main() {
     parse_args "$@"
 
-    command_exists yarn || fail "未找到 yarn 命令"
+    command_exists npm || fail "未找到 npm 命令"
 
-    run_command 1 2 "安装前端依赖" "yarn-install" yarn install --frozen-lockfile
-    run_command 2 2 "编译前端" "yarn-build" yarn build
+    run_command 1 2 "安装前端依赖" "npm-install" npm ci
+    run_command 2 2 "编译前端" "npm-build" npm run build
 
     [[ -d build ]] || fail "未找到前端产物：./build/"
 

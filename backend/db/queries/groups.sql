@@ -18,13 +18,6 @@ INSERT INTO user_groups (name, is_system, description, quota_profile_id, priorit
 VALUES ($1, $2, $3, $4, $5)
 RETURNING id, name, is_system, description, quota_profile_id, priority, created_at;
 
--- name: UpdateUserGroupDescription :execrows
--- 系统 group（is_system=TRUE）的 description / quota / priority **允许**通过配置面板修改。
--- name 和 row 是否删除由 SQL/业务层用 is_system 守卫。
-UPDATE user_groups
-SET description = $2
-WHERE id = $1;
-
 -- name: UpdateUserGroupQuotaProfile :execrows
 UPDATE user_groups
 SET quota_profile_id = $2
@@ -52,12 +45,8 @@ INSERT INTO user_group_memberships (user_id, group_id)
 VALUES ($1, $2)
 ON CONFLICT DO NOTHING;
 
--- name: UnassignUserFromGroup :execrows
-DELETE FROM user_group_memberships
-WHERE user_id = $1 AND group_id = $2;
-
 -- name: UnassignAllGroupsFromUser :execrows
--- 清空 user 的所有 group 关联（用于升级为超管时清残留）
+-- 清空 user 的所有 group 关联（用于升级为超管时清理非默认组，随后重新绑定默认组）
 DELETE FROM user_group_memberships
 WHERE user_id = $1;
 
@@ -67,17 +56,23 @@ FROM user_group_memberships
 WHERE user_id = $1
 ORDER BY group_id;
 
--- name: AssignRoleToGroup :execrows
-INSERT INTO group_roles (group_id, role_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING;
-
--- name: UnassignRoleFromGroup :execrows
-DELETE FROM group_roles
-WHERE group_id = $1 AND role_id = $2;
-
--- name: ListRoleIDsByGroup :many
-SELECT role_id
-FROM group_roles
+-- name: ListPermissionsByGroup :many
+SELECT permission
+FROM group_permissions
 WHERE group_id = $1
-ORDER BY role_id;
+ORDER BY permission;
+
+-- name: ListEffectivePermissionsByUser :many
+SELECT DISTINCT gp.permission
+FROM user_group_memberships membership
+JOIN group_permissions gp ON gp.group_id = membership.group_id
+WHERE membership.user_id = $1
+ORDER BY gp.permission;
+
+-- name: DeletePermissionsByGroup :exec
+DELETE FROM group_permissions WHERE group_id = $1;
+
+-- name: AddPermissionToGroup :exec
+INSERT INTO group_permissions(group_id, permission)
+VALUES($1, $2)
+ON CONFLICT DO NOTHING;

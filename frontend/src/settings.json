@@ -1,8 +1,5 @@
 {
-  "colorWeek": false,
-  "navbar": true,
-  "menu": true,
-  "footer": true,
+  "theme": "light",
   "themeColor": "#165DFF",
   "menuWidth": 220
 }

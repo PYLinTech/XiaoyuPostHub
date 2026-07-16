@@ -3,16 +3,15 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
@@ -26,6 +25,12 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
+type registerRequest struct {
+	UserName       string `json:"userName"`
+	Password       string `json:"password"`
+	InvitationCode string `json:"invitationCode"`
+}
+
 // apiStatusResponse 通用返回：status=ok | error，error 时 msg 必填。
 //
 // 前端只看 res.data.status === 'ok'。
@@ -34,28 +39,16 @@ type apiStatusResponse struct {
 	Msg    string `json:"msg,omitempty"`
 }
 
-// userInfoResponse 用户信息返回结构（对齐前端约定字段）。
-//
-// 当前实现：Avatar / Job / JobName / Organization / OrganizationName / Verified
-// 用固定占位值；其他字段留空。后续从用户 profile 表 / 配置读取时只改 buildUserInfoResponse。
+// userInfoResponse 只返回当前布局和权限路由实际使用的字段。
 type userInfoResponse struct {
-	Name             string              `json:"name"`
-	Avatar           string              `json:"avatar"`
-	Email            string              `json:"email"`
-	Job              string              `json:"job"`
-	JobName          string              `json:"jobName"`
-	Organization     string              `json:"organization"`
-	OrganizationName string              `json:"organizationName"`
-	Location         string              `json:"location"`
-	LocationName     string              `json:"locationName"`
-	Introduction     string              `json:"introduction"`
-	PersonalWebsite  string              `json:"personalWebsite"`
-	Verified         bool                `json:"verified"`
-	PhoneNumber      string              `json:"phoneNumber"`
-	AccountID        string              `json:"accountId"`
-	RegistrationTime string              `json:"registrationTime"`
-	Permissions      map[string][]string `json:"permissions"`
+	Name             string   `json:"name"`
+	Avatar           string   `json:"avatar"`
+	Permissions      []string `json:"permissions"`
+	AdminPermissions []string `json:"adminPermissions"`
+	IsSuperAdmin     bool     `json:"isSuperAdmin"`
 }
+
+const defaultUserAvatar = "/assets/default-avatar.svg"
 
 // ---------- POST /api/user/login ----------
 
@@ -107,9 +100,9 @@ func loginHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		accountKey := "account:" + strings.ToLower(strings.TrimSpace(req.UserName))
-		ipKey := "ip:" + clientIP(r)
-		if retry, err := deps.SessionRepo.RetryAfter(r.Context(), accountKey, ipKey); err != nil {
+		accountKey := strings.ToLower(strings.TrimSpace(req.UserName))
+		requestIP := clientIP(r)
+		if retry, err := deps.SessionRepo.RetryAfter(r.Context(), accountKey, requestIP); err != nil {
 			log.Printf("检查登录限制失败：%v", err)
 			writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
 			return
@@ -121,7 +114,7 @@ func loginHandler(deps Deps) http.HandlerFunc {
 
 		u, err := deps.UserRepo.Authenticate(r.Context(), req.UserName, req.Password)
 		if errors.Is(err, user.ErrInvalidCredentials) {
-			retry, recordErr := deps.SessionRepo.RecordFailure(r.Context(), accountKey, ipKey)
+			retry, recordErr := deps.SessionRepo.RecordFailure(r.Context(), accountKey, requestIP)
 			if recordErr != nil {
 				log.Printf("记录登录失败次数失败：%v", recordErr)
 				writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
@@ -168,6 +161,58 @@ func loginHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+func registrationSettingsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, apiStatusResponse{Status: "error", Msg: "method not allowed"})
+			return
+		}
+		policy, err := deps.UserRepo.RegistrationPolicy(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, apiStatusResponse{Status: "error", Msg: "读取注册配置失败"})
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok", "registrationRequiresInvitation": policy.RequiresInvitation,
+			"invitationCodeLength":         policy.CodeOptions.Length,
+			"invitationCodeCaseSensitive":  policy.CodeOptions.CaseSensitive,
+			"invitationCodeIncludeLetters": policy.CodeOptions.IncludeLetters,
+			"invitationCodeIncludeNumbers": policy.CodeOptions.IncludeNumbers,
+		})
+	}
+}
+
+func registerHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, apiStatusResponse{Status: "error", Msg: "method not allowed"})
+			return
+		}
+		var req registerRequest
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "请求格式错误"})
+			return
+		}
+		_, err := deps.UserRepo.Register(r.Context(), req.UserName, req.Password, req.InvitationCode)
+		switch {
+		case errors.Is(err, user.ErrInvitationRequired):
+			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "注册需要邀请码"})
+		case errors.Is(err, user.ErrInvitationInvalid):
+			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "邀请码无效或已被使用"})
+		case errors.Is(err, user.ErrUsernameUnavailable):
+			writeJSON(w, http.StatusConflict, apiStatusResponse{Status: "error", Msg: "账号已存在"})
+		case errors.Is(err, user.ErrRegistrationInput):
+			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "账号至少 3 个字符，密码至少 8 个字符"})
+		case err != nil:
+			log.Printf("注册用户失败：%v", err)
+			writeJSON(w, http.StatusInternalServerError, apiStatusResponse{Status: "error", Msg: "注册失败"})
+		default:
+			writeJSON(w, http.StatusOK, apiStatusResponse{Status: "ok"})
+		}
+	}
+}
+
 func logoutHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -187,9 +232,6 @@ func logoutHandler(deps Deps) http.HandlerFunc {
 }
 
 func clientIP(r *http.Request) string {
-	if x := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); net.ParseIP(x) != nil {
-		return x
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
@@ -198,19 +240,7 @@ func clientIP(r *http.Request) string {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	if !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
-		return errors.New("content type")
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("multiple json values")
-	}
-	return nil
+	return decodeJSONBody(w, r, dst, 16<<10)
 }
 
 // ---------- GET /api/user/userInfo ----------
@@ -257,13 +287,19 @@ func userInfoHandler(deps Deps) http.HandlerFunc {
 		}
 
 		u, err := deps.UserRepo.GetByID(r.Context(), userID)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, user.ErrUserDisabled) {
+			http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
 			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "未登录"})
 			return
 		}
 		if err != nil {
 			log.Printf("读取会话用户失败：%v", err)
 			writeJSON(w, http.StatusInternalServerError, apiStatusResponse{Status: "error", Msg: "读取用户信息失败"})
+			return
+		}
+		if !u.HasPermission(permission.Login) {
+			http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
+			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "未登录"})
 			return
 		}
 
@@ -280,99 +316,38 @@ func writeJSON(w http.ResponseWriter, statusCode int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// buildUserInfoResponse 把业务层 User 装成前端期望的 userInfoResponse。
-//
-// 当前 Avatar / Job / JobName / Organization / OrganizationName / Introduction /
-// Verified / AccountID 用固定占位值（与既有前端约定一致）。
-// Permissions 由用户的后端有效权限映射生成，超管拥有全部资源。
+// buildUserInfoResponse 把业务层 User 装成前端实际使用的会话信息。
 func buildUserInfoResponse(u user.User) userInfoResponse {
 	return userInfoResponse{
 		Name:             u.Username,
-		Avatar:           "https://lf1-xgcdn-tos.pstatp.com/obj/vcloud/vadmin/start.8e0e4855ee346a46ccff8ff3e24db27b.png",
-		Email:            "",
-		Job:              "admin",
-		JobName:          "管理员",
-		Organization:     "XiaoyuPostHub",
-		OrganizationName: "XiaoyuPostHub",
-		Location:         "",
-		LocationName:     "",
-		Introduction:     "XiaoyuPostHub 用户",
-		PersonalWebsite:  "",
-		Verified:         true,
-		PhoneNumber:      "",
-		AccountID:        "xph-user",
-		RegistrationTime: "",
-		Permissions:      frontendPermissions(u),
+		Avatar:           defaultUserAvatar,
+		Permissions:      effectivePermissions(u),
+		AdminPermissions: adminPermissions(u),
+		IsSuperAdmin:     u.IsSuperAdmin(),
 	}
 }
 
-// frontendPermissions 构造前端约定的 permissions 字典。
-//
-//   - 超管：每个资源 → ["*"]
-//   - 普通用户：由后端有效权限映射为 read/create/update/delete/share
-//
-// 资源清单对齐前端约定菜单（workplace / monitor / dashboard / list / form …）。
-// 后续如需精细控制（按 effective permission 输出 read/write/share/...），
-// 把 actions 替换成从 u.permissionSet 派生的列表。
-func frontendPermissions(u user.User) map[string][]string {
-	resources := []string{
-		"menu.dashboard.workplace",
-		"menu.dashboard.monitor",
-		"menu.visualization.dataAnalysis",
-		"menu.visualization.multiDimensionDataAnalysis",
-		"menu.list.searchTable",
-		"menu.list.cardList",
-		"menu.form.group",
-		"menu.form.step",
-		"menu.profile.basic",
-		"menu.result.success",
-		"menu.result.error",
-		"menu.exception.403",
-		"menu.exception.404",
-		"menu.exception.500",
-		"menu.user.info",
-		"menu.user.setting",
+func effectivePermissions(u user.User) []string {
+	out := make([]string, 0, len(permission.All))
+	for _, code := range permission.All {
+		if u.HasPermission(code) {
+			out = append(out, code)
+		}
 	}
+	return out
+}
 
-	out := make(map[string][]string, len(resources))
-	for _, resource := range resources {
-		if u.IsSuperAdmin() {
-			out[resource] = []string{"*"}
+func adminPermissions(u user.User) []string {
+	codes := []string{
+		permission.ManageUsers,
+		permission.ReadAuditLog,
+		permission.ManageRoles,
+	}
+	out := make([]string, 0, len(codes))
+	for _, code := range codes {
+		if u.HasPermission(code) {
+			out = append(out, code)
 		}
-	}
-	grant := func(action string, names ...string) {
-		for _, name := range names {
-			if slices.Contains(out[name], action) {
-				continue
-			}
-			out[name] = append(out[name], action)
-		}
-	}
-	if u.HasPermission("preview") || u.HasPermission("download") {
-		grant("read", "menu.dashboard.workplace", "menu.list.searchTable", "menu.list.cardList", "menu.profile.basic")
-	}
-	if u.HasPermission("upload") {
-		grant("create", "menu.form.group", "menu.form.step")
-	}
-	if u.HasPermission("rename") {
-		grant("update", "menu.list.searchTable", "menu.list.cardList")
-	}
-	if u.HasPermission("delete_own") || u.HasPermission("delete_any") {
-		grant("delete", "menu.list.searchTable", "menu.list.cardList")
-	}
-	if u.HasPermission("share") || u.HasPermission("direct_link") {
-		grant("share", "menu.list.searchTable", "menu.list.cardList")
-	}
-	if u.HasPermission("manage_users") {
-		grant("read", "menu.user.info", "menu.user.setting")
-		grant("update", "menu.user.info", "menu.user.setting")
-	}
-	if u.HasPermission("read_audit_log") {
-		grant("read", "menu.dashboard.monitor", "menu.visualization.dataAnalysis", "menu.visualization.multiDimensionDataAnalysis")
-	}
-	if u.HasPermission("manage_roles") {
-		grant("read", "menu.user.setting")
-		grant("update", "menu.user.setting")
 	}
 	return out
 }

@@ -1,15 +1,9 @@
 package db
 
 import (
-	"bufio"
 	"context"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // --- 白盒：DescribeURL 脱敏（无需数据库，永久跑） ---
@@ -75,89 +69,6 @@ func TestPickMinConns_DefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-// --- 真实 PostgreSQL 集成：默认必跑，缺 DB 直接 FAIL（fail-fast 哲学） ---
-
-// requireDB 返回用于集成测试的 PostgreSQL 连接 URL，查找顺序：
-//
-//  1. 进程环境 DATABASE_URL（生产同源；CI 直接注入）
-//  2. 项目根 deploy/.env 内的 DATABASE_URL（开发者本机一键 fallback）
-//
-// 任何一路缺失或 ping 失败都 t.Fatal 而不是 t.Skip——
-// DB 是 XiaoyuPostHub 的基础设施，缺它测的是空气，必须立刻红。
-func requireDB(t *testing.T) string {
-	t.Helper()
-
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		url = readTestEnv(t, "TEST_DATABASE_URL")
-	}
-	if url == "" {
-		t.Fatal("未找到 TEST_DATABASE_URL：请设置环境变量或 backend/.test.env")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := pingURL(ctx, url); err != nil {
-		t.Fatalf("DATABASE_URL 不可达：%v", err)
-	}
-	return url
-}
-
-// readTestEnv 从 backend/.test.env 中按 key 取值。
-//
-//   - **不复用 config 包**：配置层不该为测试提供"按 key 查"之类的便利 API，
-//     那是为测试而生的形态。测试自己实现一个够用的子集解析器。
-//   - 支持空行 / 整行 # 注释 / 可选 export 前缀 / KEY=VALUE。
-//     引号与转义不展开（现有 .env 里没用过），保持 20 行内可审计。
-func readTestEnv(t *testing.T, key string) string {
-	t.Helper()
-	path := filepath.Join("..", ".test.env")
-	f, err := os.Open(path)
-	if err != nil {
-		return "" // 文件不存在 / 读不开 → 视为"无"，让调用方决定
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		eq := strings.IndexByte(line, '=')
-		if eq <= 0 {
-			continue
-		}
-		k := strings.TrimSpace(line[:eq])
-		if k != key {
-			continue
-		}
-		return strings.TrimSpace(line[eq+1:])
-	}
-	return ""
-}
-
-func TestOpen_SuccessPing(t *testing.T) {
-	url := requireDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	d, err := Open(ctx, url)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer d.Close()
-
-	if d.Pool() == nil {
-		t.Fatal("Pool() 返回 nil")
-	}
-	if err := d.Ping(ctx); err != nil {
-		t.Errorf("Ping after Open: %v", err)
-	}
-}
-
 func TestOpen_BadURLReturnsError(t *testing.T) {
 	// 这个用例故意用烂 URL、不调 requireDB，连真实 DB 都不会被波及。
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -188,38 +99,4 @@ func TestDB_NilSafety(t *testing.T) {
 	if err := d.Ping(context.Background()); err == nil {
 		t.Error("nil receiver's Ping must error")
 	}
-}
-
-func TestDB_CloseThenPingFails(t *testing.T) {
-	url := requireDB(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	d, err := Open(ctx, url)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	d.Close()
-
-	pingCtx, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel2()
-	if err := d.Ping(pingCtx); err == nil {
-		t.Error("Ping after Close should fail")
-	}
-}
-
-// pingURL 是测试辅助：开一个临时 pool，仅用一次 Ping，再关闭。
-// 抽出来是为了在 requireDB 阶段也能复用同一条 connect-and-verify 路径。
-func pingURL(ctx context.Context, dbURL string) error {
-	cfg, err := pgxpool.ParseConfig(dbURL)
-	if err != nil {
-		return err
-	}
-	cfg.MaxConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-	return pool.Ping(ctx)
 }

@@ -1,0 +1,282 @@
+.page {
+  width: 100%;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.title {
+  margin: 0 0 6px !important;
+}
+
+.workspace {
+  min-height: calc(100vh - 190px);
+  border: 1px solid var(--color-border-1);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  margin-bottom: 16px;
+}
+
+.toolbar-left,
+.resource-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 4px 14px;
+  color: var(--color-text-3);
+}
+
+.resource-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 19px;
+}
+
+.folder {
+  color: #f59f00;
+  background: #fff7e8;
+}
+
+.file {
+  color: rgb(var(--primary-6));
+  background: rgb(var(--primary-1));
+}
+
+.name-button {
+  padding: 0 !important;
+  color: var(--color-text-1) !important;
+}
+
+.modal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wide {
+  grid-column: 1 / -1;
+}
+
+.result-box {
+  padding: 16px;
+  border: 1px solid rgb(var(--primary-2));
+  border-radius: 8px;
+  background: rgb(var(--primary-1));
+}
+
+.result-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.result-line code {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+  background: var(--color-bg-1);
+  border-radius: 5px;
+}
+
+.list-card {
+  min-height: calc(100vh - 190px);
+  border: 1px solid var(--color-border-1);
+}
+
+.link-cell,
+.secret-cell {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+
+  a,
+  code {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  a {
+    color: rgb(var(--primary-6));
+  }
+
+  button {
+    flex: 0 0 auto;
+  }
+}
+
+.preview-modal :global(.arco-modal-content) {
+  padding: 0;
+}
+
+.preview-modal :global(.arco-modal-body) {
+  padding: 0;
+  overflow: hidden;
+}
+
+.preview-frame {
+  position: relative;
+  width: 100%;
+  height: min(78vh, 900px);
+  min-height: 520px;
+  overflow: hidden;
+  background: var(--color-fill-1);
+}
+
+.viewer {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.preview-loading,
+.preview-unsupported {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-unsupported {
+  flex-direction: column;
+  gap: 18px;
+  color: var(--color-text-2);
+  font-size: 15px;
+
+  > svg {
+    color: var(--color-text-4);
+    font-size: 46px;
+  }
+}
+
+@media (max-width: 900px) {
+  .modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wide {
+    grid-column: auto;
+  }
+
+  .header {
+    margin-bottom: 12px;
+  }
+
+  .workspace,
+  .list-card {
+    min-height: calc(100vh - 150px);
+
+    :global(.arco-card-body) {
+      padding: 14px;
+    }
+  }
+
+  .toolbar {
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .toolbar-left {
+    flex-wrap: wrap;
+  }
+
+  .resource-name {
+    min-width: 0;
+  }
+
+  .name-button,
+  .resource-name > span {
+    min-width: 0;
+    max-width: 55vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .preview-frame {
+    height: calc(100dvh - 112px);
+    min-height: 280px;
+  }
+
+  .preview-modal {
+    :global(.arco-modal) {
+      width: calc(100vw - 16px) !important;
+      margin: 8px;
+    }
+  }
+}
+
+@media (max-width: 600px) {
+  .toolbar {
+    flex-direction: column;
+  }
+
+  .toolbar-left {
+    width: 100%;
+
+    > button {
+      flex: 1 0 calc(33.333% - 8px);
+      min-width: 88px;
+    }
+  }
+
+  .crumbs {
+    padding-bottom: 10px;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none;
+  }
+
+  .mobile-hidden {
+    display: none !important;
+  }
+
+  .result-line {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .result-line button {
+    align-self: flex-end;
+  }
+
+  :global(.arco-modal-content) {
+    padding: 18px 16px;
+  }
+
+  :global(.arco-pagination) {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+}

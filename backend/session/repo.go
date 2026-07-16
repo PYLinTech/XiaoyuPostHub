@@ -107,10 +107,6 @@ func (r *Repo) Create(ctx context.Context, userID int64) (string, time.Time, err
 	return token, expiresAt, nil
 }
 
-func (r *Repo) DeleteAllByUserID(ctx context.Context, userID int64) error {
-	return sqlcgen.New(r.db).DeleteUserSessionsByUserID(ctx, userID)
-}
-
 // StartCleanup 每小时清除过期会话和 24 小时未活动的登录失败记录。
 func (r *Repo) StartCleanup(ctx context.Context) {
 	ticker := time.NewTicker(time.Hour)
@@ -131,8 +127,11 @@ func (r *Repo) StartCleanup(ctx context.Context) {
 	}
 }
 
-func (r *Repo) RetryAfter(ctx context.Context, keys ...string) (time.Duration, error) {
-	until, err := sqlcgen.New(r.db).GetLoginRetryAfter(ctx, keys)
+func (r *Repo) RetryAfter(ctx context.Context, accountKey, clientIP string) (time.Duration, error) {
+	until, err := sqlcgen.New(r.db).GetLoginRetryAfter(ctx, sqlcgen.GetLoginRetryAfterParams{
+		PAccountKey: accountKey,
+		PClientIp:   clientIP,
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -142,32 +141,37 @@ func (r *Repo) RetryAfter(ctx context.Context, keys ...string) (time.Duration, e
 	return 0, nil
 }
 
-func (r *Repo) RecordFailure(ctx context.Context, keys ...string) (time.Duration, error) {
+func (r *Repo) RecordFailure(ctx context.Context, accountKey, clientIP string) (time.Duration, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	q := sqlcgen.New(r.db).WithTx(tx)
-	var max time.Duration
-	for _, key := range keys {
-		until, err := q.RecordLoginFailure(ctx, key)
-		if err != nil {
-			return 0, err
-		}
-		d := time.Until(until.Time)
-		if d > max {
-			max = d
-		}
+	if _, err := q.RecordLoginFailure(ctx, sqlcgen.RecordLoginFailureParams{
+		PAccountKey: accountKey,
+		PClientIp:   clientIP,
+	}); err != nil {
+		return 0, err
+	}
+	until, err := q.GetLoginRetryAfter(ctx, sqlcgen.GetLoginRetryAfterParams{
+		PAccountKey: accountKey,
+		PClientIp:   clientIP,
+	})
+	if err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	return max, nil
+	if d := time.Until(until.Time); d > 0 {
+		return d, nil
+	}
+	return 0, nil
 }
 
-func (r *Repo) ClearFailures(ctx context.Context, key string) error {
-	return sqlcgen.New(r.db).ClearLoginFailure(ctx, key)
+func (r *Repo) ClearFailures(ctx context.Context, accountKey string) error {
+	return sqlcgen.New(r.db).ClearAccountLoginFailures(ctx, accountKey)
 }
 
 // GetUserIDByToken 按 token 明文查 user_id。
@@ -194,12 +198,6 @@ func (r *Repo) DeleteByToken(ctx context.Context, token string) error {
 
 	q := sqlcgen.New(r.db)
 	return q.DeleteUserSessionByTokenHash(ctx, tokenHash)
-}
-
-// DeleteExpired 批量清理过期会话。建议由定时任务调用，登录路径不依赖它。
-func (r *Repo) DeleteExpired(ctx context.Context) error {
-	q := sqlcgen.New(r.db)
-	return q.DeleteExpiredUserSessions(ctx)
 }
 
 // sqlcTimestamptz 把 time.Time 包成 pgtype.Timestamptz。

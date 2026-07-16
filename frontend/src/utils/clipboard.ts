@@ -1,41 +1,21 @@
-// https://github.com/feross/clipboard-copy/blob/master/index.js
-
-export default function clipboard(text) {
-  if (navigator.clipboard) {
-    return navigator.clipboard.writeText(text).catch(function (err) {
-      throw err !== undefined
-        ? err
-        : new DOMException('The request is not allowed', 'NotAllowedError');
-    });
-  }
-
-  const span = document.createElement('span');
-  span.textContent = text;
-
-  span.style.whiteSpace = 'pre';
-
-  document.body.appendChild(span);
-
-  const selection = window.getSelection();
-  const range = window.document.createRange();
-  selection.removeAllRanges();
-  range.selectNode(span);
-  selection.addRange(range);
-
-  let success = false;
+export default async function writeClipboard(value: string): Promise<boolean> {
   try {
-    success = window.document.execCommand('copy');
-  } catch (err) {
-    // eslint-disable-next-line
-    console.log('error', err);
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand('copy');
+    input.remove();
+    return copied;
+  } catch {
+    return false;
   }
-
-  selection.removeAllRanges();
-  window.document.body.removeChild(span);
-
-  return success
-    ? Promise.resolve()
-    : Promise.reject(
-        new DOMException('The request is not allowed', 'NotAllowedError')
-      );
 }

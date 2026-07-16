@@ -52,26 +52,35 @@ DELETE FROM user_sessions AS target WHERE target.id IN (
 );
 
 -- name: GetLoginRetryAfter :one
-SELECT COALESCE(MAX(locked_until), to_timestamp(0))::timestamptz
-FROM login_failures
-WHERE failure_key = ANY($1::text[]) AND locked_until > now();
+WITH dimensions AS (
+    SELECT COUNT(*)::BIGINT AS failure_count, MAX(failed_at) AS last_failed_at
+    FROM login_failure_events events
+    WHERE events.account_key = sqlc.arg(p_account_key)
+      AND events.failed_at > now() - interval '24 hours'
+    UNION ALL
+    SELECT COUNT(*)::BIGINT AS failure_count, MAX(failed_at) AS last_failed_at
+    FROM login_failure_events events
+    WHERE events.client_ip = sqlc.arg(p_client_ip)
+      AND events.failed_at > now() - interval '24 hours'
+), locks AS (
+    SELECT last_failed_at + CASE
+        WHEN failure_count > 10 THEN interval '30 minutes'
+        WHEN failure_count >= 6 THEN interval '10 minutes'
+        WHEN failure_count >= 3 THEN interval '5 minutes'
+        ELSE interval '0 seconds'
+    END AS locked_until
+    FROM dimensions
+    WHERE last_failed_at IS NOT NULL
+)
+SELECT COALESCE(MAX(locked_until), to_timestamp(0))::timestamptz FROM locks;
 
 -- name: RecordLoginFailure :one
-INSERT INTO login_failures (failure_key, failure_count, locked_until, last_failed_at)
-VALUES ($1, 1, NULL, now())
-ON CONFLICT (failure_key) DO UPDATE SET
-    failure_count = login_failures.failure_count + 1,
-    locked_until = now() + CASE
-        WHEN login_failures.failure_count + 1 > 10 THEN interval '30 minutes'
-        WHEN login_failures.failure_count + 1 >= 6 THEN interval '10 minutes'
-        WHEN login_failures.failure_count + 1 >= 3 THEN interval '5 minutes'
-        ELSE interval '0 seconds'
-    END,
-    last_failed_at = now()
-RETURNING locked_until;
+INSERT INTO login_failure_events (account_key, client_ip)
+VALUES (sqlc.arg(p_account_key), sqlc.arg(p_client_ip))
+RETURNING failed_at;
 
--- name: ClearLoginFailure :exec
-DELETE FROM login_failures WHERE failure_key = $1;
+-- name: ClearAccountLoginFailures :exec
+DELETE FROM login_failure_events WHERE account_key = sqlc.arg(p_account_key);
 
 -- name: DeleteStaleLoginFailures :exec
-DELETE FROM login_failures WHERE last_failed_at < now() - interval '24 hours';
+DELETE FROM login_failure_events WHERE failed_at < now() - interval '24 hours';

@@ -182,15 +182,23 @@ func ApplyEmbeddedSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if len(names) == 0 {
 		return fmt.Errorf("embedded schema 目录为空，没有任何 .sql 文件被编译进二进制")
 	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("开始 schema 事务失败: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
 	for _, name := range names {
 		path := "schema/" + name
 		sqlBytes, err := embeddedSchemaFS.ReadFile(path)
 		if err != nil {
 			return fmt.Errorf("读取 embedded schema 文件 %s 失败: %w", path, err)
 		}
-		if _, execErr := pool.Exec(ctx, string(sqlBytes)); execErr != nil {
+		if _, execErr := tx.Exec(ctx, string(sqlBytes)); execErr != nil {
 			return fmt.Errorf("执行 embedded schema 文件 %s 失败: %w", path, execErr)
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("提交 schema 事务失败: %w", err)
 	}
 	return nil
 }
@@ -216,14 +224,22 @@ func ApplySchema(ctx context.Context, pool *pgxpool.Pool, schemaDir string) erro
 	if len(files) == 0 {
 		return fmt.Errorf("在 %s 下没有找到任何 .sql schema 文件", schemaDir)
 	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("开始 schema 事务失败: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
 	for _, f := range files {
 		sqlBytes, readErr := os.ReadFile(f)
 		if readErr != nil {
 			return fmt.Errorf("读取 %s 失败: %w", f, readErr)
 		}
-		if _, execErr := pool.Exec(ctx, string(sqlBytes)); execErr != nil {
+		if _, execErr := tx.Exec(ctx, string(sqlBytes)); execErr != nil {
 			return fmt.Errorf("执行 %s 失败: %w", f, execErr)
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("提交 schema 事务失败: %w", err)
 	}
 	return nil
 }

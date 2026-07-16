@@ -12,11 +12,13 @@ import useLocale from '../../utils/useLocale';
 import styles from './style/index.module.less';
 
 export interface MessageItemData {
-  id: string;
+  id: string | number;
+  type: string;
   title: string;
   subTitle?: string;
   avatar?: string;
   content: string;
+  codes?: string[];
   time?: string;
   status: number;
   tag?: {
@@ -56,13 +58,13 @@ function MessageList(props: MessageListProps) {
       footer={
         <div className={styles.footer}>
           <div className={styles['footer-item']}>
-            <Button type="text" size="small" onClick={onAllBtnClick}>
+            <Button
+              type="text"
+              size="small"
+              disabled={!unReadData.length}
+              onClick={onAllBtnClick}
+            >
               {t['message.allRead']}
-            </Button>
-          </div>
-          <div className={styles['footer-item']}>
-            <Button type="text" size="small">
-              {t['message.seeMore']}
             </Button>
           </div>
         </div>
@@ -110,6 +112,19 @@ function MessageList(props: MessageListProps) {
                   <Typography.Paragraph style={{ marginBottom: 0 }} ellipsis>
                     {item.content}
                   </Typography.Paragraph>
+                  {item.codes && item.codes.length > 0 && (
+                    <div className={styles['message-codes']}>
+                      {item.codes.map((code) => (
+                        <Typography.Text
+                          key={code}
+                          code
+                          copyable={{ text: code }}
+                        >
+                          {code}
+                        </Typography.Text>
+                      ))}
+                    </div>
+                  )}
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                     {item.time}
                   </Typography.Text>

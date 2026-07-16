@@ -13,7 +13,7 @@
 #   6. 导出 linux/arm64 镜像文件
 #
 # 用法：
-#   ./build.sh
+#   ./build.sh                              # 交互输入版本号
 #   ./build.sh --version v1.0.0
 #   ./build.sh --version v1.0.0 --image pylintech/xiaoyuposthub
 #   ./build.sh --version v1.0.0 --no-cache
@@ -37,7 +37,7 @@ BINARY_NAME="xph-backend"
 CONTAINER_OS="linux"
 TARGET_ARCHES=("amd64" "arm64")
 
-VERSION="v1.0.0"
+VERSION=""
 IMAGE_NAME="pylintech/xiaoyuposthub"
 NO_CACHE=false
 
@@ -71,12 +71,14 @@ usage() {
   ./build.sh --version v1.0.0 --no-cache
 
 参数：
-  --version <版本号>       语义版本号，默认 v1.0.0，例如 v1.0.1 或 v1.0.0-rc.1
+  --version <版本号>       语义版本号，例如 v1.0.1 或 v1.0.0-rc.1
   --image <镜像名>         镜像名，默认 pylintech/xiaoyuposthub
   --no-cache               构建 Docker 镜像时不使用缓存
   -h, --help               查看帮助
 
 说明：
+  未传 --version 时，会在交互终端提示输入版本号。
+  CI 或其他非交互环境必须显式传入 --version。
   固定构建两个架构：linux/amd64、linux/arm64。
   输出镜像文件：deploy/images/xiaoyuposthub_<version>_linux_<arch>.tar
   参数统一使用空格形式，例如：
@@ -107,6 +109,17 @@ validate_version() {
     if [[ ! "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9][A-Za-z0-9_.-]*)?$ ]]; then
         fail "版本号格式不正确，请使用 v1.0.0 或 v1.0.0-rc.1 这样的格式"
     fi
+}
+
+prompt_version_if_missing() {
+    [[ -z "${VERSION}" ]] || return 0
+
+    if [[ ! -t 0 ]]; then
+        fail "非交互环境未指定版本号，请使用：./build.sh --version v1.0.0"
+    fi
+
+    printf "%b请输入构建版本号（例如 v1.0.0）：%b" "${BLUE}" "${RESET}" >&2
+    IFS= read -r VERSION || fail "读取版本号失败"
 }
 
 parse_args() {
@@ -316,6 +329,7 @@ build_arch() {
 
 main() {
     parse_args "$@"
+    prompt_version_if_missing
     validate_version "${VERSION}"
 
     check_project

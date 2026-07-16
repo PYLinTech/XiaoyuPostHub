@@ -22,15 +22,6 @@ type Repo struct {
 
 func NewRepo(q *sqlcgen.Queries) *Repo { return &Repo{q: q} }
 
-// GetByName 按 name 查 quota profile。
-func (r *Repo) GetByName(ctx context.Context, name string) (sqlcgen.QuotaProfile, error) {
-	qp, err := r.q.GetQuotaProfileByName(ctx, name)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return sqlcgen.QuotaProfile{}, fmt.Errorf("%w: %s", ErrQuotaProfileNotFound, name)
-	}
-	return qp, err
-}
-
 // GetByID 按 id 查 quota profile。
 func (r *Repo) GetByID(ctx context.Context, id int64) (sqlcgen.QuotaProfile, error) {
 	qp, err := r.q.GetQuotaProfileByID(ctx, id)
@@ -119,7 +110,7 @@ func (r *Repo) DeleteQuotaProfile(ctx context.Context, id int64) error {
 }
 
 // GetEffectiveQuotaByUser 拿 user 的有效 quota profile。
-// 3 级优先级由 SQL 内部合并：users.quota_profile_id > group.quota_profile_id > name='default_user'。
+// 由 SQL 从用户所属用户组中选择 priority 最高的已绑定方案。
 // 用户不存在时返回 ErrQuotaProfileNotFound（不会误用 default_user）。
 //
 // 返回标准 sqlcgen.QuotaProfile（不暴露 priority_tier 等内部排序字段）。

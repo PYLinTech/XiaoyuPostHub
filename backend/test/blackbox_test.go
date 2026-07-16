@@ -24,7 +24,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h, err := server.NewRouter(dir, &user.Repo{}, &session.Repo{}, nil, nil, nil, nil, true)
+	h, err := server.NewRouter(dir, &user.Repo{}, &session.Repo{}, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestNewRouter_APIHealth(t *testing.T) {
 	}
 }
 
-func TestNewRouter_APIUnknownReturns404Page(t *testing.T) {
+func TestNewRouter_APIUnknownReturnsJSON(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()
 
@@ -106,8 +106,8 @@ func TestNewRouter_APIUnknownReturns404Page(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
-	if !strings.HasPrefix(string(body), "<!DOCTYPE html>") && !strings.HasPrefix(string(body), "<!doctype html>") {
-		t.Errorf("body doesn't look like HTML 404 page: %q", string(body[:min(80, len(body))]))
+	if !strings.Contains(string(body), `"status":"error"`) {
+		t.Errorf("body doesn't look like JSON API error: %q", string(body[:min(80, len(body))]))
 	}
 }
 

@@ -1,5 +1,5 @@
 -- quota_profiles：配额配置
--- 提前到 000 创建，让 001_users.quota_profile_id FK 能内联在 users 表里。
+-- 配额方案只允许绑定到用户组，用户表不保存独立配额。
 --
 -- NULL 限额 = 不限；0 = 不允许；正数 = 限制值。
 -- is_system=true 的 profile 不可删（业务层校验），但允许改数值。

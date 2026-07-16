@@ -66,63 +66,17 @@ DELETE FROM quota_profiles
 WHERE id = $1 AND is_system = FALSE;
 
 -- name: GetEffectiveQuotaByUser :one
--- 3 级优先级：users.quota_profile_id > group.quota_profile_id(priority DESC) > name='default_user'
---
--- 防御性：用户不存在时返回 no rows（不会误返回 default_user quota）。
--- 每个候选源都限定到真实存在的用户；前两级都空时才用 default_user 兜底；
--- 外层显式列名 + ORDER BY priority_tier（仅用于排序）+ LIMIT 1 保证 :one 单行返回。
--- 不在 SELECT 列表里输出 priority_tier，让 sqlc 直接返回 QuotaProfile 类型。
+-- 配额唯一来源是用户组；多个用户组时取 priority 最高者。
 SELECT
-    id, name, description,
-    storage_bytes_limit, single_file_bytes_limit,
-    daily_upload_bytes_limit, daily_upload_count_limit,
-    active_share_count_limit, active_direct_link_limit,
-    is_system, created_at, updated_at
-FROM (
-    -- 候选 1：用户自己的 quota
-    SELECT
-        qp.id, qp.name, qp.description,
-        qp.storage_bytes_limit, qp.single_file_bytes_limit,
-        qp.daily_upload_bytes_limit, qp.daily_upload_count_limit,
-        qp.active_share_count_limit, qp.active_direct_link_limit,
-        qp.is_system, qp.created_at, qp.updated_at,
-        1 AS priority_tier
-    FROM users u
-    JOIN quota_profiles qp ON qp.id = u.quota_profile_id
-    WHERE u.id = $1
-
-    UNION ALL
-
-    -- 候选 2：所属 group 中 priority 最高的 quota
-    SELECT * FROM (
-        SELECT
-            qp.id, qp.name, qp.description,
-            qp.storage_bytes_limit, qp.single_file_bytes_limit,
-            qp.daily_upload_bytes_limit, qp.daily_upload_count_limit,
-            qp.active_share_count_limit, qp.active_direct_link_limit,
-            qp.is_system, qp.created_at, qp.updated_at,
-            2 AS priority_tier
-        FROM user_group_memberships ugm
-        JOIN user_groups g ON g.id = ugm.group_id
-        JOIN quota_profiles qp ON qp.id = g.quota_profile_id
-        WHERE ugm.user_id = $1
-        ORDER BY g.priority DESC, g.id ASC
-        LIMIT 1
-    ) AS group_top
-
-    UNION ALL
-
-    -- 候选 3：默认 quota（仅在用户存在时）
-    SELECT
-        qp.id, qp.name, qp.description,
-        qp.storage_bytes_limit, qp.single_file_bytes_limit,
-        qp.daily_upload_bytes_limit, qp.daily_upload_count_limit,
-        qp.active_share_count_limit, qp.active_direct_link_limit,
-        qp.is_system, qp.created_at, qp.updated_at,
-        3 AS priority_tier
-    FROM quota_profiles qp
-    WHERE qp.name = 'default_user'
-      AND EXISTS (SELECT 1 FROM users WHERE id = $1)
-) candidates
-ORDER BY priority_tier ASC
+    qp.id, qp.name, qp.description,
+    qp.storage_bytes_limit, qp.single_file_bytes_limit,
+    qp.daily_upload_bytes_limit, qp.daily_upload_count_limit,
+    qp.active_share_count_limit, qp.active_direct_link_limit,
+    qp.is_system, qp.created_at, qp.updated_at
+FROM users u
+JOIN user_group_memberships membership ON membership.user_id = u.id
+JOIN user_groups g ON g.id = membership.group_id
+JOIN quota_profiles qp ON qp.id = g.quota_profile_id
+WHERE u.id = $1
+ORDER BY g.priority DESC, g.id ASC
 LIMIT 1;
