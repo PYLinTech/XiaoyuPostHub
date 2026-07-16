@@ -232,6 +232,11 @@ func logoutHandler(deps Deps) http.HandlerFunc {
 }
 
 func clientIP(r *http.Request) string {
+	// 反向代理通过 X-Real-IP 传递客户端地址。
+	if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
+		return ip.String()
+	}
+
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host

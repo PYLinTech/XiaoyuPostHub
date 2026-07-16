@@ -621,6 +621,7 @@ print_install_summary() {
     printf "  Docker 镜像：%s\n" "${image}"
     printf "  配置文件：%s\n" "${ENV_FILE}"
     [[ -z "${DISPLAY_ADMIN_PASSWORD}" ]] || warn "管理员密码仅显示本次，请立即保存"
+    warn "提示：使用反向代理时，请传递 X-Real-IP 请求头，以便后端记录真实客户端 IP"
 }
 
 resolve_image() {

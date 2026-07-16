@@ -2,6 +2,20 @@
 
 XiaoyuPostHub 是一个自建文件存储与分享系统，包含 Go 后端、React 前端和 PostgreSQL 数据库。
 
+## 快速安装
+
+中国大陆用户：
+
+```bash
+curl -fL 'https://raw.giteeusercontent.com/PYLinTech/XiaoyuPostHub/raw/main/install.sh' -o install.sh && chmod +x install.sh && ./install.sh
+```
+
+国际用户：
+
+```bash
+curl -fL 'https://raw.githubusercontent.com/PYLinTech/XiaoyuPostHub/refs/heads/main/install.sh' -o install.sh && chmod +x install.sh && ./install.sh
+```
+
 ## 已实现功能
 
 - 文件与文件夹管理：多文件上传、SHA-256 完整性校验、目录浏览、预览、重命名、删除和打包下载。
