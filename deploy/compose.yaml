@@ -16,6 +16,14 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    networks:
+      - xiaoyuposthub_network
+
 volumes:
   xiaoyuposthub_data:
     name: xiaoyuposthub_data
+
+networks:
+  xiaoyuposthub_network:
+    name: ${XIAOYUPOSTHUB_NETWORK:-xiaoyuposthub-network}
+    external: ${XIAOYUPOSTHUB_NETWORK_EXTERNAL:-false}

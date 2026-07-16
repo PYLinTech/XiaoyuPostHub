@@ -13,6 +13,7 @@
 # 环境变量：
 #   XIAOYUPOSTHUB_HOME=/srv/xiaoyuposthub ./install.sh
 #   XIAOYUPOSTHUB_IMAGE=pylintech/xiaoyuposthub:v1.0.0 ./install.sh
+#   XIAOYUPOSTHUB_NETWORK=1panel-network ./install.sh
 
 set -Eeuo pipefail
 
@@ -21,6 +22,7 @@ PROJECT_NAME="xiaoyuposthub"
 CONTAINER_NAME="XiaoyuPostHub"
 IMAGE_DEFAULT="pylintech/xiaoyuposthub:latest"
 PORT_DEFAULT="8080"
+NETWORK_DEFAULT="xiaoyuposthub-network"
 
 INSTALL_DIR="${XIAOYUPOSTHUB_HOME:-/opt/xiaoyuposthub}"
 COMPOSE_FILE="${INSTALL_DIR}/compose.yaml"
@@ -59,6 +61,8 @@ usage() {
 环境变量：
   XIAOYUPOSTHUB_HOME               安装目录，默认 ${INSTALL_DIR}
   XIAOYUPOSTHUB_IMAGE              镜像，默认 ${IMAGE_DEFAULT}
+  XIAOYUPOSTHUB_NETWORK            Docker 网络；已存在时直接加入，不存在时创建
+  XIAOYUPOSTHUB_NETWORK_EXTERNAL   true 使用已有网络，false 由 Compose 创建
 
 默认值：
   访问端口：${PORT_DEFAULT}
@@ -186,17 +190,18 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    networks:
+      - xiaoyuposthub_network
+
 volumes:
   xiaoyuposthub_data:
     name: xiaoyuposthub_data
-EOF_COMPOSE
-}
 
-# env_quote 使用单引号字面量，避免 bcrypt 中的 $ 被 Compose 插值。
-env_quote() {
-    local value="$1"
-    [[ "${value}" != *"'"* ]] || die ".env 配置值不能包含单引号"
-    printf "'%s'" "${value}"
+networks:
+  xiaoyuposthub_network:
+    name: ${XIAOYUPOSTHUB_NETWORK:-xiaoyuposthub-network}
+    external: ${XIAOYUPOSTHUB_NETWORK_EXTERNAL:-false}
+EOF_COMPOSE
 }
 
 # prompt_required 通用必填项交互读取。
@@ -239,40 +244,26 @@ prompt_bcrypt_hash() {
     done
 }
 
-# create_env_file 首次运行时生成部署配置。
-#
-# 配置值统一使用单引号字面量。
-create_env_file() {
+# ensure_env_file 创建空配置骨架；随后由配置检查逐项补全。
+ensure_env_file() {
     [[ -f "${ENV_FILE}" ]] && return 0
     [[ -t 0 ]] || die "未找到 .env，且当前不是交互终端"
-
     warn "首次运行，需要创建配置文件"
-
-    local database_url
-    local admin_username
-    local admin_password_hash
-    local host_port
-    local image_name
-
-    database_url="$(prompt_required "DATABASE_URL" "数据库地址 DATABASE_URL")"
-    admin_username="$(prompt_default "管理员账号" "admin")"
-    image_name="${XIAOYUPOSTHUB_IMAGE:-${IMAGE_DEFAULT}}"
-    admin_password_hash="$(prompt_bcrypt_hash "${image_name}")"
-    host_port="$(prompt_default "对外暴露端口" "${PORT_DEFAULT}")"
-
-    cat > "${ENV_FILE}" <<EOF_ENV
+    cat > "${ENV_FILE}" <<'EOF_ENV'
 # XiaoyuPostHub 配置
 
 # 数据库
-DATABASE_URL=$(env_quote "${database_url}")
+DATABASE_URL=
 
 # 超级管理员
-SUPER_ADMIN_USERNAME=$(env_quote "${admin_username}")
-SUPER_ADMIN_PASSWORD_HASH=$(env_quote "${admin_password_hash}")
+SUPER_ADMIN_USERNAME=
+SUPER_ADMIN_PASSWORD_HASH=
 
 # Docker
-XIAOYUPOSTHUB_IMAGE=$(env_quote "${image_name}")
-XIAOYUPOSTHUB_PORT=$(env_quote "${host_port}")
+XIAOYUPOSTHUB_IMAGE=pylintech/xiaoyuposthub:latest
+XIAOYUPOSTHUB_PORT=
+XIAOYUPOSTHUB_NETWORK=
+XIAOYUPOSTHUB_NETWORK_EXTERNAL=
 
 # 前端
 STATIC_DIR=/app/web
@@ -280,9 +271,7 @@ STATIC_DIR=/app/web
 # HTTPS 使用 true，直接 HTTP 使用 false
 SESSION_COOKIE_SECURE=true
 EOF_ENV
-
     chmod 600 "${ENV_FILE}" || true
-    ok "配置已创建：${ENV_FILE}"
 }
 
 # remove_conflicting_container 删除旧容器（不在本 compose 项目下的同名容器）。
@@ -328,6 +317,252 @@ write_env_value() {
     mv "${tmp}" "${ENV_FILE}"
 }
 
+require_interactive_fix() {
+    local key="$1"
+    [[ -t 0 ]] || die "配置 ${key} 缺失或无效，且当前不是交互终端"
+}
+
+is_valid_database_url() {
+    [[ "$1" == postgres://* || "$1" == postgresql://* ]] \
+        && [[ "$1" != *[[:space:]]* && "$1" != *"'"* ]]
+}
+
+is_valid_bcrypt_hash() {
+    local value="$1"
+    local pattern='^\$2[aby]\$12\$[./A-Za-z0-9]{53}$'
+    [[ "${value}" =~ ${pattern} ]]
+}
+
+is_valid_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+is_valid_network_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
+}
+
+ensure_database_url() {
+    local value=""
+    value="$(read_env_value DATABASE_URL)"
+    if is_valid_database_url "${value}"; then return 0; fi
+    [[ -n "${value}" ]] && warn "DATABASE_URL 格式无效，需要以 postgres:// 或 postgresql:// 开头"
+    require_interactive_fix DATABASE_URL
+    while true; do
+        value="$(prompt_required DATABASE_URL "数据库地址 DATABASE_URL")"
+        is_valid_database_url "${value}" && break
+        warn "数据库地址格式无效"
+    done
+    write_env_value DATABASE_URL "${value}"
+}
+
+ensure_admin_username() {
+    local value=""
+    value="$(read_env_value SUPER_ADMIN_USERNAME)"
+    [[ -n "${value//[[:space:]]/}" && "${value}" != *"'"* ]] && return 0
+    require_interactive_fix SUPER_ADMIN_USERNAME
+    while true; do
+        value="$(prompt_default "管理员账号" "admin")"
+        [[ -n "${value//[[:space:]]/}" && "${value}" != *"'"* ]] && break
+        warn "管理员账号不能为空且不能包含单引号"
+    done
+    write_env_value SUPER_ADMIN_USERNAME "${value}"
+}
+
+ensure_admin_password_hash() {
+    local image="$1" value=""
+    value="$(read_env_value SUPER_ADMIN_PASSWORD_HASH)"
+    if is_valid_bcrypt_hash "${value}"; then return 0; fi
+    [[ -n "${value}" ]] && warn "SUPER_ADMIN_PASSWORD_HASH 不是有效的 bcrypt cost=12 哈希"
+    require_interactive_fix SUPER_ADMIN_PASSWORD_HASH
+    value="$(prompt_bcrypt_hash "${image}")"
+    write_env_value SUPER_ADMIN_PASSWORD_HASH "${value}"
+}
+
+ensure_host_port() {
+    local value=""
+    value="${XIAOYUPOSTHUB_PORT:-$(read_env_value XIAOYUPOSTHUB_PORT)}"
+    if is_valid_port "${value}"; then
+        write_env_value XIAOYUPOSTHUB_PORT "${value}"
+        return 0
+    fi
+    [[ -n "${value}" ]] && warn "XIAOYUPOSTHUB_PORT 必须是 1-65535"
+    require_interactive_fix XIAOYUPOSTHUB_PORT
+    while true; do
+        value="$(prompt_default "对外暴露端口" "${PORT_DEFAULT}")"
+        is_valid_port "${value}" && break
+        warn "端口必须是 1-65535"
+    done
+    write_env_value XIAOYUPOSTHUB_PORT "${value}"
+}
+
+ensure_fixed_defaults() {
+    local value="" normalized=""
+    value="$(read_env_value STATIC_DIR)"
+    [[ -n "${value}" ]] || write_env_value STATIC_DIR /app/web
+
+    value="$(read_env_value SESSION_COOKIE_SECURE)"
+    normalized="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+    case "${normalized}" in
+        true|false) ;;
+        "") write_env_value SESSION_COOKIE_SECURE true ;;
+        *)
+            warn "SESSION_COOKIE_SECURE 只能是 true 或 false"
+            require_interactive_fix SESSION_COOKIE_SECURE
+            while true; do
+                value="$(prompt_default "是否仅允许 HTTPS Cookie（true/false）" "true")"
+                normalized="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
+                case "${normalized}" in
+                    true|false) write_env_value SESSION_COOKIE_SECURE "${normalized}"; break ;;
+                    *) warn "请输入 true 或 false" ;;
+                esac
+            done
+            ;;
+    esac
+}
+
+select_network() {
+    local -a networks=()
+    local choice="" name="" index=1
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] && networks[${#networks[@]}]="${name}"
+    done < <(docker network ls --filter driver=bridge --format '{{.Name}}' | sort)
+
+    info "请选择 XiaoyuPostHub 要加入的 Docker 网络：" >&2
+    for name in "${networks[@]}"; do
+        printf "  %d) 使用已有网络 %s\n" "${index}" "${name}" >&2
+        ((index += 1))
+    done
+    printf "  %d) 新建网络\n" "${index}" >&2
+
+    while true; do
+        printf "请输入数字: " >&2
+        IFS= read -r choice
+        if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= index )); then
+            break
+        fi
+        warn "请输入 1-${index} 之间的数字" >&2
+    done
+
+    if (( choice <= ${#networks[@]} )); then
+        SELECTED_NETWORK="${networks[choice - 1]}"
+        SELECTED_NETWORK_EXTERNAL=true
+        return 0
+    fi
+
+    while true; do
+        name="$(prompt_default "新网络名称" "${NETWORK_DEFAULT}")"
+        if ! is_valid_network_name "${name}"; then
+            warn "网络名称只能包含字母、数字、点、下划线和连字符" >&2
+            continue
+        fi
+        if docker network inspect "${name}" >/dev/null 2>&1; then
+            warn "网络 ${name} 已存在，请从已有网络列表选择或换一个名称" >&2
+            continue
+        fi
+        SELECTED_NETWORK="${name}"
+        SELECTED_NETWORK_EXTERNAL=false
+        return 0
+    done
+}
+
+ensure_network() {
+    local name="${XIAOYUPOSTHUB_NETWORK:-}"
+    local external="${XIAOYUPOSTHUB_NETWORK_EXTERNAL:-}"
+    local configured_name configured_external normalized_external managed_project=""
+    configured_name="$(read_env_value XIAOYUPOSTHUB_NETWORK)"
+    configured_external="$(read_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL)"
+    name="${name:-${configured_name}}"
+    external="${external:-${configured_external}}"
+    normalized_external="$(printf '%s' "${external}" | tr '[:upper:]' '[:lower:]')"
+
+    if [[ -n "${name}" && -z "${normalized_external}" ]] && is_valid_network_name "${name}"; then
+        if docker network inspect "${name}" >/dev/null 2>&1; then
+            normalized_external=true
+        else
+            normalized_external=false
+        fi
+    fi
+
+    if [[ -n "${name}" ]] && is_valid_network_name "${name}"; then
+        case "${normalized_external}" in
+            true)
+                if docker network inspect "${name}" >/dev/null 2>&1; then
+                    write_env_value XIAOYUPOSTHUB_NETWORK "${name}"
+                    write_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL true
+                    return 0
+                fi
+                warn "配置的外部网络 ${name} 不存在"
+                ;;
+            false)
+                if docker network inspect "${name}" >/dev/null 2>&1; then
+                    managed_project="$(docker network inspect -f '{{index .Labels "com.docker.compose.project"}}' "${name}" 2>/dev/null || true)"
+                    if [[ "${managed_project}" == "${PROJECT_NAME}" ]]; then
+                        # Compose 创建的网络在重复安装时已经存在，仍由 Compose 管理。
+                        write_env_value XIAOYUPOSTHUB_NETWORK "${name}"
+                        write_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL false
+                        return 0
+                    fi
+                    warn "网络 ${name} 已存在但不归当前 Compose 项目管理"
+                else
+                    write_env_value XIAOYUPOSTHUB_NETWORK "${name}"
+                    write_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL false
+                    return 0
+                fi
+                ;;
+            *) warn "XIAOYUPOSTHUB_NETWORK_EXTERNAL 必须是 true 或 false" ;;
+        esac
+    elif [[ -n "${name}" ]]; then
+        warn "Docker 网络名称 ${name} 无效"
+    fi
+
+    require_interactive_fix XIAOYUPOSTHUB_NETWORK
+    SELECTED_NETWORK=""
+    SELECTED_NETWORK_EXTERNAL=""
+    select_network
+    write_env_value XIAOYUPOSTHUB_NETWORK "${SELECTED_NETWORK}"
+    write_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL "${SELECTED_NETWORK_EXTERNAL}"
+}
+
+resolve_image() {
+    local configured="" value=""
+    configured="$(read_env_value XIAOYUPOSTHUB_IMAGE)"
+    value="${XIAOYUPOSTHUB_IMAGE:-${configured:-${IMAGE_DEFAULT}}}"
+    if [[ -n "${value}" && "${value}" != *[[:space:]]* && "${value}" != *"'"* ]]; then
+        printf '%s' "${value}"
+        return 0
+    fi
+
+    [[ -n "${value}" ]] && warn "XIAOYUPOSTHUB_IMAGE 无效" >&2
+    require_interactive_fix XIAOYUPOSTHUB_IMAGE
+    while true; do
+        value="$(prompt_default "Docker 镜像" "${IMAGE_DEFAULT}")"
+        if [[ -n "${value}" && "${value}" != *[[:space:]]* && "${value}" != *"'"* ]]; then
+            printf '%s' "${value}"
+            return 0
+        fi
+        warn "Docker 镜像名称不能为空或包含空白、单引号" >&2
+    done
+}
+
+ensure_configuration_before_pull() {
+    ensure_database_url
+    ensure_admin_username
+    ensure_host_port
+    ensure_fixed_defaults
+    ensure_network
+    # 统一导出校验后的值，避免调用脚本时传入的无效环境变量继续覆盖 .env。
+    export XIAOYUPOSTHUB_PORT="$(read_env_value XIAOYUPOSTHUB_PORT)"
+    export XIAOYUPOSTHUB_NETWORK="$(read_env_value XIAOYUPOSTHUB_NETWORK)"
+    export XIAOYUPOSTHUB_NETWORK_EXTERNAL="$(read_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL)"
+}
+
+finish_configuration() {
+    local image="$1"
+    ensure_admin_password_hash "${image}"
+    chmod 600 "${ENV_FILE}" || true
+    ok "配置检查完成：${ENV_FILE}"
+}
+
 current_port() {
     local port=""
     port="$(read_env_value XIAOYUPOSTHUB_PORT)"
@@ -335,21 +570,22 @@ current_port() {
 }
 
 install_or_update() {
-    local configured_image=""
     local image=""
 
     check_docker
     prepare_install_dir
     write_compose_file
-    configured_image="$(read_env_value XIAOYUPOSTHUB_IMAGE)"
-    image="${XIAOYUPOSTHUB_IMAGE:-${configured_image:-${IMAGE_DEFAULT}}}"
+    ensure_env_file
+    image="$(resolve_image)"
     export XIAOYUPOSTHUB_IMAGE="${image}"
-    run_step "拉取镜像 ${image}" docker pull "${image}"
-    create_env_file
     write_env_value XIAOYUPOSTHUB_IMAGE "${image}"
+    ensure_configuration_before_pull
+    run_step "拉取镜像 ${image}" docker pull "${image}"
+    finish_configuration "${image}"
     remove_conflicting_container
 
-    run_step "启动服务" compose up -d --remove-orphans
+    run_step "检查 Docker Compose 配置" compose config --quiet
+    run_step "更新并启动服务" compose up -d --force-recreate --remove-orphans
 
     ok "完成：${APP_NAME} 已启动（http://localhost:$(current_port)）"
 }
@@ -366,7 +602,8 @@ show_status() {
     local status=""
     status="$(docker inspect -f '{{.State.Status}}' "${CONTAINER_NAME}" 2>/dev/null || true)"
     [[ -n "${status}" ]] || die "容器不存在：${CONTAINER_NAME}"
-    printf "容器：%s\n状态：%s\n端口：%s\n" "${CONTAINER_NAME}" "${status}" "$(current_port)"
+    printf "容器：%s\n状态：%s\n端口：%s\n网络：%s\n" \
+        "${CONTAINER_NAME}" "${status}" "$(current_port)" "$(read_env_value XIAOYUPOSTHUB_NETWORK)"
 }
 
 stop_service() {
@@ -415,4 +652,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
