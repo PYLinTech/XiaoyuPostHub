@@ -31,6 +31,7 @@ ENV_FILE="${INSTALL_DIR}/.env"
 ACTION="install"
 ACTION_SET=false
 PURGE=false
+DISPLAY_ADMIN_PASSWORD=""
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     BLUE=$'\033[34m'
@@ -204,21 +205,6 @@ networks:
 EOF_COMPOSE
 }
 
-# prompt_required 通用必填项交互读取。
-prompt_required() {
-    local name="$1"
-    local label="$2"
-    local value=""
-
-    while [[ -z "${value}" ]]; do
-        printf "%s: " "${label}" >&2
-        IFS= read -r value
-        [[ -n "${value}" ]] || warn "${name} 不能为空" >&2
-    done
-
-    printf "%s" "${value}"
-}
-
 # prompt_default 带默认值交互读取；空输入时使用默认值。
 prompt_default() {
     local label="$1"
@@ -230,18 +216,15 @@ prompt_default() {
     printf "%s" "${value:-${default_value}}"
 }
 
-prompt_bcrypt_hash() {
-    local image="$1" first="" second="" hash=""
-    while true; do
-        printf "管理员密码: " >&2; IFS= read -r -s first; printf "\n" >&2
-        [[ -n "${first}" ]] || { warn "密码不能为空" >&2; continue; }
-        printf "确认密码: " >&2; IFS= read -r -s second; printf "\n" >&2
-        [[ "${first}" == "${second}" ]] || { warn "两次密码不一致" >&2; continue; }
-        hash="$(printf %s "${first}" | docker run --rm -i -e XPH_INTERNAL_HASH_PASSWORD=true --entrypoint /app/xph-backend "${image}")" || die "生成 bcrypt 哈希失败"
-        unset first second
-        [[ -n "${hash}" ]] || die "生成 bcrypt 哈希失败"
-        printf "%s" "${hash}"; return 0
+prompt_secret_required() {
+    local name="$1" label="$2" value=""
+    while [[ -z "${value}" ]]; do
+        printf "%s（输入不回显）: " "${label}" >&2
+        IFS= read -r -s value
+        printf "\n" >&2
+        [[ -n "${value}" ]] || warn "${name} 不能为空" >&2
     done
+    printf '%s' "${value}"
 }
 
 # ensure_env_file 创建空配置骨架；随后由配置检查逐项补全。
@@ -339,43 +322,6 @@ is_valid_port() {
 
 is_valid_network_name() {
     [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]
-}
-
-ensure_database_url() {
-    local value=""
-    value="$(read_env_value DATABASE_URL)"
-    if is_valid_database_url "${value}"; then return 0; fi
-    [[ -n "${value}" ]] && warn "DATABASE_URL 格式无效，需要以 postgres:// 或 postgresql:// 开头"
-    require_interactive_fix DATABASE_URL
-    while true; do
-        value="$(prompt_required DATABASE_URL "数据库地址 DATABASE_URL")"
-        is_valid_database_url "${value}" && break
-        warn "数据库地址格式无效"
-    done
-    write_env_value DATABASE_URL "${value}"
-}
-
-ensure_admin_username() {
-    local value=""
-    value="$(read_env_value SUPER_ADMIN_USERNAME)"
-    [[ -n "${value//[[:space:]]/}" && "${value}" != *"'"* ]] && return 0
-    require_interactive_fix SUPER_ADMIN_USERNAME
-    while true; do
-        value="$(prompt_default "管理员账号" "admin")"
-        [[ -n "${value//[[:space:]]/}" && "${value}" != *"'"* ]] && break
-        warn "管理员账号不能为空且不能包含单引号"
-    done
-    write_env_value SUPER_ADMIN_USERNAME "${value}"
-}
-
-ensure_admin_password_hash() {
-    local image="$1" value=""
-    value="$(read_env_value SUPER_ADMIN_PASSWORD_HASH)"
-    if is_valid_bcrypt_hash "${value}"; then return 0; fi
-    [[ -n "${value}" ]] && warn "SUPER_ADMIN_PASSWORD_HASH 不是有效的 bcrypt cost=12 哈希"
-    require_interactive_fix SUPER_ADMIN_PASSWORD_HASH
-    value="$(prompt_bcrypt_hash "${image}")"
-    write_env_value SUPER_ADMIN_PASSWORD_HASH "${value}"
 }
 
 ensure_host_port() {
@@ -523,6 +469,160 @@ ensure_network() {
     write_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL "${SELECTED_NETWORK_EXTERNAL}"
 }
 
+prepare_selected_network() {
+    local name external
+    name="$(read_env_value XIAOYUPOSTHUB_NETWORK)"
+    external="$(read_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL)"
+
+    if docker network inspect "${name}" >/dev/null 2>&1; then
+        return 0
+    fi
+    [[ "${external}" == "false" ]] || die "Docker 网络不存在：${name}"
+
+    run_step "创建 Docker 网络 ${name}" docker network create "${name}"
+    # 网络已由安装脚本创建，交给 Compose 作为外部网络复用。
+    write_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL true
+}
+
+show_database_error() {
+    local log="$1"
+    warn "数据库连接或权限检查失败：" >&2
+    sed 's/^/    /' "${log}" >&2
+}
+
+test_database_url_in_container() {
+    local image="$1" network="$2" database_url="$3" log=""
+    log="$(mktemp)"
+    if DATABASE_URL="${database_url}" docker run --rm \
+        --network "${network}" \
+        -e XPH_INTERNAL_DATABASE_ACTION=test \
+        -e DATABASE_URL \
+        --entrypoint /app/xph-backend \
+        "${image}" >"${log}" 2>&1; then
+        rm -f "${log}"
+        return 0
+    fi
+    show_database_error "${log}"
+    rm -f "${log}"
+    return 1
+}
+
+provision_database_in_container() {
+    local image="$1" network="$2" admin_url="$3" log="" output=""
+    log="$(mktemp)"
+    if output="$(XPH_DATABASE_ADMIN_URL="${admin_url}" docker run --rm \
+        --network "${network}" \
+        -e XPH_INTERNAL_DATABASE_ACTION=provision \
+        -e XPH_DATABASE_ADMIN_URL \
+        --entrypoint /app/xph-backend \
+        "${image}" 2>"${log}")" && is_valid_database_url "${output}"; then
+        rm -f "${log}"
+        printf '%s' "${output}"
+        return 0
+    fi
+    show_database_error "${log}"
+    rm -f "${log}"
+    return 1
+}
+
+prompt_database_url() {
+    local image="$1" network="$2" current="" choice="" value=""
+    current="$(read_env_value DATABASE_URL)"
+    if is_valid_database_url "${current}"; then
+        info "检查现有数据库配置"
+        if test_database_url_in_container "${image}" "${network}" "${current}"; then
+            ok "数据库连接和建表权限正常"
+            return 0
+        fi
+        warn "现有数据库配置不可用，请重新配置"
+    fi
+
+    require_interactive_fix DATABASE_URL
+    while true; do
+        info "请选择数据库配置方式：" >&2
+        printf "  1) 自动创建数据库（输入管理员连接）\n" >&2
+        printf "  2) 使用现有数据库（输入应用连接）\n" >&2
+        printf "请输入数字: " >&2
+        IFS= read -r choice
+        case "${choice}" in
+            1)
+                value="$(prompt_secret_required DATABASE_URL "PostgreSQL 管理员连接")"
+                if ! is_valid_database_url "${value}"; then
+                    warn "连接地址格式无效" >&2
+                    continue
+                fi
+                if value="$(provision_database_in_container "${image}" "${network}" "${value}")"; then
+                    write_env_value DATABASE_URL "${value}"
+                    ok "已创建并验证专用数据库"
+                    return 0
+                fi
+                ;;
+            2)
+                value="$(prompt_secret_required DATABASE_URL "应用数据库连接")"
+                if ! is_valid_database_url "${value}"; then
+                    warn "连接地址格式无效" >&2
+                    continue
+                fi
+                if test_database_url_in_container "${image}" "${network}" "${value}"; then
+                    write_env_value DATABASE_URL "${value}"
+                    ok "数据库连接和建表权限正常"
+                    return 0
+                fi
+                ;;
+            *) warn "请输入 1 或 2" >&2 ;;
+        esac
+        warn "请重新输入数据库配置" >&2
+    done
+}
+
+configure_super_admin() {
+    local image="$1" username="" hash="" first="" second=""
+    username="$(read_env_value SUPER_ADMIN_USERNAME)"
+    hash="$(read_env_value SUPER_ADMIN_PASSWORD_HASH)"
+    if [[ -n "${username//[[:space:]]/}" && "${username}" != *"'"* ]] && is_valid_bcrypt_hash "${hash}"; then
+        return 0
+    fi
+
+    require_interactive_fix SUPER_ADMIN_USERNAME
+    while true; do
+        username="$(prompt_default "站点管理员账号" "${username:-admin}")"
+        [[ -n "${username//[[:space:]]/}" && "${username}" != *"'"* ]] && break
+        warn "管理员账号不能为空且不能包含单引号" >&2
+    done
+    while true; do
+        printf "站点管理员密码: " >&2; IFS= read -r -s first; printf "\n" >&2
+        [[ -n "${first}" ]] || { warn "密码不能为空" >&2; continue; }
+        printf "确认管理员密码: " >&2; IFS= read -r -s second; printf "\n" >&2
+        [[ "${first}" == "${second}" ]] || { warn "两次密码不一致" >&2; continue; }
+        hash="$(printf %s "${first}" | docker run --rm -i \
+            -e XPH_INTERNAL_HASH_PASSWORD=true \
+            --entrypoint /app/xph-backend "${image}")" || die "生成管理员密码哈希失败"
+        is_valid_bcrypt_hash "${hash}" || die "生成管理员密码哈希失败"
+        break
+    done
+
+    write_env_value SUPER_ADMIN_USERNAME "${username}"
+    write_env_value SUPER_ADMIN_PASSWORD_HASH "${hash}"
+    DISPLAY_ADMIN_PASSWORD="${first}"
+    unset first second
+}
+
+print_install_summary() {
+    local image="$1" username network password_display
+    username="$(read_env_value SUPER_ADMIN_USERNAME)"
+    network="$(read_env_value XIAOYUPOSTHUB_NETWORK)"
+    password_display="${DISPLAY_ADMIN_PASSWORD:-保持原密码（脚本不保存明文）}"
+
+    printf "\n安装完成\n"
+    printf "  访问地址：http://localhost:%s\n" "$(current_port)"
+    printf "  管理员账号：%s\n" "${username}"
+    printf "  管理员密码：%s\n" "${password_display}"
+    printf "  Docker 网络：%s\n" "${network}"
+    printf "  Docker 镜像：%s\n" "${image}"
+    printf "  配置文件：%s\n" "${ENV_FILE}"
+    [[ -z "${DISPLAY_ADMIN_PASSWORD}" ]] || warn "管理员密码仅显示本次，请立即保存"
+}
+
 resolve_image() {
     local configured="" value=""
     configured="$(read_env_value XIAOYUPOSTHUB_IMAGE)"
@@ -544,25 +644,6 @@ resolve_image() {
     done
 }
 
-ensure_configuration_before_pull() {
-    ensure_database_url
-    ensure_admin_username
-    ensure_host_port
-    ensure_fixed_defaults
-    ensure_network
-    # 统一导出校验后的值，避免调用脚本时传入的无效环境变量继续覆盖 .env。
-    export XIAOYUPOSTHUB_PORT="$(read_env_value XIAOYUPOSTHUB_PORT)"
-    export XIAOYUPOSTHUB_NETWORK="$(read_env_value XIAOYUPOSTHUB_NETWORK)"
-    export XIAOYUPOSTHUB_NETWORK_EXTERNAL="$(read_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL)"
-}
-
-finish_configuration() {
-    local image="$1"
-    ensure_admin_password_hash "${image}"
-    chmod 600 "${ENV_FILE}" || true
-    ok "配置检查完成：${ENV_FILE}"
-}
-
 current_port() {
     local port=""
     port="$(read_env_value XIAOYUPOSTHUB_PORT)"
@@ -571,23 +652,35 @@ current_port() {
 
 install_or_update() {
     local image=""
+    local network=""
 
     check_docker
     prepare_install_dir
     write_compose_file
     ensure_env_file
+
     image="$(resolve_image)"
     export XIAOYUPOSTHUB_IMAGE="${image}"
     write_env_value XIAOYUPOSTHUB_IMAGE "${image}"
-    ensure_configuration_before_pull
     run_step "拉取镜像 ${image}" docker pull "${image}"
-    finish_configuration "${image}"
+
+    ensure_network
+    prepare_selected_network
+    network="$(read_env_value XIAOYUPOSTHUB_NETWORK)"
+    export XIAOYUPOSTHUB_NETWORK="${network}"
+    export XIAOYUPOSTHUB_NETWORK_EXTERNAL="$(read_env_value XIAOYUPOSTHUB_NETWORK_EXTERNAL)"
+
+    prompt_database_url "${image}" "${network}"
+    ensure_host_port
+    ensure_fixed_defaults
+    export XIAOYUPOSTHUB_PORT="$(read_env_value XIAOYUPOSTHUB_PORT)"
+    configure_super_admin "${image}"
+    chmod 600 "${ENV_FILE}" || true
     remove_conflicting_container
 
     run_step "检查 Docker Compose 配置" compose config --quiet
     run_step "更新并启动服务" compose up -d --force-recreate --remove-orphans
-
-    ok "完成：${APP_NAME} 已启动（http://localhost:$(current_port)）"
+    print_install_summary "${image}"
 }
 
 show_logs() {

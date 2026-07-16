@@ -15,6 +15,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -53,6 +55,10 @@ func main() {
 			log.Fatal(err)
 		}
 		fmt.Print(hash)
+		return
+	}
+	if action := os.Getenv("XPH_INTERNAL_DATABASE_ACTION"); action != "" {
+		runInternalDatabaseAction(action)
 		return
 	}
 
@@ -177,6 +183,37 @@ func main() {
 
 	database.Close()
 	log.Printf("数据库连接池已关闭，后端退出")
+}
+
+func runInternalDatabaseAction(action string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	switch action {
+	case "test":
+		if err := db.TestInstallConnection(ctx, os.Getenv("DATABASE_URL")); err != nil {
+			log.Fatal(err)
+		}
+	case "provision":
+		passwordBytes := make([]byte, 24)
+		if _, err := rand.Read(passwordBytes); err != nil {
+			log.Fatal("生成数据库密码失败")
+		}
+		password := base64.RawURLEncoding.EncodeToString(passwordBytes)
+		databaseURL, err := db.ProvisionDatabase(
+			ctx,
+			os.Getenv("XPH_DATABASE_ADMIN_URL"),
+			"xiaoyuposthub",
+			"xiaoyuposthub",
+			password,
+		)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Print(databaseURL)
+	default:
+		log.Fatal("不支持的数据库安装操作")
+	}
 }
 
 func defaultEnvFile() string {
