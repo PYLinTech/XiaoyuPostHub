@@ -145,10 +145,8 @@ func (r *Repo) ListOwned(ctx context.Context, ownerID int64) ([]Session, error) 
 		       total_chunks, mime_type, expected_sha256, status, resource_id,
 		       error_message, queue_position, created_at, updated_at, expires_at
 		FROM upload_sessions
-		WHERE owner_user_id=$1 AND status <> 'canceled'
-		  AND (status <> 'completed' OR updated_at > NOW()-INTERVAL '24 hours')
-		ORDER BY CASE WHEN status IN ('completed','canceled') THEN 1 ELSE 0 END,
-		         queue_position, created_at LIMIT 100`, ownerID)
+		WHERE owner_user_id=$1 AND status NOT IN ('completed','canceled')
+		ORDER BY queue_position, created_at LIMIT 100`, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -361,5 +359,6 @@ func scanSession(row scanner) (Session, error) {
 	item.CreatedAt = createdAt.Time
 	item.UpdatedAt = updatedAt.Time
 	item.ExpiresAt = expiresAt.Time
+	item.ReceivedChunks = make([]int32, 0)
 	return item, nil
 }

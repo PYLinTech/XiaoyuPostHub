@@ -8,7 +8,7 @@
   border: 1px solid var(--color-border-2);
   border-radius: 12px;
   background: var(--color-bg-2);
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 20%);
 }
 
 .header {
@@ -87,87 +87,70 @@
 }
 
 .capsule {
-  --upload-progress: 0%;
-
   position: fixed;
   right: 20px;
   bottom: 20px;
   z-index: 1100;
-  width: 86px;
-  height: 42px;
+  width: var(--liquid-width);
+  height: var(--liquid-height);
+  padding: 0;
   overflow: hidden;
-  border: 1px solid rgba(var(--primary-6), 0.45);
+  border: 1px solid var(--color-border-3);
   border-radius: 999px;
   color: var(--color-text-1);
-  background: var(--color-bg-2);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.2);
+  background: var(--liquid-background);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 20%);
   cursor: pointer;
   isolation: isolate;
-
-  &::before {
-    position: absolute;
-    z-index: -2;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    width: var(--upload-progress);
-    background: linear-gradient(
-      90deg,
-      rgba(var(--primary-6), 0.2),
-      rgba(var(--primary-6), 0.48)
-    );
-    content: '';
-    transition: width 260ms ease;
-  }
-
-  &::after {
-    position: absolute;
-    z-index: -1;
-    inset: 0 auto 0 0;
-    width: var(--upload-progress);
-    background:
-      radial-gradient(
-          ellipse at 50% 115%,
-          rgba(var(--primary-6), 0.3) 0 46%,
-          transparent 48%
-        )
-        -36px 0 / 36px 18px repeat-x,
-      linear-gradient(
-        105deg,
-        transparent 20%,
-        rgba(255, 255, 255, 0.28) 48%,
-        transparent 76%
-      )
-      -44px 0 / 44px 100% repeat-x;
-    content: '';
-    transition: width 260ms ease;
-    animation: upload-wave 1.4s linear infinite;
-  }
-
-  span {
-    position: relative;
-    font-size: 13px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
 }
 
-@keyframes upload-wave {
+.liquid-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.liquid-complete {
+  fill: var(--liquid-color);
+}
+
+.wave-position {
+  transform: translateX(var(--liquid-x));
+  transition: transform 320ms ease;
+}
+
+.wave {
+  fill: var(--liquid-color);
+  animation: liquid-wave var(--wave-duration) linear infinite;
+  will-change: transform;
+}
+
+.wave-secondary {
+  opacity: 0.42;
+  animation-direction: reverse;
+  animation-duration: var(--wave-duration-secondary);
+}
+
+.capsule-label {
+  position: relative;
+  z-index: 1;
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes liquid-wave {
   from {
-    background-position:
-      -36px 0,
-      -44px 0;
+    transform: translateY(0);
   }
 
   to {
-    background-position:
-      36px 0,
-      44px 0;
+    transform: translateY(calc(-1 * var(--wave-period)));
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .capsule::after {
+  .wave {
     animation: none;
   }
 }
@@ -204,7 +187,7 @@
   .capsule {
     right: 12px;
     bottom: 12px;
-    width: 78px;
-    height: 40px;
+    width: 88px;
+    height: 38px;
   }
 }

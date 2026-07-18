@@ -127,7 +127,7 @@ func uploadSessionsHandler(deps Deps) http.HandlerFunc {
 		source, sourceErr := deps.ResourceRepo.FindFileByChecksum(r.Context(), req.SHA256, req.Size)
 		if sourceErr == nil && source.StorageKey != nil {
 			if _, err := deps.FileStore.ValidateFile(r.Context(), source); err == nil {
-				item, instantErr := cloneUploadedResource(r, deps, u.ID, parentID, req.Filename, req.MimeType, req.Size, req.SHA256, *source.StorageKey)
+				item, instantErr := cloneUploadedResource(r, deps, u.ID, parentID, req.Filename, req.MimeType, req.Size, req.SHA256, *source.StorageKey, session.BatchID)
 				if instantErr != nil {
 					_ = deps.UploadRepo.SetStatus(r.Context(), u.ID, session.ID, "failed", "秒传失败")
 					writeResourceMutationError(w, instantErr)
@@ -373,7 +373,7 @@ func handleUploadComplete(w http.ResponseWriter, r *http.Request, deps Deps, own
 		writeResourceMutationError(w, err)
 		return
 	}
-	if err := applyUploadReview(r, deps, ownerID, item, finalPath); err != nil {
+	if err := applyUploadReview(r, deps, ownerID, item, finalPath, session.BatchID); err != nil {
 		failUploadTask(r, deps, ownerID, sessionID, "提交文件审核失败")
 		writeBusinessError(w, http.StatusInternalServerError, "提交文件审核失败")
 		return
@@ -386,7 +386,7 @@ func handleUploadComplete(w http.ResponseWriter, r *http.Request, deps Deps, own
 	writeJSON(w, http.StatusCreated, map[string]any{"status": "ok", "resource": item})
 }
 
-func cloneUploadedResource(r *http.Request, deps Deps, ownerID int64, parentID *string, filename, mimeType string, size int64, checksum, sourceStorageKey string) (resource.Resource, error) {
+func cloneUploadedResource(r *http.Request, deps Deps, ownerID int64, parentID *string, filename, mimeType string, size int64, checksum, sourceStorageKey, uploadTaskID string) (resource.Resource, error) {
 	storageKey, err := resource.StorageKey()
 	if err != nil {
 		return resource.Resource{}, err
@@ -400,13 +400,13 @@ func cloneUploadedResource(r *http.Request, deps Deps, ownerID int64, parentID *
 		_ = os.Remove(path)
 		return resource.Resource{}, err
 	}
-	if err := applyUploadReview(r, deps, ownerID, item, path); err != nil {
+	if err := applyUploadReview(r, deps, ownerID, item, path, uploadTaskID); err != nil {
 		return resource.Resource{}, err
 	}
 	return item, nil
 }
 
-func applyUploadReview(r *http.Request, deps Deps, ownerID int64, item resource.Resource, finalPath string) error {
+func applyUploadReview(r *http.Request, deps Deps, ownerID int64, item resource.Resource, finalPath, uploadTaskID string) error {
 	settings, err := deps.AdminRepo.GetReviewSettings(r.Context())
 	if err != nil {
 		_, _ = deps.ResourceRepo.DeleteOwned(r.Context(), ownerID, item.ID)
@@ -414,7 +414,7 @@ func applyUploadReview(r *http.Request, deps Deps, ownerID int64, item resource.
 		return err
 	}
 	if settings.UploadRequiresReview {
-		if err := deps.AdminRepo.MarkFilePending(r.Context(), item.ID); err != nil {
+		if err := deps.AdminRepo.MarkFilePending(r.Context(), item.ID, uploadTaskID); err != nil {
 			_, _ = deps.ResourceRepo.DeleteOwned(r.Context(), ownerID, item.ID)
 			_ = os.Remove(finalPath)
 			return err

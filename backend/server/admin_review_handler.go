@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -85,6 +86,7 @@ func reviewScopes(r *http.Request) map[string]bool {
 func handleFileReviewList(w http.ResponseWriter, r *http.Request, deps Deps) {
 	flat, err := deps.AdminRepo.ListFileReviews(r.Context())
 	if err != nil {
+		log.Printf("读取文件审查列表失败: %v", err)
 		writeBusinessError(w, http.StatusInternalServerError, "读取文件审查列表失败")
 		return
 	}

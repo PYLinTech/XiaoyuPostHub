@@ -466,17 +466,17 @@ func (r *Repo) GetReviewSettings(ctx context.Context) (ReviewSettings, error) {
 	return out, err
 }
 
-func (r *Repo) MarkFilePending(ctx context.Context, resourceID string) error {
+func (r *Repo) MarkFilePending(ctx context.Context, resourceID, uploadTaskID string) error {
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO file_moderations(resource_id,owner_user_id,file_name,size_bytes,mime_type,upload_task_id,status,reason,submitted_at,reviewed_at,reviewer_user_id)
 		SELECT resource.id,resource.owner_user_id,resource.name,resource.size_bytes,resource.mime_type,
-		       COALESCE(session.batch_id,session.id,resource.id),'pending','',NOW(),NULL,NULL
-		FROM resources resource LEFT JOIN upload_sessions session ON session.resource_id=resource.id
+		       COALESCE(NULLIF($2,''),resource.id),'pending','',NOW(),NULL,NULL
+		FROM resources resource
 		WHERE resource.id=$1
 		ON CONFLICT(resource_id) DO UPDATE SET
 		owner_user_id=EXCLUDED.owner_user_id,file_name=EXCLUDED.file_name,size_bytes=EXCLUDED.size_bytes,
 		mime_type=EXCLUDED.mime_type,upload_task_id=EXCLUDED.upload_task_id,status='pending',reason='',
-		delete_file=FALSE,blocked=FALSE,submitted_at=NOW(),reviewed_at=NULL,reviewer_user_id=NULL`, resourceID)
+		delete_file=FALSE,blocked=FALSE,submitted_at=NOW(),reviewed_at=NULL,reviewer_user_id=NULL`, resourceID, uploadTaskID)
 	return err
 }
 
@@ -506,39 +506,24 @@ func (r *Repo) IsShareApproved(ctx context.Context, shareID int64) (bool, error)
 
 func (r *Repo) ListFileReviews(ctx context.Context) ([]FileReviewItem, error) {
 	rows, err := r.pool.Query(ctx, `
-		WITH current_files AS (
-			SELECT resource.id AS resource_id,
-			       COALESCE(session.batch_id,session.id,resource.id) AS task_id,
-			       resource.name,resource.name AS relative_path,resource.size_bytes,resource.mime_type,
-			       resource.owner_user_id,owner.username,
-			       COALESCE(review.status,'approved') AS status,COALESCE(review.reason,'') AS reason,
-			       COALESCE(review.delete_file,FALSE),COALESCE(review.blocked,FALSE),TRUE AS exists,
-			       resource.trashed_at,COALESCE(session.created_at,resource.created_at) AS submitted_at,
-			       review.reviewed_at,reviewer.username AS reviewer
-			FROM resources resource
-			JOIN users owner ON owner.id=resource.owner_user_id
-			LEFT JOIN upload_sessions session ON session.resource_id=resource.id
-			LEFT JOIN file_moderations review ON review.resource_id=resource.id
-			LEFT JOIN users reviewer ON reviewer.id=review.reviewer_user_id
-			WHERE resource.kind='file'
-		), deleted_files AS (
-			SELECT review.resource_id,COALESCE(NULLIF(review.upload_task_id,''),review.resource_id),
-			       review.file_name,review.file_name,review.size_bytes,review.mime_type,
-			       COALESCE(review.owner_user_id,0),COALESCE(owner.username,'已删除用户'),
-			       review.status,review.reason,review.delete_file,review.blocked,FALSE,NULL,
-			       review.submitted_at,review.reviewed_at,reviewer.username
-			FROM file_moderations review
-			LEFT JOIN resources resource ON resource.id=review.resource_id
-			LEFT JOIN users owner ON owner.id=review.owner_user_id
-			LEFT JOIN users reviewer ON reviewer.id=review.reviewer_user_id
-			WHERE resource.id IS NULL
-		)
-		SELECT * FROM current_files UNION ALL SELECT * FROM deleted_files
-		ORDER BY submitted_at DESC,resource_id`)
+		SELECT resource.id,
+		       COALESCE(NULLIF(session.batch_id,''),session.id,resource.id),
+		       resource.name,resource.name,resource.size_bytes,resource.mime_type,
+		       resource.owner_user_id,owner.username,
+		       COALESCE(moderation.status,'approved'),COALESCE(moderation.reason,''),
+		       COALESCE(moderation.delete_file,FALSE),COALESCE(moderation.blocked,FALSE),TRUE,
+		       resource.trashed_at,COALESCE(session.created_at,resource.created_at),
+		       moderation.reviewed_at,reviewer.username
+		FROM resources resource
+		JOIN users owner ON owner.id=resource.owner_user_id
+		LEFT JOIN upload_sessions session ON session.resource_id=resource.id
+		LEFT JOIN file_moderations moderation ON moderation.resource_id=resource.id
+		LEFT JOIN users reviewer ON reviewer.id=moderation.reviewer_user_id
+		WHERE resource.kind='file'
+		ORDER BY COALESCE(session.created_at,resource.created_at) DESC,resource.id`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	items := make([]FileReviewItem, 0)
 	for rows.Next() {
 		var item FileReviewItem
@@ -549,7 +534,38 @@ func (r *Repo) ListFileReviews(ctx context.Context) ([]FileReviewItem, error) {
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	deletedRows, err := r.pool.Query(ctx, `
+		SELECT moderation.resource_id,COALESCE(NULLIF(moderation.upload_task_id,''),moderation.resource_id),
+		       moderation.file_name,moderation.file_name,moderation.size_bytes,moderation.mime_type,
+		       COALESCE(moderation.owner_user_id,0),COALESCE(owner.username,'已删除用户'),
+		       moderation.status,moderation.reason,moderation.delete_file,moderation.blocked,FALSE,
+		       NULL::TIMESTAMPTZ,moderation.submitted_at,moderation.reviewed_at,reviewer.username
+		FROM file_moderations moderation
+		LEFT JOIN resources resource ON resource.id=moderation.resource_id
+		LEFT JOIN users owner ON owner.id=moderation.owner_user_id
+		LEFT JOIN users reviewer ON reviewer.id=moderation.reviewer_user_id
+		WHERE resource.id IS NULL
+		ORDER BY moderation.submitted_at DESC,moderation.resource_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer deletedRows.Close()
+	for deletedRows.Next() {
+		var item FileReviewItem
+		if err := deletedRows.Scan(&item.ResourceID, &item.TaskID, &item.Name, &item.RelativePath, &item.SizeBytes, &item.MimeType,
+			&item.OwnerUserID, &item.OwnerName, &item.Status, &item.Reason, &item.DeleteFile, &item.Blocked,
+			&item.Exists, &item.TrashedAt, &item.SubmittedAt, &item.ReviewedAt, &item.Reviewer); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, deletedRows.Err()
 }
 
 func (r *Repo) ListShareReviews(ctx context.Context) ([]ShareReviewItem, error) {

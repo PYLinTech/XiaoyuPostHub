@@ -24,6 +24,7 @@ import {
 } from '@/utils/uploadFiles';
 import uiText, { uiServerText } from '@/utils/uiText';
 import styles from './index.module.less';
+import LiquidCapsuleProgress from './LiquidCapsuleProgress';
 
 interface UploadTask {
   id: string;
@@ -69,7 +70,19 @@ function taskPercent(task: UploadTask) {
   if (task.status === 'completed') return 100;
   if (task.progress != null) return Math.max(0, Math.min(99, task.progress));
   if (!task.totalChunks) return 0;
-  return Math.round((task.receivedChunks.length * 100) / task.totalChunks);
+  const receivedCount = Array.isArray(task.receivedChunks)
+    ? task.receivedChunks.length
+    : 0;
+  return Math.round((receivedCount * 100) / task.totalChunks);
+}
+
+function normalizeTask(task: UploadTask): UploadTask {
+  return {
+    ...task,
+    receivedChunks: Array.isArray(task.receivedChunks)
+      ? task.receivedChunks
+      : [],
+  };
 }
 
 function overallPercent(tasks: UploadTask[]) {
@@ -234,10 +247,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           progress: 100,
           receivedChunks: Array.from(received),
         };
-        updateTask(task.id, completed);
         fileCache.current.delete(task.id);
         await removeUploadFile(ownerId, task.id).catch(() => undefined);
         notifyCompleted(completed);
+        setTasks((current) => current.filter((item) => item.id !== task.id));
       } catch (error) {
         if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') return;
         updateTask(task.id, {
@@ -269,7 +282,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           configResponse.data.userTaskConcurrency ||
           DEFAULT_CONFIG.userTaskConcurrency,
       });
-      const serverTasks: UploadTask[] = taskResponse.data.items || [];
+      const serverTasks: UploadTask[] = (taskResponse.data.items || []).map(
+        normalizeTask
+      );
       const restored = await Promise.all(
         serverTasks.map(async (task) => {
           if (task.status === 'completed' || task.status === 'canceled')
@@ -349,6 +364,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             if (ownerId)
               await removeUploadFile(ownerId, task.id).catch(() => undefined);
             notifyCompleted(latest);
+            setTasks((current) =>
+              current.filter((item) => item.id !== task.id)
+            );
           }
         } catch {
           updateTask(task.id, {
@@ -403,7 +421,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             mimeType: file.type,
             sha256: checksum,
           });
-          const task: UploadTask = response.data.task;
+          const task = normalizeTask(response.data.task);
           fileCache.current.delete(localId);
           setTasks((current) =>
             current
@@ -419,6 +437,9 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           );
           if (response.data.instant) {
             notifyCompleted(task);
+            setTasks((current) =>
+              current.filter((item) => item.id !== task.id)
+            );
             continue;
           }
           fileCache.current.set(task.id, file);
@@ -581,19 +602,11 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }}
       />
       {tasks.length > 0 && collapsed && (
-        <button
-          type="button"
-          className={styles.capsule}
-          style={
-            {
-              '--upload-progress': `${progress}%`,
-            } as React.CSSProperties
-          }
-          aria-label={`${uiText('展开上传任务')} ${progress}%`}
+        <LiquidCapsuleProgress
+          progress={progress}
+          ariaLabel={`${uiText('展开上传任务')} ${progress}%`}
           onClick={() => setCollapsed(false)}
-        >
-          <span>{progress}%</span>
-        </button>
+        />
       )}
       {tasks.length > 0 && !collapsed && (
         <aside className={styles.panel} aria-label={uiText('上传任务')}>
