@@ -26,5 +26,9 @@ UPDATE system_settings SET
     share_include_numbers=sqlc.arg(share_include_numbers),
     upload_requires_review=sqlc.arg(upload_requires_review),
     custom_share_requires_review=sqlc.arg(custom_share_requires_review),
+    upload_chunk_size_bytes=sqlc.arg(upload_chunk_size_bytes),
+    upload_task_chunk_concurrency=sqlc.arg(upload_task_chunk_concurrency),
+    upload_user_task_concurrency=sqlc.arg(upload_user_task_concurrency),
+    trash_retention_days=sqlc.arg(trash_retention_days),
     updated_at=NOW()
 WHERE id=1 RETURNING *;

@@ -41,6 +41,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/session"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/sharing"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/upload"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
@@ -124,6 +125,13 @@ func main() {
 	fileStore := filestore.New(settingsRepo)
 	adminRepo := admin.NewRepo(database.Pool())
 	inboxRepo := inbox.NewRepo(database.Pool())
+	uploadRepo := upload.NewRepo(database.Pool())
+	uploadRecoveryCtx, uploadRecoveryCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := uploadRepo.RecoverInterrupted(uploadRecoveryCtx); err != nil {
+		uploadRecoveryCancel()
+		log.Fatalf("恢复上传队列失败：%v", err)
+	}
+	uploadRecoveryCancel()
 	staticPath := cfg.StaticDir
 
 	handler, err := server.NewRouterWithDeps(staticPath, server.Deps{
@@ -137,6 +145,7 @@ func main() {
 		SystemSettings: settingsRepo,
 		AdminRepo:      adminRepo,
 		InboxRepo:      inboxRepo,
+		UploadRepo:     uploadRepo,
 		CookieSecure:   cfg.SessionCookieSecure,
 	})
 	if err != nil {
@@ -158,6 +167,43 @@ func main() {
 	defer stopCleanup()
 	go sessionRepo.StartCleanup(cleanupCtx)
 	go sharingRepo.StartDownloadJobCleanup(cleanupCtx)
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cleanupCtx.Done():
+				return
+			case <-ticker.C:
+				ids, err := uploadRepo.DeleteExpired(cleanupCtx)
+				if err != nil {
+					log.Printf("清理过期上传任务失败：%v", err)
+				} else {
+					for _, id := range ids {
+						if err := fileStore.RemoveUploadSession(cleanupCtx, id); err != nil {
+							log.Printf("清理上传分片目录失败 id=%s: %v", id, err)
+						}
+					}
+				}
+				settings, err := settingsRepo.Get(cleanupCtx)
+				if err != nil {
+					log.Printf("读取回收期限失败：%v", err)
+					continue
+				}
+				before := time.Now().Add(-time.Duration(settings.TrashRetentionDays) * 24 * time.Hour)
+				keys, err := resourceRepo.DeleteTrashExpiredBefore(cleanupCtx, before)
+				if err != nil {
+					log.Printf("清理过期回收站失败：%v", err)
+					continue
+				}
+				for _, key := range keys {
+					if err := fileStore.Remove(cleanupCtx, key); err != nil {
+						log.Printf("清理过期回收站文件失败 key=%s: %v", key, err)
+					}
+				}
+			}
+		}
+	}()
 	go func() {
 		log.Printf("XiaoyuPostHub 后端已启动，监听 %s，静态目录：%s", srv.Addr, staticPath)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

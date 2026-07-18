@@ -15,6 +15,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/session"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/sharing"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/upload"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
@@ -31,6 +32,7 @@ type Deps struct {
 	SystemSettings *systemsetting.Repo
 	AdminRepo      *admin.Repo
 	InboxRepo      *inbox.Repo
+	UploadRepo     *upload.Repo
 	CookieSecure   bool
 }
 
@@ -109,10 +111,16 @@ func APIHandler(deps Deps) http.Handler {
 
 	// 业务依赖完整时开放资源、分享与直链接口；认证层的独立测试可只注入用户和会话仓库。
 	if deps.ResourceRepo != nil && deps.SharingRepo != nil && deps.FileStore != nil && deps.QuotaRepo != nil && deps.SystemSettings != nil {
-		mux.HandleFunc("/api/resources/upload", uploadHandler(deps))
+		if deps.UploadRepo != nil {
+			mux.HandleFunc("/api/uploads/config", uploadConfigHandler(deps))
+			mux.HandleFunc("/api/uploads", uploadSessionsHandler(deps))
+			mux.HandleFunc("/api/uploads/", uploadSessionItemHandler(deps))
+		}
 		mux.HandleFunc("/api/resources/folders", folderHandler(deps))
 		mux.HandleFunc("/api/resources", resourceListHandler(deps))
 		mux.HandleFunc("/api/resources/", resourceItemHandler(deps))
+		mux.HandleFunc("/api/trash", trashHandler(deps))
+		mux.HandleFunc("/api/trash/", trashItemHandler(deps))
 		mux.HandleFunc("/api/shares", createShareHandler(deps))
 		mux.HandleFunc("/api/shares/manage", shareBatchManageHandler(deps))
 		mux.HandleFunc("/api/shares/manage/", shareManageHandler(deps))

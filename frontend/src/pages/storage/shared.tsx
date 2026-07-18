@@ -14,6 +14,9 @@ export interface ResourceItem {
   reviewReason?: string;
   createdAt: string;
   updatedAt: string;
+  trashedAt?: string;
+  restoreBlocked?: boolean;
+  adminBlocked?: boolean;
 }
 export function ResourceIcon({ kind }: { kind: ResourceItem['kind'] }) {
   return kind === 'folder' ? (

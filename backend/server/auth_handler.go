@@ -41,6 +41,7 @@ type apiStatusResponse struct {
 
 // userInfoResponse 只返回当前布局和权限路由实际使用的字段。
 type userInfoResponse struct {
+	ID               int64    `json:"id"`
 	Name             string   `json:"name"`
 	Avatar           string   `json:"avatar"`
 	Permissions      []string `json:"permissions"`
@@ -324,6 +325,7 @@ func writeJSON(w http.ResponseWriter, statusCode int, v any) {
 // buildUserInfoResponse 把业务层 User 装成前端实际使用的会话信息。
 func buildUserInfoResponse(u user.User) userInfoResponse {
 	return userInfoResponse{
+		ID:               u.ID,
 		Name:             u.Username,
 		Avatar:           defaultUserAvatar,
 		Permissions:      effectivePermissions(u),

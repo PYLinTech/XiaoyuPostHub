@@ -1,6 +1,7 @@
 import { createContext } from 'react';
 
 export interface UserInfo {
+  id?: number;
   name?: string;
   avatar?: string;
   permissions?: string[];

@@ -25,7 +25,6 @@ import (
 const maxLinkLifetime = 10 * 365 * 24 * time.Hour
 
 type createShareRequest struct {
-	ResourceID        string   `json:"resourceId"`
 	ResourceIDs       []string `json:"resourceIds"`
 	Password          *string  `json:"password"`
 	NoPassword        bool     `json:"noPassword"`
@@ -98,7 +97,7 @@ func createShareHandler(deps Deps) http.HandlerFunc {
 			writeBusinessError(w, http.StatusBadRequest, "请求格式错误")
 			return
 		}
-		resourceIDs := normalizeResourceIDs(req.ResourceIDs, req.ResourceID)
+		resourceIDs := normalizeResourceIDs(req.ResourceIDs)
 		if len(resourceIDs) == 0 || len(resourceIDs) > 100 {
 			writeBusinessError(w, http.StatusBadRequest, "请选择 1 至 100 项内容")
 			return
@@ -881,6 +880,9 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 
 func loadUsableShare(r *http.Request, deps Deps, token string) (sharing.Share, int, error) {
 	item, err := deps.SharingRepo.GetShareByToken(r.Context(), token)
+	if errors.Is(err, sharing.ErrAdminBlocked) {
+		return sharing.Share{}, http.StatusForbidden, errors.New("该分享已被管理员封禁")
+	}
 	if errors.Is(err, sharing.ErrNotFound) {
 		return sharing.Share{}, http.StatusNotFound, errors.New("分享不存在")
 	}
@@ -917,10 +919,7 @@ func resourceTreeApproved(w http.ResponseWriter, r *http.Request, deps Deps, ite
 	return true
 }
 
-func normalizeResourceIDs(resourceIDs []string, legacyResourceID string) []string {
-	if len(resourceIDs) == 0 && strings.TrimSpace(legacyResourceID) != "" {
-		resourceIDs = []string{legacyResourceID}
-	}
+func normalizeResourceIDs(resourceIDs []string) []string {
 	seen := make(map[string]struct{}, len(resourceIDs))
 	normalized := make([]string, 0, len(resourceIDs))
 	for _, value := range resourceIDs {

@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS resources (
     size_bytes      BIGINT      NOT NULL DEFAULT 0,
     sha256_checksum CHAR(64),
     mime_type       TEXT,
+    trashed_at      TIMESTAMPTZ,
+    restore_blocked BOOLEAN     NOT NULL DEFAULT FALSE,
+    admin_blocked   BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -26,8 +29,20 @@ CREATE TABLE IF NOT EXISTS resources (
 CREATE INDEX IF NOT EXISTS resources_owner_parent_idx
     ON resources(owner_user_id, parent_id, created_at);
 
-CREATE UNIQUE INDEX IF NOT EXISTS resources_sibling_name_unique
-    ON resources(owner_user_id, COALESCE(parent_id, ''), name);
+ALTER TABLE resources
+    ADD COLUMN IF NOT EXISTS trashed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS restore_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS admin_blocked BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS resources_owner_trash_idx
+    ON resources(owner_user_id, trashed_at DESC)
+    WHERE trashed_at IS NOT NULL;
+
+-- 回收站内容不占用活动目录名称；恢复时仍由该索引阻止同名冲突。
+DROP INDEX IF EXISTS resources_sibling_name_unique;
+CREATE UNIQUE INDEX resources_sibling_name_unique
+    ON resources(owner_user_id, COALESCE(parent_id, ''), name)
+    WHERE trashed_at IS NULL;
 
 -- shares：带页面信息和可选密码的分享。
 -- URL 使用 256-bit 随机 token，不包含 user id。token_value 同时用于公开查询和
@@ -46,6 +61,8 @@ CREATE TABLE IF NOT EXISTS shares (
     download_count        BIGINT      NOT NULL DEFAULT 0,
     traffic_used_bytes    BIGINT      NOT NULL DEFAULT 0,
     is_active             BOOLEAN     NOT NULL DEFAULT TRUE,
+    admin_blocked         BOOLEAN     NOT NULL DEFAULT FALSE,
+    deleted_at            TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT shares_description_format_valid CHECK (description_format IN ('markdown', 'html')),
@@ -58,6 +75,10 @@ CREATE TABLE IF NOT EXISTS shares (
 );
 
 CREATE INDEX IF NOT EXISTS shares_owner_idx ON shares(owner_user_id, created_at DESC);
+
+ALTER TABLE shares
+    ADD COLUMN IF NOT EXISTS admin_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
 -- direct_links：无分享页面、无密码的随机文件直链。
 CREATE TABLE IF NOT EXISTS direct_links (

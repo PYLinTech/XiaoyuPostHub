@@ -12,6 +12,7 @@ export const routes: IRoute[] = [
   { name: 'menu.files', key: 'files' },
   { name: 'menu.shares', key: 'shares' },
   { name: 'menu.directLinks', key: 'direct-links' },
+  { name: 'menu.trash', key: 'trash' },
 ];
 
 export const adminRoutes: IRoute[] = [

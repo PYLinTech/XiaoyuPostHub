@@ -27,19 +27,22 @@ var (
 )
 
 type Resource struct {
-	ID             string    `json:"id"`
-	OwnerUserID    int64     `json:"-"`
-	ParentID       *string   `json:"parentId,omitempty"`
-	Kind           string    `json:"kind"`
-	Name           string    `json:"name"`
-	StorageKey     *string   `json:"-"`
-	SizeBytes      int64     `json:"sizeBytes"`
-	SHA256Checksum *string   `json:"sha256,omitempty"`
-	MimeType       *string   `json:"mimeType,omitempty"`
-	ReviewStatus   string    `json:"reviewStatus,omitempty"`
-	ReviewReason   string    `json:"reviewReason,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID             string     `json:"id"`
+	OwnerUserID    int64      `json:"-"`
+	ParentID       *string    `json:"parentId,omitempty"`
+	Kind           string     `json:"kind"`
+	Name           string     `json:"name"`
+	StorageKey     *string    `json:"-"`
+	SizeBytes      int64      `json:"sizeBytes"`
+	SHA256Checksum *string    `json:"sha256,omitempty"`
+	MimeType       *string    `json:"mimeType,omitempty"`
+	ReviewStatus   string     `json:"reviewStatus,omitempty"`
+	ReviewReason   string     `json:"reviewReason,omitempty"`
+	TrashedAt      *time.Time `json:"trashedAt,omitempty"`
+	RestoreBlocked bool       `json:"restoreBlocked,omitempty"`
+	AdminBlocked   bool       `json:"adminBlocked,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
 type TreeEntry struct {
@@ -80,7 +83,7 @@ func (r *Repo) CreateFolder(ctx context.Context, ownerID int64, parentID *string
 		INSERT INTO resources (id, owner_user_id, parent_id, kind, name)
 		VALUES ($1, $2, $3, 'folder', $4)
 		RETURNING id, owner_user_id, parent_id, kind, name, storage_key,
-		          size_bytes, sha256_checksum, mime_type, created_at, updated_at`,
+		          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`,
 		id, ownerID, parentID, name)
 	return scanResource(row)
 }
@@ -110,7 +113,7 @@ func (r *Repo) CreateFile(
 			size_bytes, sha256_checksum, mime_type
 		) VALUES ($1, $2, $3, 'file', $4, $5, $6, $7, NULLIF($8, ''))
 		RETURNING id, owner_user_id, parent_id, kind, name, storage_key,
-		          size_bytes, sha256_checksum, mime_type, created_at, updated_at`,
+		          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`,
 		id, ownerID, parentID, name, storageKey, sizeBytes, checksum, mimeType)
 	return scanResource(row)
 }
@@ -118,13 +121,25 @@ func (r *Repo) CreateFile(
 func (r *Repo) GetByID(ctx context.Context, id string) (Resource, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, owner_user_id, parent_id, kind, name, storage_key,
-		       size_bytes, sha256_checksum, mime_type, created_at, updated_at
-		FROM resources WHERE id = $1`, id)
+		       size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at
+		FROM resources WHERE id = $1 AND trashed_at IS NULL`, id)
 	res, err := scanResource(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Resource{}, ErrNotFound
 	}
 	return res, err
+}
+
+func (r *Repo) GetByIDIncludingTrash(ctx context.Context, id string) (Resource, error) {
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, owner_user_id, parent_id, kind, name, storage_key,
+		       size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at
+		FROM resources WHERE id=$1`, id)
+	item, err := scanResource(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Resource{}, ErrNotFound
+	}
+	return item, err
 }
 
 func (r *Repo) GetOwned(ctx context.Context, ownerID int64, id string) (Resource, error) {
@@ -138,6 +153,22 @@ func (r *Repo) GetOwned(ctx context.Context, ownerID int64, id string) (Resource
 	return res, nil
 }
 
+// FindFileByChecksum 在全平台查找可复用的已落盘文件。
+// 调用方只能使用其存储内容创建新的资源记录，不应暴露来源资源的用户和元数据。
+func (r *Repo) FindFileByChecksum(ctx context.Context, checksum string, sizeBytes int64) (Resource, error) {
+	row := r.pool.QueryRow(ctx, `
+		SELECT id, owner_user_id, parent_id, kind, name, storage_key,
+		       size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at
+		FROM resources
+		WHERE kind='file' AND storage_key IS NOT NULL AND sha256_checksum=$1 AND size_bytes=$2
+		ORDER BY created_at DESC LIMIT 1`, checksum, sizeBytes)
+	item, err := scanResource(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Resource{}, ErrNotFound
+	}
+	return item, err
+}
+
 func (r *Repo) RenameOwned(ctx context.Context, ownerID int64, id, name string) (Resource, error) {
 	name, err := ValidateName(name)
 	if err != nil {
@@ -145,9 +176,9 @@ func (r *Repo) RenameOwned(ctx context.Context, ownerID int64, id, name string) 
 	}
 	row := r.pool.QueryRow(ctx, `
 		UPDATE resources SET name=$3, updated_at=NOW()
-		WHERE id=$1 AND owner_user_id=$2
+		WHERE id=$1 AND owner_user_id=$2 AND trashed_at IS NULL AND NOT admin_blocked
 		RETURNING id, owner_user_id, parent_id, kind, name, storage_key,
-		          size_bytes, sha256_checksum, mime_type, created_at, updated_at`,
+		          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`,
 		id, ownerID, name)
 	item, err := scanResource(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -159,10 +190,10 @@ func (r *Repo) RenameOwned(ctx context.Context, ownerID int64, id, name string) 
 func (r *Repo) ListChildren(ctx context.Context, ownerID int64, parentID *string) ([]Resource, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT r.id, r.owner_user_id, r.parent_id, r.kind, r.name, r.storage_key,
-		       r.size_bytes, r.sha256_checksum, r.mime_type, r.created_at, r.updated_at,
+		       r.size_bytes, r.sha256_checksum, r.mime_type, r.trashed_at, r.restore_blocked, r.admin_blocked, r.created_at, r.updated_at,
 		       COALESCE(fr.status, 'approved'), COALESCE(fr.reason, '')
-		FROM resources r LEFT JOIN file_reviews fr ON fr.resource_id=r.id
-		WHERE r.owner_user_id = $1 AND r.parent_id IS NOT DISTINCT FROM $2
+		FROM resources r LEFT JOIN file_moderations fr ON fr.resource_id=r.id
+		WHERE r.owner_user_id = $1 AND r.parent_id IS NOT DISTINCT FROM $2 AND r.trashed_at IS NULL
 		ORDER BY r.kind DESC, r.name`, ownerID, parentID)
 	if err != nil {
 		return nil, err
@@ -183,14 +214,15 @@ func (r *Repo) ListTree(ctx context.Context, rootID string) ([]TreeEntry, error)
 	rows, err := r.pool.Query(ctx, `
 		WITH RECURSIVE tree AS (
 			SELECT r.*, r.name::TEXT AS relative_path
-			FROM resources r WHERE r.id = $1
+			FROM resources r WHERE r.id = $1 AND r.trashed_at IS NULL
 			UNION ALL
 			SELECT child.*, (tree.relative_path || '/' || child.name)::TEXT
 			FROM resources child
 			JOIN tree ON child.parent_id = tree.id
+			WHERE child.trashed_at IS NULL
 		)
 		SELECT id, owner_user_id, parent_id, kind, name, storage_key,
-		       size_bytes, sha256_checksum, mime_type, created_at, updated_at,
+		       size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at,
 		       relative_path
 		FROM tree ORDER BY relative_path`, rootID)
 	if err != nil {
@@ -203,7 +235,7 @@ func (r *Repo) ListTree(ctx context.Context, rootID string) ([]TreeEntry, error)
 		if err := rows.Scan(
 			&item.ID, &item.OwnerUserID, &item.ParentID, &item.Kind, &item.Name,
 			&item.StorageKey, &item.SizeBytes, &item.SHA256Checksum, &item.MimeType,
-			&item.CreatedAt, &item.UpdatedAt, &item.RelativePath,
+			&item.TrashedAt, &item.RestoreBlocked, &item.AdminBlocked, &item.CreatedAt, &item.UpdatedAt, &item.RelativePath,
 		); err != nil {
 			return nil, err
 		}
@@ -216,6 +248,207 @@ func (r *Repo) ListTree(ctx context.Context, rootID string) ([]TreeEntry, error)
 		return nil, ErrNotFound
 	}
 	return out, nil
+}
+
+// ListTrashOwned 只列出当前用户回收站中的顶层项目；文件夹后代随顶层项目一同恢复或删除。
+func (r *Repo) ListTrashOwned(ctx context.Context, ownerID int64) ([]Resource, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT r.id, r.owner_user_id, r.parent_id, r.kind, r.name, r.storage_key,
+		       r.size_bytes, r.sha256_checksum, r.mime_type, r.trashed_at, r.restore_blocked, r.admin_blocked, r.created_at, r.updated_at
+		FROM resources r
+		LEFT JOIN resources parent ON parent.id=r.parent_id
+		WHERE r.owner_user_id=$1 AND r.trashed_at IS NOT NULL
+		  AND (r.parent_id IS NULL OR parent.trashed_at IS NULL)
+		ORDER BY r.trashed_at DESC, r.name`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Resource, 0)
+	for rows.Next() {
+		item, scanErr := scanResource(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repo) MoveToTrashOwned(ctx context.Context, ownerID int64, id string) error {
+	tag, err := r.pool.Exec(ctx, `
+		WITH RECURSIVE tree AS (
+			SELECT id FROM resources
+			WHERE id=$1 AND owner_user_id=$2 AND trashed_at IS NULL AND NOT admin_blocked
+			UNION ALL
+			SELECT child.id FROM resources child JOIN tree ON child.parent_id=tree.id
+			WHERE child.owner_user_id=$2
+		)
+		UPDATE resources SET trashed_at=NOW(), updated_at=NOW()
+		WHERE id IN (SELECT id FROM tree)`, id, ownerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repo) RestoreOwned(ctx context.Context, ownerID int64, id string) error {
+	tag, err := r.pool.Exec(ctx, `
+		WITH RECURSIVE tree AS (
+			SELECT root.id FROM resources root
+			LEFT JOIN resources parent ON parent.id=root.parent_id
+			WHERE root.id=$1 AND root.owner_user_id=$2 AND root.trashed_at IS NOT NULL AND NOT root.restore_blocked
+			  AND (root.parent_id IS NULL OR parent.trashed_at IS NULL)
+			UNION ALL
+			SELECT child.id FROM resources child JOIN tree ON child.parent_id=tree.id
+			WHERE child.owner_user_id=$2 AND child.trashed_at IS NOT NULL
+		)
+		UPDATE resources SET trashed_at=NULL, updated_at=NOW()
+		WHERE id IN (SELECT id FROM tree)`, id, ownerID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAdminDisposition 应用审核处置；只有管理员审核造成的删除会在撤销时自动恢复。
+func (r *Repo) SetAdminDisposition(ctx context.Context, id string, deleteFile, blocked bool) (Resource, error) {
+	row := r.pool.QueryRow(ctx, `
+		UPDATE resources SET
+			trashed_at=CASE
+				WHEN $2 THEN COALESCE(trashed_at,NOW())
+				WHEN restore_blocked THEN NULL
+				ELSE trashed_at
+			END,
+			restore_blocked=$2,
+			admin_blocked=$3,
+			updated_at=NOW()
+		WHERE id=$1 AND kind='file'
+		RETURNING id, owner_user_id, parent_id, kind, name, storage_key,
+		          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`, id, deleteFile, blocked)
+	item, err := scanResource(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Resource{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (r *Repo) DeleteAdminTrashedFile(ctx context.Context, id string) (Resource, error) {
+	item, err := r.GetByIDIncludingTrash(ctx, id)
+	if err != nil || item.Kind != KindFile || item.TrashedAt == nil || !item.RestoreBlocked {
+		return Resource{}, ErrNotFound
+	}
+	tag, err := r.pool.Exec(ctx, `DELETE FROM resources WHERE id=$1 AND kind='file' AND trashed_at IS NOT NULL AND restore_blocked`, id)
+	if err != nil {
+		return Resource{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return Resource{}, ErrNotFound
+	}
+	return item, nil
+}
+
+// DeleteTrashedOwned 永久删除一个回收站项目并返回需要清理的物理文件。
+func (r *Repo) DeleteTrashedOwned(ctx context.Context, ownerID int64, id string) ([]TreeEntry, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.Background()) //nolint:errcheck
+	var exists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM resources root
+			LEFT JOIN resources parent ON parent.id=root.parent_id
+			WHERE root.id=$1 AND root.owner_user_id=$2 AND root.trashed_at IS NOT NULL
+			  AND (root.parent_id IS NULL OR parent.trashed_at IS NULL)
+		)`, id, ownerID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	rows, err := tx.Query(ctx, `
+		WITH RECURSIVE tree AS (
+			SELECT r.*, r.name::TEXT AS relative_path FROM resources r WHERE r.id=$1
+			UNION ALL
+			SELECT child.*, (tree.relative_path || '/' || child.name)::TEXT
+			FROM resources child JOIN tree ON child.parent_id=tree.id
+		)
+		SELECT id, owner_user_id, parent_id, kind, name, storage_key,
+		       size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at, relative_path
+		FROM tree ORDER BY relative_path`, id)
+	if err != nil {
+		return nil, err
+	}
+	tree := make([]TreeEntry, 0)
+	for rows.Next() {
+		var item TreeEntry
+		if err := rows.Scan(&item.ID, &item.OwnerUserID, &item.ParentID, &item.Kind, &item.Name,
+			&item.StorageKey, &item.SizeBytes, &item.SHA256Checksum, &item.MimeType,
+			&item.TrashedAt, &item.RestoreBlocked, &item.AdminBlocked, &item.CreatedAt, &item.UpdatedAt, &item.RelativePath); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		tree = append(tree, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM resources WHERE id=$1 AND owner_user_id=$2 AND trashed_at IS NOT NULL`, id, ownerID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return tree, nil
+}
+
+func (r *Repo) EmptyTrashOwned(ctx context.Context, ownerID int64) ([]string, error) {
+	return r.deleteTrashWhere(ctx, `owner_user_id=$1 AND trashed_at IS NOT NULL`, ownerID)
+}
+
+func (r *Repo) DeleteTrashExpiredBefore(ctx context.Context, before time.Time) ([]string, error) {
+	return r.deleteTrashWhere(ctx, `trashed_at IS NOT NULL AND trashed_at < $1`, before)
+}
+
+func (r *Repo) deleteTrashWhere(ctx context.Context, condition string, argument any) ([]string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.Background()) //nolint:errcheck
+	rows, err := tx.Query(ctx, `SELECT storage_key FROM resources WHERE `+condition+` AND kind='file' FOR UPDATE`, argument)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM resources WHERE `+condition, argument); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 // DeleteOwned 删除用户自己的一个文件或整棵文件夹，并返回删除前的资源树，
@@ -287,7 +520,7 @@ func scanResource(row rowScanner) (Resource, error) {
 	if err := row.Scan(
 		&item.ID, &item.OwnerUserID, &item.ParentID, &item.Kind, &item.Name,
 		&item.StorageKey, &item.SizeBytes, &item.SHA256Checksum, &item.MimeType,
-		&item.CreatedAt, &item.UpdatedAt,
+		&item.TrashedAt, &item.RestoreBlocked, &item.AdminBlocked, &item.CreatedAt, &item.UpdatedAt,
 	); err != nil {
 		return Resource{}, err
 	}
@@ -299,7 +532,7 @@ func scanResourceWithReview(row rowScanner) (Resource, error) {
 	if err := row.Scan(
 		&item.ID, &item.OwnerUserID, &item.ParentID, &item.Kind, &item.Name,
 		&item.StorageKey, &item.SizeBytes, &item.SHA256Checksum, &item.MimeType,
-		&item.CreatedAt, &item.UpdatedAt, &item.ReviewStatus, &item.ReviewReason,
+		&item.TrashedAt, &item.RestoreBlocked, &item.AdminBlocked, &item.CreatedAt, &item.UpdatedAt, &item.ReviewStatus, &item.ReviewReason,
 	); err != nil {
 		return Resource{}, err
 	}

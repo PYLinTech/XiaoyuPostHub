@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/admin"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
-	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
@@ -31,11 +31,10 @@ type adminSystemConfigRequest struct {
 	ShareCodeIncludeNumbers      bool   `json:"shareCodeIncludeNumbers"`
 	UploadRequiresReview         bool   `json:"uploadRequiresReview"`
 	CustomShareRequiresReview    bool   `json:"customShareRequiresReview"`
-}
-
-type adminReviewRequest struct {
-	Action string `json:"action"`
-	Reason string `json:"reason"`
+	UploadChunkSizeBytes         int32  `json:"uploadChunkSizeBytes"`
+	UploadTaskChunkConcurrency   int16  `json:"uploadTaskChunkConcurrency"`
+	UploadUserTaskConcurrency    int16  `json:"uploadUserTaskConcurrency"`
+	TrashRetentionDays           int16  `json:"trashRetentionDays"`
 }
 
 type adminInvitationIssueRequest struct {
@@ -168,6 +167,11 @@ func adminHandler(deps Deps) http.HandlerFunc {
 				return
 			}
 			handleAdminSystemConfig(w, r, deps, u)
+		case "system-config/upload-test":
+			if !requireSuperAdmin(w, u) {
+				return
+			}
+			handleAdminUploadTest(w, r)
 		case "site-icon":
 			if !requireSuperAdmin(w, u) {
 				return
@@ -385,6 +389,10 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 	}
 
 	if len(parts) == 1 && r.Method == http.MethodDelete {
+		uploadSessionIDs := []string{}
+		if deps.UploadRepo != nil {
+			uploadSessionIDs, _ = deps.UploadRepo.ListIDsOwned(r.Context(), userID)
+		}
 		username, storageKeys, err := deps.AdminRepo.DeleteUser(r.Context(), userID)
 		if errors.Is(err, admin.ErrUserNotFound) {
 			writeBusinessError(w, http.StatusNotFound, err.Error())
@@ -398,6 +406,13 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 			if deps.FileStore != nil {
 				if err := deps.FileStore.Remove(r.Context(), storageKey); err != nil {
 					log.Printf("清理已删除用户 %d 的文件 %q 失败: %v", userID, storageKey, err)
+				}
+			}
+		}
+		for _, sessionID := range uploadSessionIDs {
+			if deps.FileStore != nil {
+				if err := deps.FileStore.RemoveUploadSession(r.Context(), sessionID); err != nil {
+					log.Printf("清理已删除用户 %d 的上传分片失败 id=%s: %v", userID, sessionID, err)
 				}
 			}
 		}
@@ -611,8 +626,12 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		ShareLength: req.ShareCodeLength, ShareCaseSensitive: req.ShareCodeCaseSensitive,
 		ShareIncludeLetters: req.ShareCodeIncludeLetters, ShareIncludeNumbers: req.ShareCodeIncludeNumbers,
 		UploadRequiresReview: req.UploadRequiresReview, CustomShareRequiresReview: req.CustomShareRequiresReview,
+		UploadChunkSizeBytes:       req.UploadChunkSizeBytes,
+		UploadTaskChunkConcurrency: req.UploadTaskChunkConcurrency,
+		UploadUserTaskConcurrency:  req.UploadUserTaskConcurrency,
+		TrashRetentionDays:         req.TrashRetentionDays,
 	})
-	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) {
+	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) {
 		writeBusinessError(w, 400, err.Error())
 		return
 	}
@@ -625,7 +644,7 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		return
 	}
 	ip := net.ParseIP(clientIP(r))
-	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview}, ip)
+	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview, "uploadChunkSizeBytes": settings.UploadChunkSizeBytes, "uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency, "uploadUserTaskConcurrency": settings.UploadUserTaskConcurrency, "trashRetentionDays": settings.TrashRetentionDays}, ip)
 	writeJSON(w, 200, systemConfigResponse(settings))
 }
 
@@ -638,133 +657,29 @@ func systemConfigResponse(settings sqlcgen.SystemSetting) map[string]any {
 		"shareCodeLength": settings.ShareLength, "shareCodeCaseSensitive": settings.ShareCaseSensitive,
 		"shareCodeIncludeLetters": settings.ShareIncludeLetters, "shareCodeIncludeNumbers": settings.ShareIncludeNumbers,
 		"uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview,
+		"uploadChunkSizeBytes":       settings.UploadChunkSizeBytes,
+		"uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency,
+		"uploadUserTaskConcurrency":  settings.UploadUserTaskConcurrency,
+		"trashRetentionDays":         settings.TrashRetentionDays,
 	}
 }
 
-func handleAdminReviews(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User, path string) {
-	if path == "reviews/files" {
-		if r.Method != http.MethodGet {
-			writeBusinessError(w, 405, "method not allowed")
-			return
-		}
-		items, err := deps.AdminRepo.ListFileReviews(r.Context())
-		if err != nil {
-			writeBusinessError(w, 500, "读取文件审查列表失败")
-			return
-		}
-		writeJSON(w, 200, map[string]any{"status": "ok", "items": items})
+// handleAdminUploadTest 接收与候选分片等大的原始请求体，用于验证反向代理限制。
+func handleAdminUploadTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if path == "reviews/shares" {
-		if r.Method != http.MethodGet {
-			writeBusinessError(w, 405, "method not allowed")
-			return
-		}
-		items, err := deps.AdminRepo.ListShareReviews(r.Context())
-		if err != nil {
-			writeBusinessError(w, 500, "读取分享审查列表失败")
-			return
-		}
-		writeJSON(w, 200, map[string]any{"status": "ok", "items": items})
+	expected, err := strconv.ParseInt(r.URL.Query().Get("sizeBytes"), 10, 64)
+	if err != nil || expected < 1<<20 || expected > 64<<20 {
+		writeBusinessError(w, http.StatusBadRequest, "分片测试大小必须在 1M 到 64M 之间")
 		return
 	}
-	if strings.HasPrefix(path, "reviews/files/") {
-		tail := strings.TrimPrefix(path, "reviews/files/")
-		parts := strings.Split(tail, "/")
-		id := strings.TrimSpace(parts[0])
-		if id == "" {
-			writeBusinessError(w, 400, "文件编号无效")
-			return
-		}
-		if len(parts) == 2 && (parts[1] == "preview" || parts[1] == "download") {
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
-				writeBusinessError(w, 405, "method not allowed")
-				return
-			}
-			item, err := deps.ResourceRepo.GetByID(r.Context(), id)
-			if errors.Is(err, resource.ErrNotFound) || item.Kind != resource.KindFile {
-				writeBusinessError(w, 404, "文件不存在")
-				return
-			}
-			if err != nil {
-				writeBusinessError(w, 500, "读取文件失败")
-				return
-			}
-			if parts[1] == "preview" {
-				serveResourceFilePreview(w, r, deps, item)
-			} else {
-				serveOwnedFile(w, r, deps, item)
-			}
-			return
-		}
-		if len(parts) != 1 || r.Method != http.MethodPut {
-			writeBusinessError(w, 405, "method not allowed")
-			return
-		}
-		var req adminReviewRequest
-		if decodeSmallJSON(w, r, &req) != nil {
-			writeBusinessError(w, 400, "请求格式错误")
-			return
-		}
-		status := reviewActionStatus(req.Action)
-		if status == "" {
-			writeBusinessError(w, 400, "审核操作无效")
-			return
-		}
-		if status == "rejected" && strings.TrimSpace(req.Reason) == "" {
-			writeBusinessError(w, 400, "请填写驳回原因")
-			return
-		}
-		if err := deps.AdminRepo.ReviewFile(r.Context(), id, status, req.Reason, actor.ID); err != nil {
-			writeBusinessError(w, 404, "待审文件不存在")
-			return
-		}
-		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "file_review."+req.Action, "resource", id, map[string]any{"reason": strings.TrimSpace(req.Reason)}, net.ParseIP(clientIP(r)))
-		writeJSON(w, 200, map[string]any{"status": "ok"})
+	r.Body = http.MaxBytesReader(w, r.Body, expected+1)
+	n, err := io.Copy(io.Discard, r.Body)
+	if err != nil || n != expected {
+		writeBusinessError(w, http.StatusBadRequest, "分片测试请求大小不匹配")
 		return
 	}
-	if strings.HasPrefix(path, "reviews/shares/") {
-		id, err := strconv.ParseInt(strings.TrimPrefix(path, "reviews/shares/"), 10, 64)
-		if err != nil || id < 1 {
-			writeBusinessError(w, 400, "分享编号无效")
-			return
-		}
-		if r.Method != http.MethodPut {
-			writeBusinessError(w, 405, "method not allowed")
-			return
-		}
-		var req adminReviewRequest
-		if decodeSmallJSON(w, r, &req) != nil {
-			writeBusinessError(w, 400, "请求格式错误")
-			return
-		}
-		status := reviewActionStatus(req.Action)
-		if status == "" {
-			writeBusinessError(w, 400, "审核操作无效")
-			return
-		}
-		if status == "rejected" && strings.TrimSpace(req.Reason) == "" {
-			writeBusinessError(w, 400, "请填写驳回原因")
-			return
-		}
-		if err := deps.AdminRepo.ReviewShare(r.Context(), id, status, req.Reason, actor.ID); err != nil {
-			writeBusinessError(w, 404, "待审分享不存在")
-			return
-		}
-		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "share_review."+req.Action, "share", strconv.FormatInt(id, 10), map[string]any{"reason": strings.TrimSpace(req.Reason)}, net.ParseIP(clientIP(r)))
-		writeJSON(w, 200, map[string]any{"status": "ok"})
-		return
-	}
-	writeBusinessError(w, 404, "审核接口不存在")
-}
-
-func reviewActionStatus(action string) string {
-	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "approve":
-		return "approved"
-	case "reject":
-		return "rejected"
-	default:
-		return ""
-	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "receivedBytes": n})
 }

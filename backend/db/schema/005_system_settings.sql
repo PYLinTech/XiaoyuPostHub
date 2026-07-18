@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS system_settings (
     share_include_numbers               BOOLEAN     NOT NULL DEFAULT TRUE,
     upload_requires_review              BOOLEAN     NOT NULL DEFAULT FALSE,
     custom_share_requires_review        BOOLEAN     NOT NULL DEFAULT FALSE,
+    upload_chunk_size_bytes             INTEGER     NOT NULL DEFAULT 8388608,
+    upload_task_chunk_concurrency       SMALLINT    NOT NULL DEFAULT 3,
+    upload_user_task_concurrency        SMALLINT    NOT NULL DEFAULT 2,
+    trash_retention_days                SMALLINT    NOT NULL DEFAULT 30,
     created_at                          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at                          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
@@ -28,7 +32,11 @@ CREATE TABLE IF NOT EXISTS system_settings (
     CONSTRAINT system_settings_invitation_length CHECK (invitation_length BETWEEN 4 AND 64),
     CONSTRAINT system_settings_share_length CHECK (share_length BETWEEN 4 AND 64),
     CONSTRAINT system_settings_invitation_charset CHECK (invitation_include_letters OR invitation_include_numbers),
-    CONSTRAINT system_settings_share_charset CHECK (share_include_letters OR share_include_numbers)
+    CONSTRAINT system_settings_share_charset CHECK (share_include_letters OR share_include_numbers),
+    CONSTRAINT system_settings_upload_chunk_size CHECK (upload_chunk_size_bytes BETWEEN 1048576 AND 67108864),
+    CONSTRAINT system_settings_upload_task_chunk_concurrency CHECK (upload_task_chunk_concurrency BETWEEN 1 AND 8),
+    CONSTRAINT system_settings_upload_user_task_concurrency CHECK (upload_user_task_concurrency BETWEEN 1 AND 8),
+    CONSTRAINT system_settings_trash_retention_days CHECK (trash_retention_days BETWEEN 1 AND 3650)
 );
 
 -- 兼容已有数据库：先补列，再从旧单例表迁移值。旧表都是运行配置，不含业务记录。
@@ -45,7 +53,11 @@ ALTER TABLE system_settings
     ADD COLUMN IF NOT EXISTS share_include_letters BOOLEAN NOT NULL DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS share_include_numbers BOOLEAN NOT NULL DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS upload_requires_review BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS custom_share_requires_review BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS custom_share_requires_review BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS upload_chunk_size_bytes INTEGER NOT NULL DEFAULT 8388608,
+    ADD COLUMN IF NOT EXISTS upload_task_chunk_concurrency SMALLINT NOT NULL DEFAULT 3,
+    ADD COLUMN IF NOT EXISTS upload_user_task_concurrency SMALLINT NOT NULL DEFAULT 2,
+    ADD COLUMN IF NOT EXISTS trash_retention_days SMALLINT NOT NULL DEFAULT 30;
 
 -- CREATE TABLE IF NOT EXISTS 不会为旧表补约束；统一重建约束，确保升级后的数据库
 -- 与全新安装具有相同的数据边界。
@@ -58,7 +70,11 @@ ALTER TABLE system_settings
     DROP CONSTRAINT IF EXISTS system_settings_invitation_length,
     DROP CONSTRAINT IF EXISTS system_settings_share_length,
     DROP CONSTRAINT IF EXISTS system_settings_invitation_charset,
-    DROP CONSTRAINT IF EXISTS system_settings_share_charset;
+    DROP CONSTRAINT IF EXISTS system_settings_share_charset,
+    DROP CONSTRAINT IF EXISTS system_settings_upload_chunk_size,
+    DROP CONSTRAINT IF EXISTS system_settings_upload_task_chunk_concurrency,
+    DROP CONSTRAINT IF EXISTS system_settings_upload_user_task_concurrency,
+    DROP CONSTRAINT IF EXISTS system_settings_trash_retention_days;
 
 ALTER TABLE system_settings
     ADD CONSTRAINT system_settings_singleton CHECK (id = 1),
@@ -69,7 +85,11 @@ ALTER TABLE system_settings
     ADD CONSTRAINT system_settings_invitation_length CHECK (invitation_length BETWEEN 4 AND 64),
     ADD CONSTRAINT system_settings_share_length CHECK (share_length BETWEEN 4 AND 64),
     ADD CONSTRAINT system_settings_invitation_charset CHECK (invitation_include_letters OR invitation_include_numbers),
-    ADD CONSTRAINT system_settings_share_charset CHECK (share_include_letters OR share_include_numbers);
+    ADD CONSTRAINT system_settings_share_charset CHECK (share_include_letters OR share_include_numbers),
+    ADD CONSTRAINT system_settings_upload_chunk_size CHECK (upload_chunk_size_bytes BETWEEN 1048576 AND 67108864),
+    ADD CONSTRAINT system_settings_upload_task_chunk_concurrency CHECK (upload_task_chunk_concurrency BETWEEN 1 AND 8),
+    ADD CONSTRAINT system_settings_upload_user_task_concurrency CHECK (upload_user_task_concurrency BETWEEN 1 AND 8),
+    ADD CONSTRAINT system_settings_trash_retention_days CHECK (trash_retention_days BETWEEN 1 AND 3650);
 
 INSERT INTO system_settings (id, site_name, storage_path)
 VALUES (1, 'XiaoyuPostHub', '/data/uploads')

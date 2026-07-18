@@ -60,6 +60,122 @@ func (s *Store) NewTemp(ctx context.Context, pattern string) (*os.File, error) {
 	return f, nil
 }
 
+// WriteUploadChunk 原子写入一个上传分片。目录名只能使用服务端生成的会话 token。
+func (s *Store) WriteUploadChunk(ctx context.Context, sessionID string, index int32, src io.Reader, limit int64) (string, string, int32, error) {
+	if sessionID == "" || strings.ContainsAny(sessionID, `/\\.`) || index < 0 {
+		return "", "", 0, ErrUnsafeStorageKey
+	}
+	root, err := s.Root(ctx)
+	if err != nil {
+		return "", "", 0, err
+	}
+	relativePath := filepath.ToSlash(filepath.Join("upload-sessions", sessionID, fmt.Sprintf("%d.part", index)))
+	dir := filepath.Join(root, ".tmp", "upload-sessions", sessionID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", 0, err
+	}
+	temp, err := os.CreateTemp(dir, "chunk-*")
+	if err != nil {
+		return "", "", 0, err
+	}
+	tempPath := temp.Name()
+	ok := false
+	defer func() {
+		_ = temp.Close()
+		if !ok {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	hash := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(temp, hash), io.LimitReader(src, limit+1))
+	if copyErr != nil || n > limit {
+		if copyErr == nil {
+			copyErr = fmt.Errorf("分片超过允许大小")
+		}
+		return "", "", 0, copyErr
+	}
+	if err := temp.Sync(); err != nil {
+		return "", "", 0, err
+	}
+	if err := temp.Close(); err != nil {
+		return "", "", 0, err
+	}
+	finalPath := filepath.Join(dir, fmt.Sprintf("%d.part", index))
+	if err := os.Rename(tempPath, finalPath); err != nil {
+		return "", "", 0, err
+	}
+	ok = true
+	return relativePath, hex.EncodeToString(hash.Sum(nil)), int32(n), nil
+}
+
+func (s *Store) UploadChunkPath(ctx context.Context, relativePath string) (string, error) {
+	root, err := s.Root(ctx)
+	if err != nil {
+		return "", err
+	}
+	return safePath(filepath.Join(root, ".tmp"), relativePath)
+}
+
+func (s *Store) RemoveUploadSession(ctx context.Context, sessionID string) error {
+	if sessionID == "" || strings.ContainsAny(sessionID, `/\\.`) {
+		return ErrUnsafeStorageKey
+	}
+	root, err := s.Root(ctx)
+	if err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(root, ".tmp", "upload-sessions", sessionID))
+}
+
+// CloneFile 为秒传创建独立目录项。优先使用硬链接，文件系统不支持时回退复制。
+func (s *Store) CloneFile(ctx context.Context, sourceStorageKey, targetStorageKey string) (string, error) {
+	source, err := s.Path(ctx, sourceStorageKey)
+	if err != nil {
+		return "", err
+	}
+	root, err := s.Root(ctx)
+	if err != nil {
+		return "", err
+	}
+	target, err := safePath(root, targetStorageKey)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+		return "", err
+	}
+	if err := os.Link(source, target); err == nil {
+		return target, nil
+	}
+	src, err := os.Open(source)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	ok := false
+	defer func() {
+		_ = dst.Close()
+		if !ok {
+			_ = os.Remove(target)
+		}
+	}()
+	if _, err := io.Copy(dst, src); err != nil {
+		return "", err
+	}
+	if err := dst.Sync(); err != nil {
+		return "", err
+	}
+	if err := dst.Close(); err != nil {
+		return "", err
+	}
+	ok = true
+	return target, nil
+}
+
 func (s *Store) Commit(ctx context.Context, tempPath, storageKey string) (string, error) {
 	root, err := s.Root(ctx)
 	if err != nil {

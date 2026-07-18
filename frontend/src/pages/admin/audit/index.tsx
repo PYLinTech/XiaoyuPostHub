@@ -5,39 +5,62 @@ import { marked } from 'marked';
 import {
   Button,
   Card,
+  Checkbox,
   Input,
   Message,
   Modal,
+  Pagination,
+  Radio,
   Space,
   Table,
   Tabs,
   Tag,
-  Tooltip,
+  Trigger,
   Typography,
 } from '@arco-design/web-react';
 import {
-  IconCheck,
+  IconCode,
+  IconDelete,
   IconDownload,
   IconEye,
-  IconClose,
+  IconSearch,
+  IconSettings,
 } from '@arco-design/web-react/icon';
-import SecureFileViewer from '@/components/SecureFileViewer';
-import { supportsFilePreview } from '@/utils/filePreview';
 import { AdminPageHeader } from '../shared';
 import styles from '../style/index.module.less';
 import uiText from '@/utils/uiText';
+import { formatTime } from '@/utils/format';
+
 const { Text } = Typography;
 const TabPane = Tabs.TabPane;
+
 interface FileReview {
   resourceId: string;
+  taskId: string;
   name: string;
+  relativePath: string;
   sizeBytes: number;
   mimeType?: string;
   ownerName: string;
   status: string;
   reason?: string;
+  deleteFile: boolean;
+  blocked: boolean;
+  exists: boolean;
+  trashedAt?: string;
   submittedAt: string;
+  rowKey?: string;
 }
+
+interface FileTask {
+  id: string;
+  ownerName: string;
+  uploadedAt: string;
+  status: string;
+  children: FileReview[];
+  rowKey?: string;
+}
+
 interface ShareReview {
   shareId: number;
   token: string;
@@ -47,8 +70,12 @@ interface ShareReview {
   descriptionFormat: 'markdown' | 'html';
   status: string;
   reason?: string;
+  deleteLink: boolean;
+  blocked: boolean;
+  deletedAt?: string;
   submittedAt: string;
 }
+
 interface AuditItem {
   id: number;
   actorName: string;
@@ -58,277 +85,369 @@ interface AuditItem {
   clientIp?: string;
   createdAt: string;
 }
-const statusTag = (value: string) => {
+
+type SearchScope = 'id' | 'name' | 'username';
+type ReviewKind = 'files' | 'shares';
+
+function statusTag(value: string) {
   const config = {
+    normal: ['green', uiText('正常')],
+    approved: ['green', uiText('正常')],
     pending: ['orange', uiText('待审核')],
-    approved: ['green', uiText('已通过')],
-    rejected: ['red', uiText('已驳回')],
+    rejected: ['red', uiText('未通过')],
+    trashed: ['gray', uiText('已删除')],
+    deleted: ['gray', uiText('文件已删除')],
+    blocked: ['red', uiText('已拉黑')],
   }[value] || ['gray', value];
   return <Tag color={config[0]}>{config[1]}</Tag>;
-};
-const dateTime = (value: string) =>
-  new Date(value).toLocaleString('zh-CN', {
-    hour12: false,
-  });
-const fileSize = (value: number) => {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
-  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
-  return `${(value / 1024 ** 3).toFixed(1)} GB`;
-};
+}
+
+function SearchBox({
+  value,
+  scopes,
+  onValueChange,
+  onScopesChange,
+  onSearch,
+}: {
+  value: string;
+  scopes: SearchScope[];
+  onValueChange: (value: string) => void;
+  onScopesChange: (value: SearchScope[]) => void;
+  onSearch: () => void;
+}) {
+  const popup = (
+    <div className={styles['review-search-settings']}>
+      <Checkbox.Group
+        direction="vertical"
+        value={scopes}
+        onChange={(value) => onScopesChange(value as SearchScope[])}
+      >
+        <Checkbox value="id">ID</Checkbox>
+        <Checkbox value="name">{uiText('文件名')}</Checkbox>
+        <Checkbox value="username">{uiText('用户名')}</Checkbox>
+      </Checkbox.Group>
+    </div>
+  );
+  return (
+    <div className={styles['review-search-box']}>
+      <Input
+        value={value}
+        onChange={onValueChange}
+        onPressEnter={onSearch}
+        placeholder={uiText('搜索审核内容')}
+      />
+      <Trigger trigger="click" position="bl" popup={() => popup}>
+        <Button
+          type="text"
+          icon={<IconSettings />}
+          aria-label={uiText('搜索范围')}
+        />
+      </Trigger>
+      <Button
+        type="text"
+        icon={<IconSearch />}
+        aria-label={uiText('搜索')}
+        onClick={onSearch}
+      />
+    </div>
+  );
+}
+
 function Audit() {
-  const [fileItems, setFileItems] = useState<FileReview[]>([]);
-  const [shareItems, setShareItems] = useState<ShareReview[]>([]);
-  const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
+  const [activeTab, setActiveTab] = useState('files');
   const [loading, setLoading] = useState(false);
-  const [previewFile, setPreviewFile] = useState<FileReview>();
-  const [filePreviewSupported, setFilePreviewSupported] = useState(false);
-  const [previewShare, setPreviewShare] = useState<ShareReview>();
-  const [rejectTarget, setRejectTarget] = useState<
-    | {
-        kind: 'files' | 'shares';
-        id: string | number;
-      }
-    | undefined
-  >();
-  const [rejectReason, setRejectReason] = useState('');
-  const loadAll = async () => {
+  const [fileTasks, setFileTasks] = useState<FileTask[]>([]);
+  const [fileTotal, setFileTotal] = useState(0);
+  const [filePage, setFilePage] = useState(1);
+  const [shareItems, setShareItems] = useState<ShareReview[]>([]);
+  const [shareTotal, setShareTotal] = useState(0);
+  const [sharePage, setSharePage] = useState(1);
+  const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
+  const [query, setQuery] = useState('');
+  const [appliedQuery, setAppliedQuery] = useState('');
+  const [scopes, setScopes] = useState<SearchScope[]>(['id', 'name']);
+  const [fileSelection, setFileSelection] = useState<string[]>([]);
+  const [shareSelection, setShareSelection] = useState<(string | number)[]>([]);
+  const [reviewKind, setReviewKind] = useState<ReviewKind>();
+  const [reviewStatus, setReviewStatus] = useState<'approved' | 'rejected'>(
+    'approved'
+  );
+  const [reviewReason, setReviewReason] = useState('');
+  const [reviewDelete, setReviewDelete] = useState(false);
+  const [reviewBlocked, setReviewBlocked] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [sourceShares, setSourceShares] = useState<number[]>([]);
+  const [trashVisible, setTrashVisible] = useState(false);
+  const [trashItems, setTrashItems] = useState<FileReview[]>([]);
+
+  const loadFiles = async (page = filePage) => {
     setLoading(true);
     try {
-      const [files, shares, audit] = await Promise.all([
-        axios.get('/api/admin/reviews/files'),
-        axios.get('/api/admin/reviews/shares'),
-        axios.get('/api/admin/audit?limit=100'),
-      ]);
-      setFileItems(files.data.items || []);
-      setShareItems(shares.data.items || []);
-      setAuditItems(audit.data.items || []);
+      const response = await axios.get('/api/admin/reviews/files', {
+        params: {
+          page,
+          pageSize: 20,
+          q: appliedQuery,
+          scopes: scopes.join(','),
+        },
+      });
+      setFileTasks(
+        (response.data.items || []).map((task: FileTask) => ({
+          ...task,
+          rowKey: `task:${task.id}`,
+          children: (task.children || []).map((file) => ({
+            ...file,
+            rowKey: `file:${file.resourceId}`,
+          })),
+        }))
+      );
+      setFileTotal(response.data.total || 0);
+      setFilePage(page);
+      setFileSelection([]);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('审查数据加载失败'));
+      Message.error(error?.response?.data?.msg || uiText('文件审核加载失败'));
     } finally {
       setLoading(false);
     }
   };
+
+  const loadShares = async (page = sharePage) => {
+    setLoading(true);
+    try {
+      const response = await axios.get('/api/admin/reviews/shares', {
+        params: {
+          page,
+          pageSize: 20,
+          q: appliedQuery,
+          scopes: scopes.join(','),
+        },
+      });
+      setShareItems(response.data.items || []);
+      setShareTotal(response.data.total || 0);
+      setSharePage(page);
+      setShareSelection([]);
+    } catch (error) {
+      Message.error(error?.response?.data?.msg || uiText('分享审核加载失败'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadAudit = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.get('/api/admin/audit?limit=100');
+      setAuditItems(response.data.items || []);
+    } catch (error) {
+      Message.error(error?.response?.data?.msg || uiText('审计日志加载失败'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    loadAll();
-  }, []);
-  const review = async (
-    kind: 'files' | 'shares',
-    id: string | number,
-    action: 'approve' | 'reject',
-    reason = ''
-  ) => {
-    if (action === 'reject' && !reason.trim()) {
-      Message.warning(uiText('请填写驳回原因'));
+    if (activeTab === 'files') loadFiles(1);
+    else if (activeTab === 'shares') loadShares(1);
+    else loadAudit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, appliedQuery]);
+
+  const selectedFiles = useMemo(() => {
+    const selected = new Set(fileSelection);
+    const output: FileReview[] = [];
+    fileTasks.forEach((task) => {
+      const wholeTask = selected.has(`task:${task.id}`);
+      task.children.forEach((file) => {
+        if (wholeTask || selected.has(`file:${file.resourceId}`))
+          output.push(file);
+      });
+    });
+    return output.filter(
+      (item, index, all) =>
+        all.findIndex((other) => other.resourceId === item.resourceId) === index
+    );
+  }, [fileSelection, fileTasks]);
+
+  const selectedShares = useMemo(
+    () => shareItems.filter((item) => shareSelection.includes(item.shareId)),
+    [shareItems, shareSelection]
+  );
+
+  const openReview = (kind: ReviewKind) => {
+    const selected = kind === 'files' ? selectedFiles : selectedShares;
+    if (!selected.length) {
+      Message.warning(uiText('请选择审核项目'));
+      return;
+    }
+    const first = selected[0];
+    setReviewStatus(first.status === 'rejected' ? 'rejected' : 'approved');
+    setReviewReason(first.reason || '');
+    setReviewDelete(
+      kind === 'files'
+        ? Boolean((first as FileReview).deleteFile)
+        : Boolean((first as ShareReview).deleteLink)
+    );
+    setReviewBlocked(Boolean(first.blocked));
+    setReviewKind(kind);
+  };
+
+  const submitReview = async () => {
+    if (!reviewKind) return;
+    if (reviewStatus === 'rejected' && !reviewReason.trim()) {
+      Message.warning(uiText('请输入审核意见'));
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const response = await axios.put(`/api/admin/reviews/${reviewKind}`, {
+        resourceIds:
+          reviewKind === 'files'
+            ? selectedFiles.map((item) => item.resourceId)
+            : undefined,
+        shareIds:
+          reviewKind === 'shares'
+            ? selectedShares.map((item) => item.shareId)
+            : undefined,
+        status: reviewStatus,
+        reason: reviewReason.trim(),
+        delete: reviewStatus === 'rejected' && reviewDelete,
+        blocked: reviewStatus === 'rejected' && reviewBlocked,
+      });
+      setReviewKind(undefined);
+      Message.success(uiText('审核已提交'));
+      (response.data.warnings || []).forEach((warning: string) =>
+        Message.warning(warning)
+      );
+      if (reviewKind === 'files') await loadFiles();
+      else await loadShares();
+    } catch (error) {
+      Message.error(error?.response?.data?.msg || uiText('审核操作失败'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const downloadFiles = async () => {
+    const ids = selectedFiles
+      .filter((item) => item.exists)
+      .map((item) => item.resourceId);
+    if (!ids.length) {
+      Message.warning(uiText('请选择可下载文件'));
       return;
     }
     try {
-      await axios.put(`/api/admin/reviews/${kind}/${encodeURIComponent(id)}`, {
-        action,
-        reason: reason.trim(),
-      });
-      Message.success(
-        action === 'approve' ? uiText('审核已通过') : uiText('审核已驳回')
+      const response = await axios.post(
+        '/api/admin/reviews/files/download',
+        { resourceIds: ids },
+        { responseType: 'blob' }
       );
-      setRejectTarget(undefined);
-      setRejectReason('');
-      await loadAll();
+      const disposition = response.headers['content-disposition'] || '';
+      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const name = encoded
+        ? decodeURIComponent(encoded)
+        : ids.length === 1
+        ? selectedFiles[0].name
+        : uiText('审核文件.zip');
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = name;
+      anchor.click();
+      URL.revokeObjectURL(url);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('审核操作失败'));
+      Message.error(error?.response?.data?.msg || uiText('下载失败'));
     }
   };
-  const openFilePreview = async (item: FileReview) => {
-    setPreviewFile(item);
-    setFilePreviewSupported(await supportsFilePreview(item.name));
+
+  const loadTrash = async () => {
+    try {
+      const response = await axios.get('/api/admin/reviews/files/trash');
+      setTrashItems(response.data.items || []);
+      setTrashVisible(true);
+    } catch (error) {
+      Message.error(error?.response?.data?.msg || uiText('审核回收站加载失败'));
+    }
   };
+
+  const deleteTrashItem = async (id: string) => {
+    await axios.delete(
+      `/api/admin/reviews/files/trash/${encodeURIComponent(id)}`
+    );
+    setTrashItems((current) =>
+      current.filter((item) => item.resourceId !== id)
+    );
+    loadFiles();
+  };
+
   const fileColumns = [
     {
-      title: uiText('文件'),
-      dataIndex: 'name',
-      ellipsis: true,
+      title: 'ID',
+      width: 210,
+      render: (_: unknown, item: FileTask | FileReview) =>
+        'id' in item ? item.id : item.resourceId,
     },
     {
-      title: uiText('上传用户'),
-      dataIndex: 'ownerName',
+      title: uiText('文件名'),
+      render: (_: unknown, item: FileTask | FileReview) =>
+        'children' in item
+          ? `${uiText('上传任务')}（${item.children.length}）`
+          : item.relativePath || item.name,
+    },
+    {
+      title: uiText('上传者'),
       width: 140,
+      render: (_: unknown, item: FileTask | FileReview) =>
+        item.ownerName || '-',
     },
     {
-      title: uiText('大小'),
-      dataIndex: 'sizeBytes',
-      width: 110,
-      render: fileSize,
+      title: uiText('上传时间'),
+      width: 190,
+      render: (_: unknown, item: FileTask | FileReview) =>
+        formatTime('uploadedAt' in item ? item.uploadedAt : item.submittedAt),
     },
     {
       title: uiText('状态'),
-      dataIndex: 'status',
-      width: 100,
-      render: statusTag,
-    },
-    {
-      title: uiText('提交时间'),
-      dataIndex: 'submittedAt',
-      width: 180,
-      render: dateTime,
-    },
-    {
-      title: uiText('操作'),
-      width: 300,
-      fixed: 'right' as const,
-      render: (_: unknown, item: FileReview) => (
-        <Space wrap>
-          <Button
-            size="small"
-            icon={<IconEye />}
-            onClick={() => openFilePreview(item)}
-          >
-            {uiText('预览')}
-          </Button>
-          <Button
-            size="small"
-            icon={<IconDownload />}
-            onClick={() =>
-              window.open(
-                `/api/admin/reviews/files/${encodeURIComponent(
-                  item.resourceId
-                )}/download`
-              )
-            }
-          >
-            {uiText('下载')}
-          </Button>
-          {item.status === 'pending' && (
-            <>
-              <Button
-                size="small"
-                type="primary"
-                icon={<IconCheck />}
-                onClick={() => review('files', item.resourceId, 'approve')}
-              >
-                {uiText('通过')}
-              </Button>
-              <Button
-                size="small"
-                status="danger"
-                icon={<IconClose />}
-                onClick={() =>
-                  setRejectTarget({
-                    kind: 'files',
-                    id: item.resourceId,
-                  })
-                }
-              >
-                {uiText('驳回')}
-              </Button>
-            </>
-          )}
-        </Space>
-      ),
+      width: 120,
+      render: (_: unknown, item: FileTask | FileReview) =>
+        statusTag(item.status),
     },
   ];
+
   const shareColumns = [
+    { title: 'ID', dataIndex: 'shareId', width: 110 },
+    { title: uiText('分享内容'), dataIndex: 'resourceName', ellipsis: true },
+    { title: uiText('分享者'), dataIndex: 'ownerName', width: 150 },
     {
-      title: uiText('分享内容'),
-      dataIndex: 'resourceName',
-      ellipsis: true,
-    },
-    {
-      title: uiText('创建用户'),
-      dataIndex: 'ownerName',
-      width: 140,
-    },
-    {
-      title: uiText('格式'),
-      dataIndex: 'descriptionFormat',
-      width: 100,
-      render: (value: string) => (value === 'html' ? 'HTML' : 'Markdown'),
+      title: uiText('分享时间'),
+      dataIndex: 'submittedAt',
+      width: 190,
+      render: formatTime,
     },
     {
       title: uiText('状态'),
       dataIndex: 'status',
-      width: 100,
-      render: statusTag,
-    },
-    {
-      title: uiText('提交时间'),
-      dataIndex: 'submittedAt',
-      width: 180,
-      render: dateTime,
-    },
-    {
-      title: uiText('操作'),
-      width: 235,
-      fixed: 'right' as const,
-      render: (_: unknown, item: ShareReview) => (
-        <Space wrap>
-          <Button
-            size="small"
-            icon={<IconEye />}
-            onClick={() => setPreviewShare(item)}
-          >
-            {uiText('预览')}
-          </Button>
-          {item.status === 'pending' && (
-            <>
-              <Button
-                size="small"
-                type="primary"
-                icon={<IconCheck />}
-                onClick={() => review('shares', item.shareId, 'approve')}
-              >
-                {uiText('通过')}
-              </Button>
-              <Button
-                size="small"
-                status="danger"
-                icon={<IconClose />}
-                onClick={() =>
-                  setRejectTarget({
-                    kind: 'shares',
-                    id: item.shareId,
-                  })
-                }
-              >
-                {uiText('驳回')}
-              </Button>
-            </>
-          )}
-        </Space>
-      ),
+      width: 120,
+      render: (_: string, item: ShareReview) =>
+        statusTag(
+          item.blocked ? 'blocked' : item.deletedAt ? 'trashed' : item.status
+        ),
     },
   ];
+
   const auditColumns = [
     {
       title: uiText('时间'),
       dataIndex: 'createdAt',
       width: 190,
-      render: dateTime,
+      render: formatTime,
     },
-    {
-      title: uiText('操作者'),
-      dataIndex: 'actorName',
-      width: 140,
-    },
-    {
-      title: uiText('动作'),
-      dataIndex: 'action',
-      width: 200,
-      render: (value: string) => (
-        <Tooltip content={value}>
-          <Tag color="arcoblue" className={styles['audit-action']}>
-            {value}
-          </Tag>
-        </Tooltip>
-      ),
-    },
+    { title: uiText('操作者'), dataIndex: 'actorName', width: 150 },
+    { title: uiText('动作'), dataIndex: 'action', width: 220 },
     {
       title: uiText('对象'),
-      render: (_: unknown, record: AuditItem) => (
-        <div>
-          {record.targetLabel || record.targetType}
-          <br />
-          <Text type="secondary">{record.targetType}</Text>
-        </div>
-      ),
+      render: (_: unknown, item: AuditItem) =>
+        item.targetLabel || item.targetType,
     },
     {
       title: uiText('来源 IP'),
@@ -337,58 +456,114 @@ function Audit() {
       render: (value: string) => value || '-',
     },
   ];
-  const shareHTML = useMemo(() => {
-    if (!previewShare) return '';
-    const source =
-      previewShare.descriptionFormat === 'html'
-        ? previewShare.description
-        : (marked.parse(previewShare.description, {
-            async: false,
-          }) as string);
-    return DOMPurify.sanitize(source, {
-      USE_PROFILES: {
-        html: true,
-      },
-    });
-  }, [previewShare]);
+
   return (
     <div className={styles.page}>
       <AdminPageHeader
         title={uiText('审查与审计')}
-        description={uiText('审查待发布内容，并追踪关键管理操作。')}
+        description={uiText('审核所有用户上传的文件和分享内容。')}
       />
       <Card className={styles['table-card']}>
-        <Tabs defaultActiveTab="files">
+        <Tabs activeTab={activeTab} onChange={setActiveTab}>
           <TabPane key="files" title={uiText('文件审查')}>
+            <div className={styles['review-toolbar']}>
+              <SearchBox
+                value={query}
+                scopes={scopes}
+                onValueChange={setQuery}
+                onScopesChange={setScopes}
+                onSearch={() => {
+                  setFilePage(1);
+                  setAppliedQuery(query.trim());
+                }}
+              />
+              <Space wrap>
+                <Button icon={<IconDownload />} onClick={downloadFiles}>
+                  {uiText('下载')}
+                </Button>
+                <Button type="primary" onClick={() => openReview('files')}>
+                  {uiText('审核')}
+                </Button>
+                <Button
+                  status="danger"
+                  icon={<IconDelete />}
+                  onClick={loadTrash}
+                >
+                  {uiText('回收站')}
+                </Button>
+              </Space>
+            </div>
             <Table
-              rowKey="resourceId"
+              rowKey="rowKey"
               loading={loading}
               columns={fileColumns}
-              data={fileItems}
-              pagination={{
-                pageSize: 15,
-                showTotal: true,
+              data={fileTasks}
+              pagination={false}
+              rowSelection={{
+                type: 'checkbox',
+                selectedRowKeys: fileSelection,
+                checkStrictly: false,
+                onChange: (keys) => setFileSelection(keys.map(String)),
               }}
-              noDataElement={uiText('暂无文件审查记录')}
-              scroll={{
-                x: 1050,
-              }}
+              noDataElement={uiText('暂无文件审核记录')}
+              scroll={{ x: 950 }}
+            />
+            <Pagination
+              current={filePage}
+              pageSize={20}
+              total={fileTotal}
+              onChange={loadFiles}
+              className={styles['review-pagination']}
             />
           </TabPane>
           <TabPane key="shares" title={uiText('分享审查')}>
+            <div className={styles['review-toolbar']}>
+              <SearchBox
+                value={query}
+                scopes={scopes}
+                onValueChange={setQuery}
+                onScopesChange={setScopes}
+                onSearch={() => {
+                  setSharePage(1);
+                  setAppliedQuery(query.trim());
+                }}
+              />
+              <Space wrap>
+                <Button
+                  icon={<IconEye />}
+                  onClick={() =>
+                    selectedShares.length
+                      ? setPreviewVisible(true)
+                      : Message.warning(uiText('请选择审核项目'))
+                  }
+                >
+                  {uiText('预览')}
+                </Button>
+                <Button type="primary" onClick={() => openReview('shares')}>
+                  {uiText('审核')}
+                </Button>
+              </Space>
+            </div>
             <Table
               rowKey="shareId"
               loading={loading}
               columns={shareColumns}
               data={shareItems}
-              pagination={{
-                pageSize: 15,
-                showTotal: true,
+              pagination={false}
+              rowSelection={{
+                type: 'checkbox',
+                selectedRowKeys: shareSelection,
+                onChange: setShareSelection,
               }}
-              noDataElement={uiText('暂无自定义分享说明审查记录')}
-              scroll={{
-                x: 980,
-              }}
+              noDataElement={uiText('暂无分享审核记录')}
+              scroll={{ x: 850 }}
+            />
+            <Pagination
+              current={sharePage}
+              pageSize={20}
+              total={shareTotal}
+              onChange={loadShares}
+              className={styles['review-pagination']}
             />
           </TabPane>
           <TabPane key="audit" title={uiText('系统审计')}>
@@ -397,127 +572,185 @@ function Audit() {
               loading={loading}
               columns={auditColumns}
               data={auditItems}
-              pagination={{
-                pageSize: 15,
-                showTotal: true,
-              }}
-              noDataElement={uiText('暂无系统审计记录')}
-              scroll={{
-                x: 860,
-              }}
+              pagination={{ pageSize: 20 }}
             />
           </TabPane>
         </Tabs>
       </Card>
 
       <Modal
-        visible={Boolean(previewFile)}
-        title={previewFile?.name || uiText('文件预览')}
-        footer={null}
-        onCancel={() => setPreviewFile(undefined)}
+        visible={Boolean(reviewKind)}
+        title={reviewKind === 'files' ? uiText('文件审核') : uiText('分享审核')}
+        onCancel={() => setReviewKind(undefined)}
+        onOk={submitReview}
+        confirmLoading={submitting}
+        okText={uiText('提交')}
         unmountOnExit
-        style={{
-          width: 'min(1480px, 94vw)',
-        }}
       >
-        <div
-          style={{
-            height: 'min(72vh, 820px)',
-            minHeight: 460,
-          }}
-        >
-          {previewFile && filePreviewSupported ? (
-            <SecureFileViewer
-              url={`/api/admin/reviews/files/${encodeURIComponent(
-                previewFile.resourceId
-              )}/preview`}
-              name={previewFile.name}
-              size={previewFile.sizeBytes}
-              onDownload={() =>
-                window.open(
-                  `/api/admin/reviews/files/${encodeURIComponent(
-                    previewFile.resourceId
-                  )}/download`
-                )
-              }
-            />
-          ) : previewFile ? (
-            <div
-              style={{
-                height: '100%',
-                display: 'grid',
-                placeContent: 'center',
-                gap: 16,
-                textAlign: 'center',
-              }}
+        <div className={styles['review-form']}>
+          <div>
+            <Text>{uiText('审核状态')}：</Text>
+            <Radio.Group
+              type="button"
+              value={reviewStatus}
+              onChange={setReviewStatus}
             >
-              <Text>{uiText('该格式不支持预览，请下载后查看')}</Text>
-              <Button
-                type="primary"
-                icon={<IconDownload />}
-                onClick={() =>
-                  window.open(
-                    `/api/admin/reviews/files/${encodeURIComponent(
-                      previewFile.resourceId
-                    )}/download`
-                  )
-                }
-              >
-                {uiText('下载文件')}
-              </Button>
-            </div>
-          ) : null}
+              <Radio value="approved">{uiText('通过')}</Radio>
+              <Radio value="rejected">{uiText('不通过')}</Radio>
+            </Radio.Group>
+          </div>
+          {reviewStatus === 'rejected' && (
+            <>
+              <div>
+                <Text>{uiText('审核意见')}：</Text>
+                <Input.TextArea
+                  value={reviewReason}
+                  onChange={setReviewReason}
+                  maxLength={100}
+                  showWordLimit
+                  autoSize={{ minRows: 3, maxRows: 6 }}
+                />
+              </div>
+              <div>
+                <Text>{uiText('审核操作')}：</Text>
+                <Space direction="vertical">
+                  <Checkbox checked={reviewDelete} onChange={setReviewDelete}>
+                    {reviewKind === 'files'
+                      ? uiText('删除文件')
+                      : uiText('删除链接')}
+                  </Checkbox>
+                  <Checkbox checked={reviewBlocked} onChange={setReviewBlocked}>
+                    {reviewKind === 'files'
+                      ? uiText('拉黑文件')
+                      : uiText('封禁链接')}
+                  </Checkbox>
+                </Space>
+              </div>
+            </>
+          )}
         </div>
       </Modal>
 
       <Modal
-        visible={Boolean(previewShare)}
-        title={uiText('分享说明预览')}
+        visible={previewVisible}
+        title={uiText('分享预览')}
         footer={null}
-        onCancel={() => setPreviewShare(undefined)}
+        onCancel={() => setPreviewVisible(false)}
+        style={{ width: 'min(980px, 94vw)' }}
         unmountOnExit
       >
-        <div
-          style={{
-            minHeight: 240,
-            maxHeight: '65vh',
-            overflow: 'auto',
-          }}
-          dangerouslySetInnerHTML={{
-            __html: shareHTML,
-          }}
-        />
+        <div className={styles['share-preview-list']}>
+          {selectedShares.map((item) => {
+            const source = sourceShares.includes(item.shareId);
+            const html =
+              item.descriptionFormat === 'html'
+                ? item.description
+                : (marked.parse(item.description || '', {
+                    async: false,
+                  }) as string);
+            return (
+              <Card
+                key={item.shareId}
+                className={styles['share-preview-card']}
+                title={
+                  <Space>
+                    <Checkbox
+                      checked={shareSelection.includes(item.shareId)}
+                      onChange={(checked) =>
+                        setShareSelection((current) =>
+                          checked
+                            ? [...current, item.shareId]
+                            : current.filter((id) => id !== item.shareId)
+                        )
+                      }
+                    />
+                    <Text>
+                      #{item.shareId} · {item.ownerName} ·{' '}
+                      {formatTime(item.submittedAt)}
+                    </Text>
+                  </Space>
+                }
+              >
+                {source ? (
+                  <pre>{item.description}</pre>
+                ) : (
+                  <div
+                    dangerouslySetInnerHTML={{
+                      __html: DOMPurify.sanitize(html, {
+                        USE_PROFILES: { html: true },
+                      }),
+                    }}
+                  />
+                )}
+                <Button
+                  shape="circle"
+                  className={styles['share-source-toggle']}
+                  icon={<IconCode />}
+                  onClick={() =>
+                    setSourceShares((current) =>
+                      source
+                        ? current.filter((id) => id !== item.shareId)
+                        : [...current, item.shareId]
+                    )
+                  }
+                />
+              </Card>
+            );
+          })}
+        </div>
       </Modal>
 
       <Modal
-        visible={Boolean(rejectTarget)}
-        title={uiText('驳回审核')}
-        okText={uiText('确认驳回')}
-        okButtonProps={{
-          status: 'danger',
-        }}
-        onCancel={() => {
-          setRejectTarget(undefined);
-          setRejectReason('');
-        }}
-        onOk={() =>
-          rejectTarget &&
-          review(rejectTarget.kind, rejectTarget.id, 'reject', rejectReason)
-        }
+        visible={trashVisible}
+        title={uiText('审核回收站')}
+        footer={null}
+        onCancel={() => setTrashVisible(false)}
+        style={{ width: 'min(900px, 94vw)' }}
       >
-        <Input.TextArea
-          value={rejectReason}
-          onChange={setRejectReason}
-          maxLength={500}
-          showWordLimit
-          autoSize={{
-            minRows: 4,
-            maxRows: 8,
-          }}
-          placeholder={uiText('请输入驳回原因')}
+        <div className={styles['review-toolbar']}>
+          <Text>{uiText('这里只允许永久删除，不支持恢复。')}</Text>
+          <Button
+            status="danger"
+            disabled={!trashItems.length}
+            onClick={async () => {
+              await axios.delete('/api/admin/reviews/files/trash');
+              setTrashItems([]);
+              loadFiles();
+            }}
+          >
+            {uiText('清空回收站')}
+          </Button>
+        </div>
+        <Table
+          rowKey="resourceId"
+          data={trashItems}
+          pagination={false}
+          columns={[
+            { title: 'ID', dataIndex: 'resourceId' },
+            { title: uiText('文件名'), dataIndex: 'name' },
+            { title: uiText('上传者'), dataIndex: 'ownerName' },
+            {
+              title: uiText('删除时间'),
+              dataIndex: 'trashedAt',
+              render: formatTime,
+            },
+            {
+              title: uiText('操作'),
+              render: (_: unknown, item: FileReview) => (
+                <Button
+                  size="small"
+                  status="danger"
+                  onClick={() => deleteTrashItem(item.resourceId)}
+                >
+                  {uiText('永久删除')}
+                </Button>
+              ),
+            },
+          ]}
         />
       </Modal>
     </div>
   );
 }
+
 export default Audit;

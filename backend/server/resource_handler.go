@@ -1,29 +1,20 @@
 package server
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/jackc/pgx/v5/pgconn"
 )
-
-const hardUploadLimit = int64(100 << 30) // 配额不限时仍保留 100 GiB 单请求安全上限。
-
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type folderRequest struct {
 	Name     string  `json:"name"`
@@ -114,7 +105,7 @@ func serveOwnedResourcesDownload(w http.ResponseWriter, r *http.Request, deps De
 		writeBusinessError(w, http.StatusBadRequest, "请求格式错误")
 		return
 	}
-	resourceIDs := normalizeResourceIDs(req.ResourceIDs, "")
+	resourceIDs := normalizeResourceIDs(req.ResourceIDs)
 	if len(resourceIDs) == 0 || len(resourceIDs) > 100 {
 		writeBusinessError(w, http.StatusBadRequest, "请选择 1 至 100 项内容")
 		return
@@ -205,7 +196,7 @@ func resourceItemHandler(deps Deps) http.HandlerFunc {
 			writeBusinessError(w, http.StatusForbidden, "没有删除资源权限")
 			return
 		}
-		tree, err := deps.ResourceRepo.DeleteOwned(r.Context(), u.ID, id)
+		err := deps.ResourceRepo.MoveToTrashOwned(r.Context(), u.ID, id)
 		if errors.Is(err, resource.ErrNotFound) || errors.Is(err, resource.ErrOwnerMismatch) {
 			writeBusinessError(w, http.StatusNotFound, "资源不存在")
 			return
@@ -213,13 +204,6 @@ func resourceItemHandler(deps Deps) http.HandlerFunc {
 		if err != nil {
 			writeBusinessError(w, http.StatusInternalServerError, "删除资源失败")
 			return
-		}
-		for _, item := range tree {
-			if item.Kind == resource.KindFile && item.StorageKey != nil {
-				if err := deps.FileStore.Remove(r.Context(), *item.StorageKey); err != nil {
-					log.Printf("清理资源文件失败 id=%s: %v", item.ID, err)
-				}
-			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	}
@@ -323,204 +307,6 @@ func serveResourceFilePreview(w http.ResponseWriter, r *http.Request, deps Deps,
 	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, item.Name, item.UpdatedAt, file)
-}
-
-func uploadHandler(deps Deps) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		u, ok := requireUser(w, r, deps)
-		if !ok {
-			return
-		}
-		if !u.HasPermission(permission.Upload) {
-			writeBusinessError(w, http.StatusForbidden, "没有上传权限")
-			return
-		}
-
-		quotaProfile, err := deps.QuotaRepo.GetEffectiveQuotaByUser(r.Context(), u.ID)
-		if err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "读取上传配额失败")
-			return
-		}
-		dailyCount, dailyBytes, err := deps.ResourceRepo.UploadUsageSince(r.Context(), u.ID, time.Now().Add(-24*time.Hour))
-		if err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "读取每日上传用量失败")
-			return
-		}
-		if quotaProfile.DailyUploadCountLimit.Valid && dailyCount >= quotaProfile.DailyUploadCountLimit.Int64 {
-			writeBusinessError(w, http.StatusTooManyRequests, "已达到每日上传次数限制")
-			return
-		}
-		maxFileBytes := hardUploadLimit
-		if quotaProfile.SingleFileBytesLimit.Valid && quotaProfile.SingleFileBytesLimit.Int64 < maxFileBytes {
-			maxFileBytes = quotaProfile.SingleFileBytesLimit.Int64
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxFileBytes+(2<<20))
-		reader, err := r.MultipartReader()
-		if err != nil {
-			writeBusinessError(w, http.StatusBadRequest, "必须使用 multipart/form-data 上传")
-			return
-		}
-
-		expectedChecksum := strings.ToLower(strings.TrimSpace(r.Header.Get("X-File-SHA256")))
-		var parentID *string
-		var overrideName, originalName, mimeType string
-		var tempPath string
-		var sizeBytes int64
-		var streamChecksum string
-		cleanupTemp := func() {
-			if tempPath != "" {
-				_ = os.Remove(tempPath)
-			}
-		}
-		defer cleanupTemp()
-
-		for {
-			part, nextErr := reader.NextPart()
-			if errors.Is(nextErr, io.EOF) {
-				break
-			}
-			if nextErr != nil {
-				writeBusinessError(w, http.StatusBadRequest, "读取上传内容失败")
-				return
-			}
-			field := part.FormName()
-			if part.FileName() == "" {
-				value, readErr := io.ReadAll(io.LimitReader(part, 4097))
-				_ = part.Close()
-				if readErr != nil || len(value) > 4096 {
-					writeBusinessError(w, http.StatusBadRequest, "上传字段过长")
-					return
-				}
-				switch field {
-				case "checksum":
-					expectedChecksum = strings.ToLower(strings.TrimSpace(string(value)))
-				case "parentId":
-					if id := strings.TrimSpace(string(value)); id != "" {
-						parentID = &id
-					}
-				case "name":
-					overrideName = strings.TrimSpace(string(value))
-				}
-				continue
-			}
-			if field != "file" || tempPath != "" {
-				_ = part.Close()
-				writeBusinessError(w, http.StatusBadRequest, "一次只能上传一个 file 字段")
-				return
-			}
-			originalName = part.FileName()
-			mimeType = part.Header.Get("Content-Type")
-			temp, createErr := deps.FileStore.NewTemp(r.Context(), "upload-*")
-			if createErr != nil {
-				writeBusinessError(w, http.StatusInternalServerError, "创建上传文件失败")
-				return
-			}
-			tempPath = temp.Name()
-			hash := sha256.New()
-			n, copyErr := io.Copy(io.MultiWriter(temp, hash), io.LimitReader(part, maxFileBytes+1))
-			_ = part.Close()
-			if copyErr == nil {
-				copyErr = temp.Sync()
-			}
-			closeErr := temp.Close()
-			if copyErr != nil || closeErr != nil {
-				writeBusinessError(w, http.StatusInternalServerError, "保存上传文件失败")
-				return
-			}
-			if n > maxFileBytes {
-				writeBusinessError(w, http.StatusRequestEntityTooLarge, "文件超过单文件大小限制")
-				return
-			}
-			sizeBytes = n
-			streamChecksum = hex.EncodeToString(hash.Sum(nil))
-		}
-
-		if tempPath == "" {
-			writeBusinessError(w, http.StatusBadRequest, "缺少 file 字段")
-			return
-		}
-		if !sha256Pattern.MatchString(expectedChecksum) {
-			writeBusinessError(w, http.StatusBadRequest, "缺少合法的 SHA-256 校验码")
-			return
-		}
-		if streamChecksum != expectedChecksum {
-			writeBusinessError(w, http.StatusUnprocessableEntity, "前端校验码与上传内容不一致")
-			return
-		}
-		// 文件已保存并 fsync 后重新从磁盘完整读取，完成第二次独立校验。
-		diskChecksum, diskSize, err := filestore.ChecksumFile(tempPath)
-		if err != nil || diskChecksum != expectedChecksum || diskSize != sizeBytes {
-			writeBusinessError(w, http.StatusUnprocessableEntity, "后端落盘校验失败")
-			return
-		}
-
-		if quotaProfile.StorageBytesLimit.Valid {
-			currentBytes, totalErr := deps.ResourceRepo.TotalFileBytesByOwner(r.Context(), u.ID)
-			if totalErr != nil {
-				writeBusinessError(w, http.StatusInternalServerError, "读取存储配额失败")
-				return
-			}
-			if currentBytes+sizeBytes > quotaProfile.StorageBytesLimit.Int64 {
-				writeBusinessError(w, http.StatusRequestEntityTooLarge, "存储空间不足")
-				return
-			}
-		}
-		if quotaProfile.DailyUploadBytesLimit.Valid && dailyBytes+sizeBytes > quotaProfile.DailyUploadBytesLimit.Int64 {
-			writeBusinessError(w, http.StatusRequestEntityTooLarge, "已达到每日上传流量限制")
-			return
-		}
-
-		name := originalName
-		if overrideName != "" {
-			name = overrideName
-		}
-		if _, err := resource.ValidateName(name); err != nil {
-			writeBusinessError(w, http.StatusBadRequest, "文件名不合法")
-			return
-		}
-		storageKey, err := resource.StorageKey()
-		if err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "生成存储键失败")
-			return
-		}
-		finalPath, err := deps.FileStore.Commit(r.Context(), tempPath, storageKey)
-		if err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "提交上传文件失败")
-			return
-		}
-		tempPath = ""
-		item, err := deps.ResourceRepo.CreateFile(
-			r.Context(), u.ID, normalizeID(parentID), name, storageKey,
-			sizeBytes, diskChecksum, mimeType,
-		)
-		if err != nil {
-			_ = os.Remove(finalPath)
-			writeResourceMutationError(w, err)
-			return
-		}
-		reviewStatus := "approved"
-		settings, err := deps.AdminRepo.GetReviewSettings(r.Context())
-		if err != nil {
-			_, _ = deps.ResourceRepo.DeleteOwned(r.Context(), u.ID, item.ID)
-			_ = os.Remove(finalPath)
-			writeBusinessError(w, http.StatusInternalServerError, "读取文件审核配置失败")
-			return
-		}
-		if settings.UploadRequiresReview {
-			if err := deps.AdminRepo.MarkFilePending(r.Context(), item.ID); err != nil {
-				_, _ = deps.ResourceRepo.DeleteOwned(r.Context(), u.ID, item.ID)
-				_ = os.Remove(finalPath)
-				writeBusinessError(w, http.StatusInternalServerError, "提交文件审核失败")
-				return
-			}
-			reviewStatus = "pending"
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"status": "ok", "resource": item, "reviewStatus": reviewStatus})
-	}
 }
 
 func normalizeID(id *string) *string {

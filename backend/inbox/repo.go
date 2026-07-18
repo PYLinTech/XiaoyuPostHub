@@ -24,6 +24,17 @@ type Repo struct{ pool *pgxpool.Pool }
 
 func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
+func (r *Repo) InsertUser(ctx context.Context, userID int64, messageType string, content any) (int64, error) {
+	body, err := json.Marshal(content)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	err = r.pool.QueryRow(ctx, `INSERT INTO messages(receiver_type,receiver_id,message_type,content)
+		VALUES('user',$1,$2,$3) RETURNING id`, userID, messageType, body).Scan(&id)
+	return id, err
+}
+
 func (r *Repo) List(ctx context.Context, userID int64, limit int) ([]Message, int64, error) {
 	if limit < 1 || limit > 200 {
 		limit = 100

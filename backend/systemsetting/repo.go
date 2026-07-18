@@ -26,24 +26,31 @@ var (
 	ErrSiteNameBlank      = errors.New("systemsetting: 站点名称不能为空")
 	ErrStoragePathInvalid = errors.New("systemsetting: 文件存储路径必须是绝对路径")
 	ErrRandomCodeInvalid  = errors.New("systemsetting: 随机码配置无效")
+	ErrUploadChunkSize    = errors.New("systemsetting: 分片大小必须在 1M 到 64M 之间")
+	ErrUploadConcurrency  = errors.New("systemsetting: 上传并发数必须在 1 到 8 之间")
+	ErrTrashRetention     = errors.New("systemsetting: 回收期限必须在 1 到 3650 天之间")
 	ErrDownloadMode       = errors.New("systemsetting: 下载策略无效")
 )
 
 type Config struct {
-	SiteName                  string
-	StoragePath               string
-	FolderPackMode            string
-	ShareDeliveryMode         string
-	InvitationLength          int16
-	InvitationCaseSensitive   bool
-	InvitationIncludeLetters  bool
-	InvitationIncludeNumbers  bool
-	ShareLength               int16
-	ShareCaseSensitive        bool
-	ShareIncludeLetters       bool
-	ShareIncludeNumbers       bool
-	UploadRequiresReview      bool
-	CustomShareRequiresReview bool
+	SiteName                   string
+	StoragePath                string
+	FolderPackMode             string
+	ShareDeliveryMode          string
+	InvitationLength           int16
+	InvitationCaseSensitive    bool
+	InvitationIncludeLetters   bool
+	InvitationIncludeNumbers   bool
+	ShareLength                int16
+	ShareCaseSensitive         bool
+	ShareIncludeLetters        bool
+	ShareIncludeNumbers        bool
+	UploadRequiresReview       bool
+	CustomShareRequiresReview  bool
+	UploadChunkSizeBytes       int32
+	UploadTaskChunkConcurrency int16
+	UploadUserTaskConcurrency  int16
+	TrashRetentionDays         int16
 }
 
 type Repo struct{ q *sqlcgen.Queries }
@@ -86,6 +93,16 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 		!validCodeConfig(config.ShareLength, config.ShareIncludeLetters, config.ShareIncludeNumbers) {
 		return sqlcgen.SystemSetting{}, ErrRandomCodeInvalid
 	}
+	if config.UploadChunkSizeBytes < 1<<20 || config.UploadChunkSizeBytes > 64<<20 {
+		return sqlcgen.SystemSetting{}, ErrUploadChunkSize
+	}
+	if config.UploadTaskChunkConcurrency < 1 || config.UploadTaskChunkConcurrency > 8 ||
+		config.UploadUserTaskConcurrency < 1 || config.UploadUserTaskConcurrency > 8 {
+		return sqlcgen.SystemSetting{}, ErrUploadConcurrency
+	}
+	if config.TrashRetentionDays < 1 || config.TrashRetentionDays > 3650 {
+		return sqlcgen.SystemSetting{}, ErrTrashRetention
+	}
 	return r.q.UpdateAllSystemSettings(ctx, sqlcgen.UpdateAllSystemSettingsParams{
 		SiteName: siteName, StoragePath: storagePath,
 		FolderPackMode: config.FolderPackMode, ShareDeliveryMode: config.ShareDeliveryMode,
@@ -94,6 +111,10 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 		ShareLength: config.ShareLength, ShareCaseSensitive: config.ShareCaseSensitive,
 		ShareIncludeLetters: config.ShareIncludeLetters, ShareIncludeNumbers: config.ShareIncludeNumbers,
 		UploadRequiresReview: config.UploadRequiresReview, CustomShareRequiresReview: config.CustomShareRequiresReview,
+		UploadChunkSizeBytes:       config.UploadChunkSizeBytes,
+		UploadTaskChunkConcurrency: config.UploadTaskChunkConcurrency,
+		UploadUserTaskConcurrency:  config.UploadUserTaskConcurrency,
+		TrashRetentionDays:         config.TrashRetentionDays,
 	})
 }
 

@@ -28,12 +28,17 @@ function SystemConfig() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [iconUploading, setIconUploading] = useState(false);
+  const [chunkTesting, setChunkTesting] = useState(false);
   const [iconUrl, setIconUrl] = useState('');
   useEffect(() => {
     axios
       .get('/api/admin/system-config')
       .then((res) => {
-        form.setFieldsValue(res.data);
+        form.setFieldsValue({
+          ...res.data,
+          uploadChunkSizeMB:
+            (res.data.uploadChunkSizeBytes || 8 * 1024 * 1024) / 1024 / 1024,
+        });
         setIconUrl(res.data.siteIconUrl || '');
       })
       .catch(() => Message.error(uiText('系统配置加载失败')))
@@ -49,13 +54,28 @@ function SystemConfig() {
       Message.error(uiText('邀请码和分享码都必须至少包含字母或数字'));
       throw new Error('invalid random code charset');
     }
-    const res = await axios.put('/api/admin/system-config', values);
-    form.setFieldsValue(res.data);
+    const { uploadChunkSizeMB, ...payload } = values;
+    const res = await axios.put('/api/admin/system-config', {
+      ...payload,
+      uploadChunkSizeBytes: uploadChunkSizeMB * 1024 * 1024,
+    });
+    form.setFieldsValue({
+      ...res.data,
+      uploadChunkSizeMB: res.data.uploadChunkSizeBytes / 1024 / 1024,
+    });
     setIconUrl(res.data.siteIconUrl || '');
     setSiteConfig?.({
       siteName: res.data.siteName,
       siteIconUrl: res.data.siteIconUrl || '',
     });
+    window.dispatchEvent(
+      new CustomEvent('xph-upload-config-updated', {
+        detail: {
+          taskChunkConcurrency: res.data.uploadTaskChunkConcurrency,
+          userTaskConcurrency: res.data.uploadUserTaskConcurrency,
+        },
+      })
+    );
     if (showSuccess) Message.success(uiText('系统配置已保存并实时生效'));
     return res.data;
   };
@@ -105,6 +125,25 @@ function SystemConfig() {
       Message.error(error?.response?.data?.msg || uiText('恢复默认图标失败'));
     } finally {
       setIconUploading(false);
+    }
+  };
+  const testUploadChunk = async () => {
+    try {
+      const values = await form.validate(['uploadChunkSizeMB']);
+      const sizeBytes = values.uploadChunkSizeMB * 1024 * 1024;
+      setChunkTesting(true);
+      await axios.post(
+        `/api/admin/system-config/upload-test?sizeBytes=${sizeBytes}`,
+        new Blob([new Uint8Array(sizeBytes)]),
+        { headers: { 'Content-Type': 'application/octet-stream' } }
+      );
+      Message.success(uiText('分片大小验证通过'));
+    } catch (error) {
+      if (error?.response) {
+        Message.error(error.response.data?.msg || uiText('分片大小验证失败'));
+      }
+    } finally {
+      setChunkTesting(false);
     }
   };
   return (
@@ -192,6 +231,91 @@ function SystemConfig() {
                   <Text type="secondary" className={styles['site-icon-hint']}>
                     {uiText('支持 SVG、PNG、JPEG、WebP，最大 2MB。')}
                   </Text>
+                </FormItem>
+              </div>
+              <div className={styles['config-section']}>
+                <div className={styles['config-section-header']}>
+                  <div>
+                    <div className={styles['config-title']}>
+                      {uiText('分片上传')}
+                    </div>
+                    <Text
+                      type="secondary"
+                      className={styles['config-description']}
+                    >
+                      {uiText('分片应小于反向代理允许的请求体大小。默认 8M。')}
+                    </Text>
+                  </div>
+                  <Button loading={chunkTesting} onClick={testUploadChunk}>
+                    {uiText('测试验证')}
+                  </Button>
+                </div>
+                <div className={styles['upload-config-grid']}>
+                  <FormItem
+                    label={uiText('分片大小')}
+                    field="uploadChunkSizeMB"
+                    rules={[{ required: true }]}
+                  >
+                    <InputNumber
+                      min={1}
+                      max={64}
+                      step={1}
+                      precision={0}
+                      mode="button"
+                      suffix="M"
+                    />
+                  </FormItem>
+                  <FormItem
+                    label={uiText('单任务并发数')}
+                    field="uploadTaskChunkConcurrency"
+                    rules={[{ required: true }]}
+                  >
+                    <InputNumber
+                      min={1}
+                      max={8}
+                      step={1}
+                      precision={0}
+                      mode="button"
+                    />
+                  </FormItem>
+                  <FormItem
+                    label={uiText('单用户任务并发数')}
+                    field="uploadUserTaskConcurrency"
+                    rules={[{ required: true }]}
+                  >
+                    <InputNumber
+                      min={1}
+                      max={8}
+                      step={1}
+                      precision={0}
+                      mode="button"
+                    />
+                  </FormItem>
+                </div>
+                <Text type="secondary">
+                  {uiText(
+                    '单任务并发数控制一个文件同时上传的分片数，单用户任务并发数控制同时上传的文件数。'
+                  )}
+                </Text>
+              </div>
+              <div className={styles['config-section']}>
+                <div className={styles['config-title']}>{uiText('回收站')}</div>
+                <Text type="secondary" className={styles['config-description']}>
+                  {uiText('到期内容将自动永久删除，默认保留 30 天。')}
+                </Text>
+                <FormItem
+                  label={uiText('回收期限')}
+                  field="trashRetentionDays"
+                  rules={[{ required: true }]}
+                >
+                  <InputNumber
+                    min={1}
+                    max={3650}
+                    step={1}
+                    precision={0}
+                    mode="button"
+                    suffix={uiText('天')}
+                  />
                 </FormItem>
               </div>
               <div className={styles['config-section']}>

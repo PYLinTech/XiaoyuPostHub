@@ -18,6 +18,7 @@ import (
 var (
 	ErrNotFound     = errors.New("sharing: 链接不存在")
 	ErrLimitReached = errors.New("sharing: 链接已失效或达到下载限制")
+	ErrAdminBlocked = errors.New("sharing: 分享已被管理员封禁")
 )
 
 type Share struct {
@@ -175,7 +176,7 @@ func (r *Repo) CountActiveSharesByOwner(ctx context.Context, ownerID int64) (int
 	var count int64
 	err := r.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM shares
-		WHERE owner_user_id = $1 AND is_active AND (expires_at IS NULL OR expires_at > NOW())`, ownerID).Scan(&count)
+		WHERE owner_user_id = $1 AND is_active AND NOT admin_blocked AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`, ownerID).Scan(&count)
 	return count, err
 }
 
@@ -196,10 +197,14 @@ func (r *Repo) CountDirectLinksToEnableByOwner(ctx context.Context, ownerID int6
 }
 
 func (r *Repo) countLinksToEnableByOwner(ctx context.Context, table string, ownerID int64, ids []int64) (int64, error) {
+	condition := ""
+	if table == "shares" {
+		condition = " AND NOT admin_blocked AND deleted_at IS NULL"
+	}
 	var count int64
 	err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+table+`
 		WHERE owner_user_id=$1 AND id=ANY($2) AND NOT is_active
-		AND (expires_at IS NULL OR expires_at > NOW())`, ownerID, ids).Scan(&count)
+		AND (expires_at IS NULL OR expires_at > NOW())`+condition, ownerID, ids).Scan(&count)
 	return count, err
 }
 
@@ -209,14 +214,14 @@ func (r *Repo) ListSharesByOwner(ctx context.Context, ownerID int64) ([]OwnerSha
 		       s.description,s.description_format,
 		       s.download_limit,s.traffic_limit_bytes,s.download_count,s.traffic_used_bytes,
 		       s.is_active,COALESCE(review.status,'approved'),COALESCE(review.reason,''),s.created_at,
-		       (SELECT COUNT(*) FROM share_resources sr WHERE sr.share_id=s.id),
+		       (SELECT COUNT(*) FROM share_resources sr JOIN resources counted ON counted.id=sr.resource_id WHERE sr.share_id=s.id AND counted.trashed_at IS NULL),
 		       r.id,r.owner_user_id,r.parent_id,r.kind,r.name,r.storage_key,
 		       r.size_bytes,r.sha256_checksum,r.mime_type,r.created_at,r.updated_at
 		FROM shares s
 		JOIN share_resources primary_link ON primary_link.share_id=s.id AND primary_link.display_order=0
 		JOIN resources r ON r.id=primary_link.resource_id
-		LEFT JOIN share_reviews review ON review.share_id=s.id
-		WHERE s.owner_user_id=$1 ORDER BY s.id DESC LIMIT 500`, ownerID)
+		LEFT JOIN share_moderations review ON review.share_id=s.id
+		WHERE s.owner_user_id=$1 AND s.deleted_at IS NULL AND r.trashed_at IS NULL ORDER BY s.id DESC LIMIT 500`, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +265,7 @@ func (r *Repo) ListDirectLinksByOwner(ctx context.Context, ownerID int64) ([]Own
 		       r.id,r.owner_user_id,r.parent_id,r.kind,r.name,r.storage_key,
 		       r.size_bytes,r.sha256_checksum,r.mime_type,r.created_at,r.updated_at
 		FROM direct_links d JOIN resources r ON r.id=d.resource_id
-		WHERE d.owner_user_id=$1 AND r.kind='file' ORDER BY d.id DESC LIMIT 500`, ownerID)
+		WHERE d.owner_user_id=$1 AND r.kind='file' AND r.trashed_at IS NULL ORDER BY d.id DESC LIMIT 500`, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +330,17 @@ func (r *Repo) CreateShare(ctx context.Context, p CreateShareParams) (Share, str
 }
 
 func (r *Repo) GetShareByToken(ctx context.Context, token string) (Share, error) {
+	var blocked, deleted bool
+	err := r.pool.QueryRow(ctx, `SELECT admin_blocked,deleted_at IS NOT NULL FROM shares WHERE token_value=$1`, token).Scan(&blocked, &deleted)
+	if errors.Is(err, pgx.ErrNoRows) || deleted {
+		return Share{}, ErrNotFound
+	}
+	if err != nil {
+		return Share{}, err
+	}
+	if blocked {
+		return Share{}, ErrAdminBlocked
+	}
 	return r.getShare(ctx, `s.token_value = $1`, token)
 }
 
@@ -336,6 +352,7 @@ func (r *Repo) ReserveShareDownload(ctx context.Context, id, bytes int64) (bool,
 		    traffic_used_bytes = traffic_used_bytes + $2
 		WHERE id = $1
 		  AND is_active
+		  AND NOT admin_blocked AND deleted_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		  AND (download_limit IS NULL OR download_count + 1 <= download_limit)
 		  AND (traffic_limit_bytes IS NULL OR traffic_used_bytes + $2 <= traffic_limit_bytes)
@@ -377,7 +394,7 @@ func (r *Repo) UpdateShareByOwner(ctx context.Context, p UpdateShareParams) erro
 		query += `,password_value=$10`
 		args = append(args, p.PasswordValue)
 	}
-	query += ` WHERE id=$1 AND owner_user_id=$2`
+	query += ` WHERE id=$1 AND owner_user_id=$2 AND NOT admin_blocked AND deleted_at IS NULL`
 	result, err := r.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return err
@@ -418,7 +435,11 @@ func (r *Repo) batchLinksByOwner(ctx context.Context, table string, ownerID int6
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var count int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM `+table+` WHERE owner_user_id=$1 AND id=ANY($2)`, ownerID, ids).Scan(&count); err != nil {
+	condition := ""
+	if table == "shares" {
+		condition = " AND NOT admin_blocked AND deleted_at IS NULL"
+	}
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM `+table+` WHERE owner_user_id=$1 AND id=ANY($2)`+condition, ownerID, ids).Scan(&count); err != nil {
 		return err
 	}
 	if count != len(ids) {
@@ -509,6 +530,7 @@ func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams)
 		SET download_count = download_count + 1,
 		    traffic_used_bytes = traffic_used_bytes + $2
 		WHERE id = $1 AND is_active
+		  AND NOT admin_blocked AND deleted_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		  AND (download_limit IS NULL OR download_count + 1 <= download_limit)
 		  AND (traffic_limit_bytes IS NULL OR traffic_used_bytes + $2 <= traffic_limit_bytes)
@@ -640,7 +662,7 @@ func (r *Repo) getShare(ctx context.Context, predicate string, arg any) (Share, 
 		JOIN users u ON u.id = s.owner_user_id
 		JOIN share_resources primary_link ON primary_link.share_id=s.id AND primary_link.display_order=0
 		JOIN resources r ON r.id = primary_link.resource_id
-		WHERE `+predicate, arg)
+		WHERE (`+predicate+`) AND r.trashed_at IS NULL`, arg)
 	var item Share
 	err := row.Scan(
 		&item.ID, &item.TokenValue, &item.OwnerUserID, &item.PasswordValue, &item.ExpiresAt,
@@ -671,7 +693,7 @@ func (r *Repo) listShareResources(ctx context.Context, shareID int64) ([]resourc
 		SELECT r.id,r.owner_user_id,r.parent_id,r.kind,r.name,r.storage_key,
 		       r.size_bytes,r.sha256_checksum,r.mime_type,r.created_at,r.updated_at
 		FROM share_resources sr JOIN resources r ON r.id=sr.resource_id
-		WHERE sr.share_id=$1 ORDER BY sr.display_order`, shareID)
+		WHERE sr.share_id=$1 AND r.trashed_at IS NULL ORDER BY sr.display_order`, shareID)
 	if err != nil {
 		return nil, err
 	}
@@ -702,7 +724,7 @@ func (r *Repo) getDirectLink(ctx context.Context, predicate string, arg any) (Di
 		       r.size_bytes, r.sha256_checksum, r.mime_type, r.created_at, r.updated_at
 		FROM direct_links d
 		JOIN resources r ON r.id = d.resource_id
-		WHERE `+predicate, arg)
+		WHERE (`+predicate+`) AND r.trashed_at IS NULL`, arg)
 	var item DirectLink
 	err := row.Scan(
 		&item.ID, &item.TokenValue, &item.OwnerUserID, &item.ExpiresAt,

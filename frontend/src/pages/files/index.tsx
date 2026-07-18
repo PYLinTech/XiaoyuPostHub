@@ -14,7 +14,6 @@ import {
   Input,
   Message,
   Modal,
-  Progress,
   Space,
   Table,
   Tag,
@@ -42,18 +41,10 @@ import {
 import styles from '../storage/style/index.module.less';
 import uiText from '@/utils/uiText';
 import { GlobalContext } from '@/context';
+import { useUploadManager } from '@/components/UploadManager';
 interface PathItem {
   id?: string;
   name: string;
-}
-async function fileSHA256(file: File) {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    await file.arrayBuffer()
-  );
-  return Array.from(new Uint8Array(digest))
-    .map((value) => value.toString(16).padStart(2, '0'))
-    .join('');
 }
 function downloadName(contentDisposition: string, fallback: string) {
   const encoded = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
@@ -92,6 +83,7 @@ async function responseErrorMessage(error: unknown, fallback: string) {
 }
 export default function FilesPage() {
   const { userInfo } = useContext(GlobalContext);
+  const { addFiles } = useUploadManager();
   const permissions = userInfo?.permissions || [];
   const can = (permission: string) => permissions.includes(permission);
   const [items, setItems] = useState<ResourceItem[]>([]);
@@ -108,7 +100,6 @@ export default function FilesPage() {
   const [renameTarget, setRenameTarget] = useState<ResourceItem>();
   const [renameName, setRenameName] = useState('');
   const [renaming, setRenaming] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number>();
   const [downloading, setDownloading] = useState(false);
   const [linkMode, setLinkMode] = useState<'share' | 'direct'>('share');
   const [linkVisible, setLinkVisible] = useState(false);
@@ -135,6 +126,16 @@ export default function FilesPage() {
     setSelectedKeys([]);
     load();
   }, [load]);
+  useEffect(() => {
+    const handleCompleted = (event: Event) => {
+      const completedParent =
+        (event as CustomEvent).detail?.parentId || undefined;
+      if (completedParent === parentId) load();
+    };
+    window.addEventListener('xph-upload-completed', handleCompleted);
+    return () =>
+      window.removeEventListener('xph-upload-completed', handleCompleted);
+  }, [load, parentId]);
   const selectedItems = useMemo(
     () => items.filter((item) => selectedKeys.includes(item.id)),
     [items, selectedKeys]
@@ -227,57 +228,8 @@ export default function FilesPage() {
   const upload = async (fileList?: FileList | null) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    setUploadProgress(0);
-    let successCount = 0;
-    const errors: string[] = [];
-    try {
-      for (let index = 0; index < files.length; index += 1) {
-        const file = files[index];
-        try {
-          const checksum = await fileSHA256(file);
-          const body = new FormData();
-          body.append('file', file);
-          body.append('checksum', checksum);
-          if (parentId) body.append('parentId', parentId);
-          await axios.post('/api/resources/upload', body, {
-            headers: {
-              'X-File-SHA256': checksum,
-            },
-            onUploadProgress: (event) => {
-              const fileProgress = event.total ? event.loaded / event.total : 0;
-              setUploadProgress(
-                Math.round(((index + fileProgress) * 100) / files.length)
-              );
-            },
-          });
-          successCount += 1;
-        } catch (error) {
-          errors.push(
-            `${file.name}：${error?.response?.data?.msg || uiText('上传失败')}`
-          );
-        }
-        setUploadProgress(Math.round(((index + 1) * 100) / files.length));
-      }
-      if (successCount) await load();
-      if (!errors.length) {
-        Message.success(
-          files.length === 1
-            ? uiText('上传完成')
-            : `${uiText('已上传')} ${successCount}`
-        );
-      } else if (successCount) {
-        Message.warning(
-          `${uiText('上传成功')} ${successCount}，${uiText('上传失败')} ${
-            errors.length
-          }；${errors[0]}`
-        );
-      } else {
-        Message.error(errors[0]);
-      }
-    } finally {
-      setUploadProgress(undefined);
-      if (fileInput.current) fileInput.current.value = '';
-    }
+    await addFiles(files, parentId);
+    if (fileInput.current) fileInput.current.value = '';
   };
   const renameResource = async () => {
     if (!renameTarget || !renameName.trim()) {
@@ -307,9 +259,7 @@ export default function FilesPage() {
     }
     Modal.confirm({
       title: `${uiText('删除内容')}：${selectedItems.length}`,
-      content: uiText(
-        '文件夹内的全部内容、相关分享和直链也会一并删除，且无法恢复。'
-      ),
+      content: uiText('所选内容将移入回收站，可在回收期限内恢复。'),
       okButtonProps: {
         status: 'danger',
       },
@@ -320,7 +270,7 @@ export default function FilesPage() {
               axios.delete(`/api/resources/${item.id}`)
             )
           );
-          Message.success(uiText('删除完成'));
+          Message.success(uiText('已移入回收站'));
           setSelectedKeys([]);
           await load();
         } catch (error) {
@@ -409,7 +359,6 @@ export default function FilesPage() {
             <Button
               type="primary"
               icon={<IconUpload />}
-              loading={uploadProgress != null}
               disabled={!can('upload')}
               onClick={() => fileInput.current?.click()}
             >
@@ -491,15 +440,6 @@ export default function FilesPage() {
               : `${uiText('共')} ${items.length}`}
           </Typography.Text>
         </div>
-        {uploadProgress != null && (
-          <Progress
-            percent={uploadProgress}
-            size="small"
-            style={{
-              marginBottom: 14,
-            }}
-          />
-        )}
         <div className={styles.crumbs}>
           <Breadcrumb>
             {path.map((item, index) => (

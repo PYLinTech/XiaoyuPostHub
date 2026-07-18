@@ -188,6 +188,31 @@
   font-weight: 600;
 }
 
+.config-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+
+  > div:first-child {
+    min-width: 0;
+  }
+
+  .config-description {
+    margin-bottom: 18px;
+  }
+}
+
+.config-section :global(.arco-input-number) {
+  width: 100%;
+}
+
+.upload-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .config-description {
   display: block;
   margin-bottom: 18px;
@@ -394,6 +419,86 @@
   }
 }
 
+.review-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.review-search-box {
+  display: flex;
+  align-items: center;
+  width: min(460px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 999px;
+  background: var(--color-bg-2);
+
+  :global(.arco-input-wrapper) {
+    flex: 1;
+    border: 0;
+    background: transparent;
+  }
+}
+
+.review-search-settings {
+  min-width: 150px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-bg-2);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+}
+
+.review-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.review-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+
+  > div {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    align-items: start;
+    gap: 10px;
+  }
+}
+
+.share-preview-list {
+  display: flex;
+  max-height: 72vh;
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.share-preview-card {
+  position: relative;
+
+  pre {
+    max-height: 420px;
+    padding: 14px;
+    overflow: auto;
+    border-radius: 6px;
+    background: var(--color-fill-1);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.share-source-toggle {
+  position: absolute !important;
+  right: 14px;
+  bottom: 14px;
+}
+
 @media (max-width: 520px) {
   .stat-grid {
     grid-template-columns: 1fr;
@@ -401,6 +506,19 @@
 }
 
 @media (max-width: 600px) {
+  .upload-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .review-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .review-form > div {
+    grid-template-columns: 1fr;
+  }
+
   .health-list {
     gap: 8px;
   }
