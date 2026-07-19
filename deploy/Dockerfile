@@ -26,13 +26,18 @@ RUN apk add --no-cache ca-certificates tzdata \
     && chmod 750 "${DATA_DIR}" "${DATA_DIR}/uploads"
 
 COPY app/xph-backend /app/xph-backend
+COPY app/migration-assistant.sh /app/migration-assistant.sh
 COPY app/web /app/web
+COPY app/migrations /app/migrations
 
-RUN chown root:${APP_GROUP} /app/xph-backend \
-    && chmod 550 /app/xph-backend \
+RUN chown root:${APP_GROUP} /app/xph-backend /app/migration-assistant.sh \
+    && chmod 550 /app/xph-backend /app/migration-assistant.sh \
     && chown -R root:${APP_GROUP} /app/web \
     && find /app/web -type d -exec chmod 550 {} \; \
-    && find /app/web -type f -exec chmod 440 {} \;
+    && find /app/web -type f -exec chmod 440 {} \; \
+    && chown -R root:${APP_GROUP} /app/migrations \
+    && find /app/migrations -type d -exec chmod 550 {} \; \
+    && find /app/migrations -type f -exec chmod 440 {} \;
 
 USER ${APP_USER}:${APP_GROUP}
 

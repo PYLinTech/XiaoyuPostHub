@@ -20,6 +20,7 @@ var (
 	ErrGroupNotFound   = errors.New("用户组不存在")
 	ErrGroupNameExists = errors.New("用户组名称已存在")
 	ErrGroupInput      = errors.New("用户组名称格式不正确")
+	ErrGroupIsSystem   = errors.New("系统用户组不能修改或删除")
 )
 
 type Overview struct {
@@ -239,6 +240,105 @@ func (r *Repo) CreateUserGroup(ctx context.Context, name, description string) (U
 	return item, err
 }
 
+func (r *Repo) UpdateUserGroup(ctx context.Context, id int64, name, description string) (UserGroupItem, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	description = strings.TrimSpace(description)
+	var item UserGroupItem
+	err := r.pool.QueryRow(ctx, `
+		UPDATE user_groups
+		SET name=$2,description=NULLIF($3,'')
+		WHERE id=$1 AND NOT is_system
+		RETURNING id,name,description,is_system,created_at`, id, name, description).Scan(
+		&item.ID, &item.Name, &item.Description, &item.IsSystem, &item.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var isSystem bool
+		lookupErr := r.pool.QueryRow(ctx, `SELECT is_system FROM user_groups WHERE id=$1`, id).Scan(&isSystem)
+		if errors.Is(lookupErr, pgx.ErrNoRows) {
+			return UserGroupItem{}, ErrGroupNotFound
+		}
+		if lookupErr == nil && isSystem {
+			return UserGroupItem{}, ErrGroupIsSystem
+		}
+		return UserGroupItem{}, lookupErr
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505":
+			return UserGroupItem{}, ErrGroupNameExists
+		case "23514", "22001":
+			return UserGroupItem{}, ErrGroupInput
+		}
+	}
+	return item, err
+}
+
+func (r *Repo) DeleteUserGroup(ctx context.Context, id int64) (string, error) {
+	var name string
+	var isSystem bool
+	if err := r.pool.QueryRow(ctx, `SELECT name,is_system FROM user_groups WHERE id=$1`, id).Scan(&name, &isSystem); errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrGroupNotFound
+	} else if err != nil {
+		return "", err
+	}
+	if isSystem {
+		return "", ErrGroupIsSystem
+	}
+	if _, err := r.pool.Exec(ctx, `DELETE FROM user_groups WHERE id=$1`, id); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func (r *Repo) SetUserGroupMembers(ctx context.Context, groupID int64, userIDs []int64, protectedUsername string) (string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var groupName string
+	if err := tx.QueryRow(ctx, `SELECT name FROM user_groups WHERE id=$1 FOR UPDATE`, groupID).Scan(&groupName); errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrGroupNotFound
+	} else if err != nil {
+		return "", err
+	}
+	unique := make(map[int64]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID < 1 {
+			return "", ErrUserNotFound
+		}
+		unique[userID] = struct{}{}
+	}
+	ids := make([]int64, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	if len(ids) > 0 {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE id=ANY($1) AND username<>$2`, ids, protectedUsername).Scan(&count); err != nil {
+			return "", err
+		}
+		if count != len(ids) {
+			return "", ErrUserNotFound
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM user_group_memberships m
+		USING users u
+		WHERE m.user_id=u.id AND m.group_id=$1 AND u.username<>$2`, groupID, protectedUsername); err != nil {
+		return "", err
+	}
+	for _, userID := range ids {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO user_group_memberships(user_id,group_id)
+			VALUES($1,$2) ON CONFLICT DO NOTHING`, userID, groupID); err != nil {
+			return "", err
+		}
+	}
+	return groupName, tx.Commit(ctx)
+}
+
 func (r *Repo) SetUserGroups(ctx context.Context, userID int64, groupIDs []int64) (string, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -444,6 +544,10 @@ func (r *Repo) ListAudit(ctx context.Context, limit int) ([]AuditItem, error) {
 		if err := rows.Scan(&item.ID, &item.ActorName, &item.Action, &item.TargetType, &item.TargetLabel, &item.Details, &item.ClientIP, &item.CreatedAt); err != nil {
 			return nil, err
 		}
+		if item.ClientIP != nil {
+			normalized := normalizeAuditIP(*item.ClientIP)
+			item.ClientIP = &normalized
+		}
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -454,8 +558,26 @@ func (r *Repo) WriteAudit(ctx context.Context, actorID int64, actorName, action,
 	if err != nil {
 		return err
 	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		ip = ipv4
+	}
 	_, err = r.pool.Exec(ctx, `INSERT INTO audit_logs(actor_user_id,actor_name,action,target_type,target_label,details,client_ip) VALUES($1,$2,$3,$4,$5,$6,$7)`, actorID, actorName, action, targetType, targetLabel, body, ip)
 	return err
+}
+
+func normalizeAuditIP(value string) string {
+	host := strings.TrimSpace(value)
+	if slash := strings.IndexByte(host, '/'); slash >= 0 {
+		host = host[:slash]
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return ipv4.String()
+	}
+	return ip.String()
 }
 
 func (r *Repo) GetReviewSettings(ctx context.Context) (ReviewSettings, error) {

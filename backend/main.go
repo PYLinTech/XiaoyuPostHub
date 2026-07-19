@@ -4,13 +4,12 @@
 //  1. 加载 ENV_FILE 指定的配置文件（默认 deploy/.env）
 //  2. 加载与校验配置（config.Load）
 //  3. 连接 PostgreSQL（db.Open，启动期 Ping 一次）
-//  4. 应用 schema（db.ApplyEmbeddedSchema，SQL 通过 go:embed 编进二进制，幂等）
-//  5. 初始化 system_settings 默认行（不覆盖已有配置）
-//  6. BootstrapAuthCatalog（默认配额方案和默认用户组）
-//  7. BootstrapSuperAdmin（创建/同步超管账号并绑定默认用户组）
-//  8. 构造 group / quota / user 等仓库
-//  9. 启动 HTTP server（注入 repo）
-//  10. 收到 SIGINT/SIGTERM 优雅关闭
+//  4. 初始化 system_settings 默认行（不覆盖已有配置）
+//  5. BootstrapAuthCatalog（默认配额方案和默认用户组）
+//  6. BootstrapSuperAdmin（创建/同步超管账号并绑定默认用户组）
+//  7. 构造 group / quota / user 等仓库
+//  8. 启动 HTTP server（注入 repo）
+//  9. 收到 SIGINT/SIGTERM 优雅关闭
 package main
 
 import (
@@ -81,17 +80,9 @@ func main() {
 	}
 	log.Printf("数据库已连接：%s", db.DescribeURL(cfg.DatabaseURL))
 
-	// 1. 应用 schema（SQL 通过 go:embed 编进二进制，部署产物不再需要 db/schema 目录）
-	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := db.ApplyEmbeddedSchema(schemaCtx, database.Pool()); err != nil {
-		schemaCancel()
-		log.Fatalf("应用 schema 失败：%v", err)
-	}
-	schemaCancel()
-
 	q := sqlcgen.New(database.Pool())
 
-	// 2. 初始化程序自身的非敏感运行期配置；已有值不会被默认值覆盖。
+	// 1. 初始化程序自身的非敏感运行期配置；已有值不会被默认值覆盖。
 	settingsCtx, settingsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	settingsRepo := systemsetting.NewRepo(q)
 	if err := settingsRepo.EnsureDefaults(settingsCtx); err != nil {
@@ -99,7 +90,7 @@ func main() {
 		log.Fatalf("初始化系统配置失败：%v", err)
 	}
 	settingsCancel()
-	// 3. BootstrapAuthCatalog：默认配额方案和默认用户组
+	// 2. BootstrapAuthCatalog：默认配额方案和默认用户组
 	bootCtx2, bootCancel2 := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := bootstrap.NewAuthCatalog(database.Pool()).Run(bootCtx2); err != nil {
 		bootCancel2()
@@ -134,7 +125,7 @@ func main() {
 	uploadRecoveryCancel()
 	staticPath := cfg.StaticDir
 
-	handler, err := server.NewRouterWithDeps(staticPath, server.Deps{
+	handler, err := server.NewRouter(staticPath, server.Deps{
 		UserRepo:       userRepo,
 		SessionRepo:    sessionRepo,
 		GroupRepo:      groupRepo,

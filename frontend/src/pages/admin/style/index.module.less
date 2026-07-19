@@ -15,7 +15,7 @@
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 16px;
 }
@@ -57,7 +57,42 @@
 }
 
 .section-card {
+  width: 100%;
+  height: 100%;
   border: 1px solid var(--color-border-1);
+
+  :global(.arco-card-body) {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    box-sizing: border-box;
+  }
+}
+
+.overview-detail-row {
+  align-items: stretch;
+
+  > :global(.arco-col) {
+    display: flex;
+  }
+}
+
+.group-section-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+
+  :global(.arco-typography) {
+    margin: 0;
+  }
+}
+
+.group-member-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .section-title {
@@ -69,14 +104,45 @@
 
 .health-list {
   display: grid;
+  flex: 1;
   grid-template-columns: repeat(3, 1fr);
+  align-items: stretch;
   gap: 12px;
 }
 
 .health-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 100%;
+  box-sizing: border-box;
   padding: 16px;
   background: var(--color-fill-1);
   border-radius: 8px;
+}
+
+.usage-list {
+  display: grid;
+  flex: 1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 12px;
+}
+
+.usage-item {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  background: var(--color-fill-1);
+  border-radius: 8px;
+
+  :global(.arco-typography) {
+    margin: 8px 0 0;
+  }
 }
 
 .health-name {
@@ -326,6 +392,10 @@
     grid-template-columns: 1fr;
   }
 
+  .usage-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .config-section-wide {
     grid-column: auto;
   }
@@ -368,6 +438,15 @@
 
     :global(.arco-input-wrapper) {
       width: 100% !important;
+    }
+  }
+
+  .group-section-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+
+    button {
+      align-self: flex-start;
     }
   }
 
@@ -435,10 +514,21 @@
   border: 1px solid var(--color-border-2);
   border-radius: 999px;
   background: var(--color-bg-2);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 
-  :global(.arco-input-wrapper) {
+  &:focus-within {
+    border-color: rgb(var(--primary-6));
+    box-shadow: 0 0 0 2px rgb(var(--primary-1));
+  }
+
+  :global(.arco-input),
+  :global(.arco-input:hover),
+  :global(.arco-input.arco-input-focus),
+  :global(.arco-input-wrapper),
+  :global(.arco-input-wrapper:hover) {
     flex: 1;
     border: 0;
+    box-shadow: none;
     background: transparent;
   }
 }
@@ -456,6 +546,20 @@
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+.review-file-name-list {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+
+  span {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+  }
 }
 
 .review-form {

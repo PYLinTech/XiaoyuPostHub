@@ -491,6 +491,17 @@ func (r *Repo) batchLinksByOwner(ctx context.Context, table string, ownerID int6
 }
 
 func (r *Repo) GetDirectLinkByToken(ctx context.Context, token string) (DirectLink, error) {
+	var blocked, deleted bool
+	err := r.pool.QueryRow(ctx, `SELECT admin_blocked,deleted_at IS NOT NULL FROM direct_links WHERE token_value=$1`, token).Scan(&blocked, &deleted)
+	if errors.Is(err, pgx.ErrNoRows) || deleted {
+		return DirectLink{}, ErrNotFound
+	}
+	if err != nil {
+		return DirectLink{}, err
+	}
+	if blocked {
+		return DirectLink{}, ErrAdminBlocked
+	}
 	return r.getDirectLink(ctx, `d.token_value = $1`, token)
 }
 

@@ -52,4 +52,29 @@ module.exports = {
       '@': path.resolve(__dirname, 'src'),
     })
   ),
+  devServer: (configFunction) => (proxy, allowedHost) => {
+    const config = configFunction(proxy, allowedHost);
+    const overlay =
+      config.client && typeof config.client.overlay === 'object'
+        ? config.client.overlay
+        : {};
+
+    config.client = config.client || {};
+    config.client.overlay = {
+      ...overlay,
+      errors: true,
+      warnings: false,
+      runtimeErrors: (error) => {
+        const message = error && error.message ? error.message : String(error);
+        return !(
+          message.includes('ResizeObserver loop limit exceeded') ||
+          message.includes(
+            'ResizeObserver loop completed with undelivered notifications'
+          )
+        );
+      },
+    };
+
+    return config;
+  },
 };

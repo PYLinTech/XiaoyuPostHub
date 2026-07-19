@@ -89,6 +89,8 @@
 }
 
 .layout-content {
+  display: flex;
+  flex-direction: column;
   background-color: var(--color-fill-2);
   min-width: 0;
   min-height: 100vh;
@@ -97,7 +99,15 @@
 }
 
 .layout-content-wrapper {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
   padding: 16px 20px 0;
+
+  > :global(.arco-layout-content) {
+    flex: 1;
+  }
 }
 
 .spin {

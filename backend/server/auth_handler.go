@@ -345,13 +345,8 @@ func effectivePermissions(u user.User) []string {
 }
 
 func adminPermissions(u user.User) []string {
-	codes := []string{
-		permission.ManageUsers,
-		permission.ReadAuditLog,
-		permission.ManageRoles,
-	}
-	out := make([]string, 0, len(codes))
-	for _, code := range codes {
+	out := make([]string, 0, len(permission.Admin))
+	for _, code := range permission.Admin {
 		if u.HasPermission(code) {
 			out = append(out, code)
 		}

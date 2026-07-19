@@ -41,6 +41,22 @@
   color: var(--color-text-3);
 }
 
+.crumb-button {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 3px;
+  padding: 0 2px !important;
+
+  > svg {
+    color: #f59f00;
+    font-size: 14px;
+  }
+}
+
+.crumbs :global(.arco-breadcrumb-item-separator) {
+  margin: 0 3px;
+}
+
 .resource-icon {
   display: inline-flex;
   align-items: center;
@@ -195,7 +211,7 @@
 
   .workspace,
   .list-card {
-    min-height: calc(100vh - 150px);
+    min-height: calc(100dvh - 190px);
 
     :global(.arco-card-body) {
       padding: 14px;
@@ -260,6 +276,31 @@
 
   .mobile-hidden {
     display: none !important;
+  }
+
+  .workspace {
+    :global(.arco-table-container table) {
+      width: 100% !important;
+      min-width: 0 !important;
+      table-layout: fixed;
+    }
+
+    :global(.arco-table-checkbox) {
+      width: 38px !important;
+      padding-right: 4px;
+      padding-left: 4px;
+    }
+
+    :global(.arco-table-th),
+    :global(.arco-table-td) {
+      padding-right: 6px;
+      padding-left: 6px;
+    }
+  }
+
+  .name-button,
+  .resource-name > span {
+    max-width: none;
   }
 
   .result-line {

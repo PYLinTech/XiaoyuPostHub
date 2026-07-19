@@ -1,4 +1,4 @@
--- 旧审核模型从未投入使用，启动时直接移除；新模型使用独立表名，避免兼容分支。
+-- 移除旧审核表，数据库最终只保留当前审核模型。
 DROP TABLE IF EXISTS file_reviews;
 DROP TABLE IF EXISTS share_reviews;
 

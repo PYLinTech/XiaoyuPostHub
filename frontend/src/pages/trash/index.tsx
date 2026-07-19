@@ -20,6 +20,16 @@ import {
 } from '../storage/shared';
 import styles from '../storage/style/index.module.less';
 
+function approximateExpiry(
+  trashedAt: string | undefined,
+  retentionDays: number
+) {
+  if (!trashedAt) return '-';
+  const expiresAt = new Date(trashedAt);
+  expiresAt.setDate(expiresAt.getDate() + retentionDays);
+  return `${uiText('约')} ${expiresAt.toLocaleDateString()}`;
+}
+
 export default function TrashPage() {
   const { userInfo } = useContext(GlobalContext);
   const canDelete = (userInfo?.permissions || []).includes('delete_own');
@@ -116,6 +126,13 @@ export default function TrashPage() {
       render: formatTime,
     },
     {
+      title: uiText('到期时间'),
+      dataIndex: 'trashedAt',
+      width: 160,
+      className: styles['mobile-hidden'],
+      render: (value) => approximateExpiry(value, retentionDays),
+    },
+    {
       title: uiText('操作'),
       width: 190,
       render: (_, item: ResourceItem) => (
@@ -148,8 +165,8 @@ export default function TrashPage() {
             {uiText('回收站')}
           </Typography.Title>
           <Typography.Text type="secondary">
-            {uiText('回收站内容将在期限到期后自动永久删除。')} {retentionDays}{' '}
-            {uiText('天')}
+            {uiText('回收站最多为您保留')} {retentionDays} {uiText('天')}
+            {uiText('，到期前您可以还原或提前删除。')}
           </Typography.Text>
         </div>
       </div>
@@ -169,7 +186,7 @@ export default function TrashPage() {
             </Button>
           </div>
           <Typography.Text type="secondary">
-            {uiText('共')} {items.length}
+            {uiText('共')} {items.length} {uiText('项')}
           </Typography.Text>
         </div>
         <Table

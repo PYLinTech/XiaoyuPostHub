@@ -24,7 +24,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h, err := server.NewRouter(dir, &user.Repo{}, &session.Repo{}, nil, nil, true)
+	h, err := server.NewRouter(dir, server.Deps{
+		UserRepo:     &user.Repo{},
+		SessionRepo:  &session.Repo{},
+		CookieSecure: true,
+	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}

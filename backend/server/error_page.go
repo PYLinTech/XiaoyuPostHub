@@ -14,7 +14,7 @@ var notFoundHTML []byte
 
 // WithErrorPage 把所有 4xx/5xx 响应统一替换为内置 404 页内容，
 // 状态码保留原始值（便于诊断）。成功路径完全透传，不 buffer body，
-// 兼容大文件下载与流式响应。
+// 支持大文件下载与流式响应。
 func WithErrorPage(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		iw := &interceptWriter{ResponseWriter: w}

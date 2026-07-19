@@ -1,0 +1,4 @@
+-- 补齐直链管理所需的最终状态字段。
+ALTER TABLE direct_links
+    ADD COLUMN IF NOT EXISTS admin_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;

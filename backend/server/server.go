@@ -36,31 +36,9 @@ type Deps struct {
 	CookieSecure   bool
 }
 
-// NewRouter 构造分流路由:/api/* → APIHandler,其余 → NewStaticHandler(SPA fallback on)。
-// 启动期校验失败(staticDir 不存在 / 缺 index.html)返回 error,由 main.go 处理;
-// 本函数不自行终止进程——构造函数边界。
-//
-// 参数顺序：staticDir, userRepo, sessionRepo, groupRepo, quotaRepo。
-// sessionRepo 用于登录、登出、会话校验和登录限流。
-func NewRouter(
-	staticDir string,
-	userRepo *user.Repo,
-	sessionRepo *session.Repo,
-	groupRepo *group.Repo,
-	quotaRepo *quota.Repo,
-	cookieSecure bool,
-) (http.Handler, error) {
-	return NewRouterWithDeps(staticDir, Deps{
-		UserRepo:     userRepo,
-		SessionRepo:  sessionRepo,
-		GroupRepo:    groupRepo,
-		QuotaRepo:    quotaRepo,
-		CookieSecure: cookieSecure,
-	})
-}
-
-// NewRouterWithDeps 构造完整业务路由。保留 NewRouter 作为认证层测试和旧调用方的兼容入口。
-func NewRouterWithDeps(staticDir string, deps Deps) (http.Handler, error) {
+// NewRouter 构造应用路由：/api/* 由 APIHandler 处理，其余路径由静态文件服务处理。
+// staticDir 不存在或缺少 index.html 时返回错误，由调用方决定如何终止启动。
+func NewRouter(staticDir string, deps Deps) (http.Handler, error) {
 	if deps.UserRepo == nil || deps.SessionRepo == nil {
 		return nil, fmt.Errorf("初始化 API 失败：userRepo 和 sessionRepo 必须提供")
 	}
@@ -109,7 +87,7 @@ func APIHandler(deps Deps) http.Handler {
 		mux.HandleFunc("/api/messages/delete", messageDeleteHandler(deps))
 	}
 
-	// 业务依赖完整时开放资源、分享与直链接口；认证层的独立测试可只注入用户和会话仓库。
+	// 业务依赖完整时开放资源、分享与直链接口。
 	if deps.ResourceRepo != nil && deps.SharingRepo != nil && deps.FileStore != nil && deps.QuotaRepo != nil && deps.SystemSettings != nil {
 		if deps.UploadRepo != nil {
 			mux.HandleFunc("/api/uploads/config", uploadConfigHandler(deps))

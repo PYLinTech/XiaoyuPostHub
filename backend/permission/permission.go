@@ -9,9 +9,7 @@
 //   - Repo 仅做只读查询；写入只在启动 seed（bootstrap.AuthCatalog）发生。
 package permission
 
-// 系统预设的 12 个 permission code。
-//
-// 新增规则：code 一旦发布只能新增，避免现有用户组绑定失效。
+// 系统支持的 permission code。
 const (
 	// 认证
 	Login = "login" // 登录系统
@@ -27,37 +25,66 @@ const (
 	Share      = "share"       // 创建分享页（密码 + 有效期）
 	DirectLink = "direct_link" // 创建直链（curl 友好 + 有效期）
 
-	// 管理员
-	ManageUsers  = "manage_users"   // 用户管理
-	ReadAuditLog = "read_audit_log" // 审计日志查看（审计审查组用）
-	ManageRoles  = "manage_roles"   // 管理用户组的权限与配额
+	// 后台管理
+	ViewAdminOverview = "view_admin_overview" // 查看实时概览
+	ManageUsers       = "manage_users"        // 用户管理
+	ManageUserGroups  = "manage_user_groups"  // 用户组管理与成员配置
+	ManagePermissions = "manage_permissions"  // 用户组权限配置
+	ManageQuotas      = "manage_quotas"       // 配额方案与用户组配额
+	ManageInvitations = "manage_invitations"  // 邀请码管理
+	ReviewFiles       = "review_files"        // 文件审核
+	ReviewShares      = "review_shares"       // 分享审核
+	ReadAuditLog      = "read_audit_log"      // 系统审计查看
+	ManageSystem      = "manage_system"       // 系统配置
 )
 
-// Definition 是 permission 的完整定义：code + 中文说明。
+// Definition 是 permission 的完整定义：code + 中英文说明。
 // Definitions 是唯一来源，All / IsValid 全部派生自它。
 type Definition struct {
-	Code        string
-	Description string
+	Code          string
+	Description   string
+	DescriptionEN string
 }
 
 // Definitions 供权限配置界面展示，数据库只保存 code。
 var Definitions = []Definition{
-	{Login, "登录系统"},
-	{Upload, "上传资源"},
-	{Download, "下载资源"},
-	{Preview, "预览资源"},
-	{Rename, "重命名自己的资源"},
-	{DeleteOwn, "删除自己的资源"},
-	{Share, "创建分享页"},
-	{DirectLink, "创建直链"},
-	{ManageUsers, "管理用户"},
-	{ReadAuditLog, "查看审计日志"},
-	{ManageRoles, "管理用户组权限与配额"},
+	{Login, "登录系统", "Sign in to the system"},
+	{Upload, "上传资源", "Upload resources"},
+	{Download, "下载资源", "Download resources"},
+	{Preview, "预览资源", "Preview resources"},
+	{Rename, "重命名自己的资源", "Rename own resources"},
+	{DeleteOwn, "删除自己的资源", "Delete own resources"},
+	{Share, "创建分享页", "Create share pages"},
+	{DirectLink, "创建直链", "Create direct links"},
+	{ViewAdminOverview, "查看实时概览", "View live overview"},
+	{ManageUsers, "管理用户", "Manage users"},
+	{ManageUserGroups, "管理用户组与成员", "Manage user groups and members"},
+	{ManagePermissions, "配置用户组权限", "Configure group permissions"},
+	{ManageQuotas, "管理配额", "Manage quotas"},
+	{ManageInvitations, "管理邀请码", "Manage invitation codes"},
+	{ReviewFiles, "审核文件", "Review files"},
+	{ReviewShares, "审核分享", "Review shares"},
+	{ReadAuditLog, "查看审计日志", "View audit logs"},
+	{ManageSystem, "管理系统配置", "Manage system settings"},
 }
 
 // All 是从 Definitions 派生的 code 列表，顺序固定。
 // 用于启动 seed 完整性校验、未知 code 白名单检查。
 var All []string
+
+// Admin 是能够进入管理面板的细粒度后台权限集合。
+var Admin = []string{
+	ViewAdminOverview,
+	ManageUsers,
+	ManageUserGroups,
+	ManagePermissions,
+	ManageQuotas,
+	ManageInvitations,
+	ReviewFiles,
+	ReviewShares,
+	ReadAuditLog,
+	ManageSystem,
+}
 
 func init() {
 	All = make([]string, 0, len(Definitions))

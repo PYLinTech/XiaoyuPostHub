@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS direct_links (
     download_count        BIGINT      NOT NULL DEFAULT 0,
     traffic_used_bytes    BIGINT      NOT NULL DEFAULT 0,
     is_active             BOOLEAN     NOT NULL DEFAULT TRUE,
+    admin_blocked         BOOLEAN     NOT NULL DEFAULT FALSE,
+    deleted_at            TIMESTAMPTZ,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT direct_links_limits_non_negative CHECK (

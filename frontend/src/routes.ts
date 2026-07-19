@@ -1,8 +1,7 @@
 export type IRoute = {
   name: string;
   key: string;
-  adminPermission?: string;
-  superAdminOnly?: boolean;
+  adminPermissions?: string[];
 };
 
 export const hasManagementAccess = (userInfo) =>
@@ -16,23 +15,35 @@ export const routes: IRoute[] = [
 ];
 
 export const adminRoutes: IRoute[] = [
-  { name: 'menu.admin.overview', key: 'admin/overview' },
+  {
+    name: 'menu.admin.overview',
+    key: 'admin/overview',
+    adminPermissions: ['view_admin_overview'],
+  },
   {
     name: 'menu.admin.users',
     key: 'admin/users',
-    adminPermission: 'manage_users',
+    adminPermissions: ['manage_users', 'manage_user_groups'],
   },
   {
     name: 'menu.admin.access',
     key: 'admin/access',
-    adminPermission: 'manage_roles',
+    adminPermissions: [
+      'manage_permissions',
+      'manage_quotas',
+      'manage_invitations',
+    ],
   },
   {
     name: 'menu.admin.audit',
     key: 'admin/audit',
-    adminPermission: 'read_audit_log',
+    adminPermissions: ['review_files', 'review_shares', 'read_audit_log'],
   },
-  { name: 'menu.admin.system', key: 'admin/system', superAdminOnly: true },
+  {
+    name: 'menu.admin.system',
+    key: 'admin/system',
+    adminPermissions: ['manage_system'],
+  },
 ];
 
 export const getRoutesForUser = (
@@ -43,11 +54,12 @@ export const getRoutesForUser = (
   const sourceRoutes =
     adminMode && hasManagementAccess(userInfo) ? adminRoutes : routes;
   const visibleRoutes = sourceRoutes.filter((route) => {
-    if (route.superAdminOnly && !userInfo?.isSuperAdmin) return false;
     return !(
-      route.adminPermission &&
+      route.adminPermissions?.length &&
       !userInfo?.isSuperAdmin &&
-      !adminPermissions.includes(route.adminPermission)
+      !route.adminPermissions.some((permission) =>
+        adminPermissions.includes(permission)
+      )
     );
   });
 

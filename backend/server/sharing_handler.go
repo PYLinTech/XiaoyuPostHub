@@ -831,7 +831,7 @@ func strPtr(value string) *string { return &value }
 
 func directDownloadHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
@@ -841,6 +841,10 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		item, err := deps.SharingRepo.GetDirectLinkByToken(r.Context(), token)
+		if errors.Is(err, sharing.ErrAdminBlocked) {
+			writeBusinessError(w, http.StatusForbidden, "该直链已被管理员封禁")
+			return
+		}
 		if errors.Is(err, sharing.ErrNotFound) {
 			writeBusinessError(w, http.StatusNotFound, "直链不存在")
 			return
@@ -849,12 +853,29 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 			writeBusinessError(w, http.StatusInternalServerError, "读取直链失败")
 			return
 		}
-		if !item.IsActive || (item.ExpiresAt != nil && !item.ExpiresAt.After(time.Now())) {
-			writeBusinessError(w, http.StatusGone, "直链已失效")
+		if item.ExpiresAt != nil && !item.ExpiresAt.After(time.Now()) {
+			writeBusinessError(w, http.StatusGone, "该直链已过期")
+			return
+		}
+		if !item.IsActive {
+			writeBusinessError(w, http.StatusGone, "该直链已停用")
 			return
 		}
 		if item.Resource.Kind != resource.KindFile {
 			writeBusinessError(w, http.StatusGone, "直链仅支持单个文件")
+			return
+		}
+		if item.DownloadLimit != nil && item.DownloadCount >= *item.DownloadLimit {
+			writeBusinessError(w, http.StatusGone, "该直链的下载次数已用完")
+			return
+		}
+		if item.TrafficLimitBytes != nil && item.TrafficUsedBytes+item.Resource.SizeBytes > *item.TrafficLimitBytes {
+			writeBusinessError(w, http.StatusGone, "该直链的可用流量已用完")
+			return
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		path, size, name, contentType, cleanup, err := prepareDownload(r, deps, item.Resource)

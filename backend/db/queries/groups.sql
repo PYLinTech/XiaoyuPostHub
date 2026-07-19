@@ -29,7 +29,7 @@ SET priority = $2
 WHERE id = $1;
 
 -- name: UpdateUserGroupSystemFlag :execrows
--- 启动期修复 user group 的 is_system 标志位（不重置其它字段）。
+-- 启动时同步系统用户组的 is_system 标志位（不重置其他字段）。
 UPDATE user_groups
 SET is_system = $2
 WHERE name = $1;
@@ -46,7 +46,7 @@ VALUES ($1, $2)
 ON CONFLICT DO NOTHING;
 
 -- name: UnassignAllGroupsFromUser :execrows
--- 清空 user 的所有 group 关联（用于升级为超管时清理非默认组，随后重新绑定默认组）
+-- 清空用户的所有用户组关联，随后由调用方绑定目标用户组。
 DELETE FROM user_group_memberships
 WHERE user_id = $1;
 
@@ -56,23 +56,9 @@ FROM user_group_memberships
 WHERE user_id = $1
 ORDER BY group_id;
 
--- name: ListPermissionsByGroup :many
-SELECT permission
-FROM group_permissions
-WHERE group_id = $1
-ORDER BY permission;
-
 -- name: ListEffectivePermissionsByUser :many
 SELECT DISTINCT gp.permission
 FROM user_group_memberships membership
 JOIN group_permissions gp ON gp.group_id = membership.group_id
 WHERE membership.user_id = $1
 ORDER BY gp.permission;
-
--- name: DeletePermissionsByGroup :exec
-DELETE FROM group_permissions WHERE group_id = $1;
-
--- name: AddPermissionToGroup :exec
-INSERT INTO group_permissions(group_id, permission)
-VALUES($1, $2)
-ON CONFLICT DO NOTHING;

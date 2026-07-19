@@ -30,12 +30,15 @@ curl -fL 'https://raw.githubusercontent.com/PYLinTech/XiaoyuPostHub/refs/heads/m
 
 管理员审查页按上传任务分页展示全部用户文件，并保留任务内文件树的勾选联动；支持按 ID、文件名或用户名筛选、批量下载、通过或驳回、删除及拉黑。管理员删除的文件进入受限回收站，用户可见但不能恢复；撤销处置时会在文件仍存在的情况下自动还原。分享审查支持批量预览渲染内容或源码、删除及封禁链接。所有审核结果都会写入用户站内消息和系统审计日志。
 
-审核持久化使用全新的 `file_moderations` 与 `share_moderations` 模型，不读取或迁移未投入使用的旧审核表；启动更新时会直接清理旧表。
+审核持久化只使用 `file_moderations` 与 `share_moderations`。旧审核表仅由数字迁移 SQL 删除，后端启动过程不执行或兼容任何数据库迁移。
+
+安装或更新时，`install.sh` 从目标 Docker 镜像提取该版本的迁移助手；助手再从同一镜像读取 `migrations` 中的数字 SQL，并按顺序执行尚未记录的文件。因此后端程序、迁移助手与数据库变更始终来自同一个发布镜像。
 
 ## 目录
 
-- `backend/`：Go API、数据库 schema 和业务逻辑。
+- `backend/`：Go API 与业务逻辑。
 - `frontend/`：React 用户界面。
+- `migrations/`：按数字顺序执行的 PostgreSQL 迁移 SQL。
 - `deploy/`：Docker 镜像与 Compose 配置。
 
 ## 许可证

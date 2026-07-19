@@ -52,6 +52,10 @@ type adminCreateGroupRequest struct {
 	Description string `json:"description"`
 }
 
+type adminGroupMembersRequest struct {
+	UserIDs []int64 `json:"userIds"`
+}
+
 type adminUserGroupsRequest struct {
 	GroupIDs []int64 `json:"groupIds"`
 }
@@ -92,35 +96,52 @@ func adminHandler(deps Deps) http.HandlerFunc {
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/api/admin/")
 		if path == "users" || strings.HasPrefix(path, "users/") {
-			if !requireAdminPermission(w, u, permission.ManageUsers) {
+			required := permission.ManageUsers
+			if path == "users" && r.Method == http.MethodGet {
+				if !requireAnyAdminPermission(w, u, permission.ManageUsers, permission.ManageUserGroups) {
+					return
+				}
+			} else if strings.HasSuffix(path, "/groups") {
+				required = permission.ManageUserGroups
+				if !requireAdminPermission(w, u, required) {
+					return
+				}
+			} else if !requireAdminPermission(w, u, required) {
 				return
 			}
 			handleAdminUsers(w, r, deps, u, path)
 			return
 		}
-		if path == "user-groups" {
-			if !requireAdminPermission(w, u, permission.ManageUsers) {
+		if path == "user-groups" || strings.HasPrefix(path, "user-groups/") {
+			if !requireAdminPermission(w, u, permission.ManageUserGroups) {
 				return
 			}
-			handleAdminUserGroups(w, r, deps, u)
+			handleAdminUserGroups(w, r, deps, u, path)
 			return
 		}
 		if path == "access" || strings.HasPrefix(path, "access/") {
-			if !requireAdminPermission(w, u, permission.ManageRoles) {
+			if !requireAnyAdminPermission(w, u, permission.ManagePermissions, permission.ManageQuotas) {
 				return
 			}
 			handleAdminAccess(w, r, deps, u, path)
 			return
 		}
 		if path == "invitations" || strings.HasPrefix(path, "invitations/") {
-			if !requireAdminPermission(w, u, permission.ManageRoles) {
+			if !requireAdminPermission(w, u, permission.ManageInvitations) {
 				return
 			}
 			handleAdminInvitations(w, r, deps, u, path)
 			return
 		}
-		if path == "reviews/files" || strings.HasPrefix(path, "reviews/files/") || path == "reviews/shares" || strings.HasPrefix(path, "reviews/shares/") {
-			if !requireAdminPermission(w, u, permission.ReadAuditLog) {
+		if path == "reviews/files" || strings.HasPrefix(path, "reviews/files/") {
+			if !requireAdminPermission(w, u, permission.ReviewFiles) {
+				return
+			}
+			handleAdminReviews(w, r, deps, u, path)
+			return
+		}
+		if path == "reviews/shares" || strings.HasPrefix(path, "reviews/shares/") {
+			if !requireAdminPermission(w, u, permission.ReviewShares) {
 				return
 			}
 			handleAdminReviews(w, r, deps, u, path)
@@ -128,6 +149,9 @@ func adminHandler(deps Deps) http.HandlerFunc {
 		}
 		switch path {
 		case "overview":
+			if !requireAdminPermission(w, u, permission.ViewAdminOverview) {
+				return
+			}
 			if r.Method != http.MethodGet {
 				writeBusinessError(w, 405, "method not allowed")
 				return
@@ -163,17 +187,17 @@ func adminHandler(deps Deps) http.HandlerFunc {
 			}
 			writeJSON(w, 200, map[string]any{"status": "ok", "items": items})
 		case "system-config":
-			if !requireSuperAdmin(w, u) {
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
 				return
 			}
 			handleAdminSystemConfig(w, r, deps, u)
 		case "system-config/upload-test":
-			if !requireSuperAdmin(w, u) {
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
 				return
 			}
 			handleAdminUploadTest(w, r)
 		case "site-icon":
-			if !requireSuperAdmin(w, u) {
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
 				return
 			}
 			handleAdminSiteIcon(w, r, deps, u)
@@ -198,7 +222,9 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 		definitions := make([]map[string]string, 0, len(permission.Definitions))
 		for _, definition := range permission.Definitions {
 			definitions = append(definitions, map[string]string{
-				"code": definition.Code, "description": definition.Description,
+				"code":          definition.Code,
+				"description":   definition.Description,
+				"descriptionEn": definition.DescriptionEN,
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -208,6 +234,9 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 		return
 	}
 	if path == "access/quotas" && r.Method == http.MethodPost {
+		if !requireAdminPermission(w, actor, permission.ManageQuotas) {
+			return
+		}
 		var req adminQuotaRequest
 		if !decodeQuotaRequest(w, r, &req) {
 			return
@@ -225,6 +254,9 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 	}
 	parts := strings.Split(strings.TrimPrefix(path, "access/"), "/")
 	if len(parts) == 2 && parts[0] == "quotas" {
+		if !requireAdminPermission(w, actor, permission.ManageQuotas) {
+			return
+		}
 		id, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil || id < 1 {
 			writeBusinessError(w, http.StatusBadRequest, "配额方案编号无效")
@@ -263,6 +295,9 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 		}
 		switch parts[2] {
 		case "permissions":
+			if !requireAdminPermission(w, actor, permission.ManagePermissions) {
+				return
+			}
 			var req adminGroupPermissionsRequest
 			if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Permissions) > len(permission.All) {
 				writeBusinessError(w, http.StatusBadRequest, "权限配置无效")
@@ -286,6 +321,9 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 			}
 			_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "group.permissions.update", "user_group", strconv.FormatInt(groupID, 10), map[string]any{"permissions": codes}, net.ParseIP(clientIP(r)))
 		case "quota":
+			if !requireAdminPermission(w, actor, permission.ManageQuotas) {
+				return
+			}
 			var req adminGroupQuotaRequest
 			if err := decodeSmallJSON(w, r, &req); err != nil || req.QuotaProfileID == nil {
 				writeBusinessError(w, http.StatusBadRequest, "用户组配额参数无效")
@@ -478,27 +516,109 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User) {
-	if r.Method != http.MethodPost {
+func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User, path string) {
+	if path == "user-groups" {
+		if r.Method != http.MethodPost {
+			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req adminCreateGroupRequest
+		if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Name) > 32 || len(req.Description) > 500 {
+			writeBusinessError(w, http.StatusBadRequest, "用户组参数无效")
+			return
+		}
+		item, err := deps.AdminRepo.CreateUserGroup(r.Context(), req.Name, req.Description)
+		if errors.Is(err, admin.ErrGroupNameExists) || errors.Is(err, admin.ErrGroupInput) {
+			writeBusinessError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "新增用户组失败")
+			return
+		}
+		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user_group.create", "user_group", item.Name, map[string]any{"id": item.ID}, net.ParseIP(clientIP(r)))
+		writeJSON(w, http.StatusCreated, map[string]any{"status": "ok", "group": item})
+		return
+	}
+
+	parts := strings.Split(strings.TrimPrefix(path, "user-groups/"), "/")
+	if len(parts) < 1 || len(parts) > 2 {
+		writeBusinessError(w, http.StatusNotFound, "用户组管理接口不存在")
+		return
+	}
+	groupID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || groupID < 1 {
+		writeBusinessError(w, http.StatusBadRequest, "用户组编号无效")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "members" && r.Method == http.MethodPut {
+		var req adminGroupMembersRequest
+		if err := decodeSmallJSON(w, r, &req); err != nil || len(req.UserIDs) > 10000 {
+			writeBusinessError(w, http.StatusBadRequest, "用户组成员参数无效")
+			return
+		}
+		name, err := deps.AdminRepo.SetUserGroupMembers(r.Context(), groupID, req.UserIDs, user.EnvSuperAdminName())
+		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserNotFound) {
+			writeBusinessError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "配置用户组成员失败")
+			return
+		}
+		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user_group.members.update", "user_group", name, map[string]any{"userIds": req.UserIDs}, net.ParseIP(clientIP(r)))
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+		return
+	}
+	if len(parts) != 1 {
+		writeBusinessError(w, http.StatusNotFound, "用户组管理接口不存在")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var req adminCreateGroupRequest
+		if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Name) > 32 || len(req.Description) > 500 {
+			writeBusinessError(w, http.StatusBadRequest, "用户组参数无效")
+			return
+		}
+		item, err := deps.AdminRepo.UpdateUserGroup(r.Context(), groupID, req.Name, req.Description)
+		if errors.Is(err, admin.ErrGroupNotFound) {
+			writeBusinessError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, admin.ErrGroupIsSystem) {
+			writeBusinessError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if errors.Is(err, admin.ErrGroupNameExists) || errors.Is(err, admin.ErrGroupInput) {
+			writeBusinessError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "更新用户组失败")
+			return
+		}
+		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user_group.update", "user_group", item.Name, map[string]any{"id": item.ID}, net.ParseIP(clientIP(r)))
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "group": item})
+	case http.MethodDelete:
+		name, err := deps.AdminRepo.DeleteUserGroup(r.Context(), groupID)
+		if errors.Is(err, admin.ErrGroupNotFound) {
+			writeBusinessError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, admin.ErrGroupIsSystem) {
+			writeBusinessError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "删除用户组失败")
+			return
+		}
+		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user_group.delete", "user_group", name, map[string]any{"id": groupID}, net.ParseIP(clientIP(r)))
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	default:
 		writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
 	}
-	var req adminCreateGroupRequest
-	if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Name) > 32 || len(req.Description) > 500 {
-		writeBusinessError(w, http.StatusBadRequest, "用户组参数无效")
-		return
-	}
-	item, err := deps.AdminRepo.CreateUserGroup(r.Context(), req.Name, req.Description)
-	if errors.Is(err, admin.ErrGroupNameExists) || errors.Is(err, admin.ErrGroupInput) {
-		writeBusinessError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err != nil {
-		writeBusinessError(w, http.StatusInternalServerError, "新增用户组失败")
-		return
-	}
-	_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user_group.create", "user_group", item.Name, map[string]any{"id": item.ID}, net.ParseIP(clientIP(r)))
-	writeJSON(w, http.StatusCreated, map[string]any{"status": "ok", "group": item})
 }
 
 func handleAdminInvitations(w http.ResponseWriter, r *http.Request, deps Deps, u user.User, path string) {
@@ -577,10 +697,25 @@ func requireManagementUser(w http.ResponseWriter, r *http.Request, deps Deps) (u
 }
 
 func hasManagementPermission(u user.User) bool {
-	return u.IsSuperAdmin() ||
-		u.HasPermission(permission.ManageUsers) ||
-		u.HasPermission(permission.ReadAuditLog) ||
-		u.HasPermission(permission.ManageRoles)
+	if u.IsSuperAdmin() {
+		return true
+	}
+	for _, code := range permission.Admin {
+		if u.HasPermission(code) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireAnyAdminPermission(w http.ResponseWriter, u user.User, codes ...string) bool {
+	for _, code := range codes {
+		if u.HasPermission(code) {
+			return true
+		}
+	}
+	writeBusinessError(w, http.StatusForbidden, "没有对应的管理权限")
+	return false
 }
 
 func requireAdminPermission(w http.ResponseWriter, u user.User, code string) bool {

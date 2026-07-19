@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import axios from 'axios';
 import {
   Button,
@@ -20,11 +26,13 @@ import { IconDelete, IconEdit, IconPlus } from '@arco-design/web-react/icon';
 import { AdminPageHeader, formatBytes, formatLimit } from '../shared';
 import styles from '../style/index.module.less';
 import uiText from '@/utils/uiText';
+import { GlobalContext } from '@/context';
 const TabPane = Tabs.TabPane;
 const MiB = 1024 * 1024;
 interface PermissionDefinition {
   code: string;
   description: string;
+  descriptionEn?: string;
 }
 interface QuotaItem {
   id: number;
@@ -135,6 +143,17 @@ function quotaPayload(draft: QuotaDraft) {
   };
 }
 function Access() {
+  const { lang, userInfo } = useContext(GlobalContext);
+  const adminPermissions = userInfo?.adminPermissions || [];
+  const canManagePermissions = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('manage_permissions')
+  );
+  const canManageQuotas = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('manage_quotas')
+  );
+  const canManageInvitations = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('manage_invitations')
+  );
   const [permissions, setPermissions] = useState<PermissionDefinition[]>([]);
   const [quotas, setQuotas] = useState<QuotaItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
@@ -164,6 +183,12 @@ function Access() {
   const [targetId, setTargetId] = useState<number>();
   const [quantity, setQuantity] = useState(1);
   const [issuing, setIssuing] = useState(false);
+  const permissionDescription = (item?: PermissionDefinition) =>
+    item
+      ? lang === 'en-US'
+        ? item.descriptionEn || item.description
+        : item.description
+      : '';
   const loadAccess = useCallback(async () => {
     setLoading(true);
     try {
@@ -202,9 +227,15 @@ function Access() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    loadAccess();
-    loadInvitations();
-  }, [loadAccess, loadInvitations]);
+    if (canManagePermissions || canManageQuotas) loadAccess();
+    if (canManageInvitations) loadInvitations();
+  }, [
+    canManageInvitations,
+    canManagePermissions,
+    canManageQuotas,
+    loadAccess,
+    loadInvitations,
+  ]);
   const saveQuota = async () => {
     if (!quotaEditing && !/^[a-z][a-z0-9_]{1,31}$/.test(quotaDraft.name)) {
       Message.warning(uiText('方案名称须为 2 至 32 位小写字母、数字或下划线'));
@@ -496,8 +527,9 @@ function Access() {
           <Space wrap size={4}>
             {codes.map((code) => (
               <Tag key={code}>
-                {permissions.find((item) => item.code === code)?.description ||
-                  code}
+                {permissionDescription(
+                  permissions.find((item) => item.code === code)
+                ) || code}
               </Tag>
             ))}
           </Space>
@@ -597,8 +629,17 @@ function Access() {
         )}
       />
       <Card className={styles['table-card']}>
-        <Tabs defaultActiveTab="quotas">
-          <TabPane key="quotas" title={uiText('配额方案')}>
+        <Tabs
+          defaultActiveTab={
+            canManageQuotas
+              ? 'quotas'
+              : canManagePermissions
+              ? 'permissions'
+              : 'invitations'
+          }
+        >
+          {canManageQuotas && (
+            <TabPane key="quotas" title={uiText('配额方案')}>
             <div className={styles['access-section-header']}>
               <div>
                 <Typography.Title heading={6}>
@@ -649,8 +690,10 @@ function Access() {
                 x: 760,
               }}
             />
-          </TabPane>
-          <TabPane key="permissions" title={uiText('权限配置')}>
+            </TabPane>
+          )}
+          {canManagePermissions && (
+            <TabPane key="permissions" title={uiText('权限配置')}>
             <Table
               rowKey="id"
               loading={loading}
@@ -661,8 +704,10 @@ function Access() {
                 x: 820,
               }}
             />
-          </TabPane>
-          <TabPane key="invitations" title={uiText('邀请码')}>
+            </TabPane>
+          )}
+          {canManageInvitations && (
+            <TabPane key="invitations" title={uiText('邀请码')}>
             <div className={styles['invitation-policy']}>
               <div>
                 <Typography.Title heading={6}>
@@ -746,7 +791,8 @@ function Access() {
                 x: 900,
               }}
             />
-          </TabPane>
+            </TabPane>
+          )}
         </Tabs>
       </Card>
 
@@ -843,7 +889,7 @@ function Access() {
         >
           {permissions.map((item) => (
             <Checkbox key={item.code} value={item.code}>
-              <span>{item.description}</span>
+              <span>{permissionDescription(item)}</span>
               <code>{item.code}</code>
             </Checkbox>
           ))}

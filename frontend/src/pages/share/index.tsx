@@ -4,7 +4,6 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { useParams } from 'react-router-dom';
 import {
-  Alert,
   Breadcrumb,
   Button,
   Card,
@@ -17,6 +16,7 @@ import {
 } from '@arco-design/web-react';
 import {
   IconClockCircle,
+  IconCloseCircle,
   IconDownload,
   IconEye,
   IconFile,
@@ -314,7 +314,18 @@ export default function PublicSharePage() {
         {loading ? (
           <Spin className={styles.loading} />
         ) : error && !metadata ? (
-          <Alert type="error" title={uiText('无法打开分享')} content={error} />
+          <Card className={`${styles['status-card']} ${styles.danger}`}>
+            <IconCloseCircle className={styles['status-icon']} />
+            <Typography.Title heading={4}>
+              {error.includes(uiText('封禁'))
+                ? uiText('分享已被封禁')
+                : error.includes(uiText('失效')) ||
+                  error.includes(uiText('过期'))
+                ? uiText('分享已过期')
+                : uiText('无法打开分享')}
+            </Typography.Title>
+            <Typography.Text type="secondary">{error}</Typography.Text>
+          </Card>
         ) : (
           metadata && (
             <>
@@ -330,7 +341,9 @@ export default function PublicSharePage() {
                     <span>
                       {metadata.kind === 'folder'
                         ? unlocked
-                          ? `${uiText('共')} ${metadata.items?.length || 0}`
+                          ? `${uiText('共')} ${
+                              metadata.items?.length || 0
+                            } ${uiText('项')}`
                           : uiText('文件夹')
                         : formatBytes(metadata.sizeBytes)}
                     </span>

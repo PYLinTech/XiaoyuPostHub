@@ -87,6 +87,14 @@ function DropContent({
       .then(() => fetchSourceData())
       .catch(() => Message.error(uiText('消息清空失败')));
   }
+  function deleteMessage(id: string | number) {
+    axios
+      .post('/api/messages/delete', {
+        ids: [Number(id)],
+      })
+      .then(() => fetchSourceData(false))
+      .catch(() => Message.error(uiText('消息删除失败')));
+  }
   useEffect(() => {
     fetchSourceData();
   }, [fetchSourceData]);
@@ -139,16 +147,19 @@ function DropContent({
                   </span>
                 }
               >
-                <MessageList
-                  data={data}
-                  unReadData={unReadData}
-                  onItemClick={(item) => {
-                    readMessage([item]);
-                  }}
-                  onAllBtnClick={(unReadData) => {
-                    readMessage(unReadData);
-                  }}
-                />
+                <div className={styles['message-list-scroll']}>
+                  <MessageList
+                    data={data}
+                    unReadData={unReadData}
+                    onItemClick={(item) => {
+                      if (!item.status) readMessage([item]);
+                    }}
+                    onItemDelete={(item) => deleteMessage(item.id)}
+                    onAllBtnClick={(unReadData) => {
+                      readMessage(unReadData);
+                    }}
+                  />
+                </div>
               </Tabs.TabPane>
             );
           })}

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
@@ -30,6 +30,7 @@ import { AdminPageHeader } from '../shared';
 import styles from '../style/index.module.less';
 import uiText from '@/utils/uiText';
 import { formatTime } from '@/utils/format';
+import { GlobalContext } from '@/context';
 
 const { Text } = Typography;
 const TabPane = Tabs.TabPane;
@@ -57,6 +58,7 @@ interface FileTask {
   ownerName: string;
   uploadedAt: string;
   status: string;
+  fileCount: number;
   children: FileReview[];
   rowKey?: string;
 }
@@ -88,6 +90,7 @@ interface AuditItem {
 
 type SearchScope = 'id' | 'name' | 'username';
 type ReviewKind = 'files' | 'shares';
+type FileReviewRow = FileTask | FileReview;
 
 function statusTag(value: string) {
   const config = {
@@ -154,9 +157,22 @@ function SearchBox({
 }
 
 function Audit() {
-  const [activeTab, setActiveTab] = useState('files');
+  const { userInfo } = useContext(GlobalContext);
+  const adminPermissions = userInfo?.adminPermissions || [];
+  const canReviewFiles = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('review_files')
+  );
+  const canReviewShares = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('review_shares')
+  );
+  const canReadAudit = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('read_audit_log')
+  );
+  const [activeTab, setActiveTab] = useState(
+    canReviewFiles ? 'files' : canReviewShares ? 'shares' : 'audit'
+  );
   const [loading, setLoading] = useState(false);
-  const [fileTasks, setFileTasks] = useState<FileTask[]>([]);
+  const [fileRows, setFileRows] = useState<FileReviewRow[]>([]);
   const [fileTotal, setFileTotal] = useState(0);
   const [filePage, setFilePage] = useState(1);
   const [shareItems, setShareItems] = useState<ShareReview[]>([]);
@@ -166,6 +182,10 @@ function Audit() {
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
   const [scopes, setScopes] = useState<SearchScope[]>(['id', 'name']);
+  const [appliedScopes, setAppliedScopes] = useState<SearchScope[]>([
+    'id',
+    'name',
+  ]);
   const [fileSelection, setFileSelection] = useState<string[]>([]);
   const [shareSelection, setShareSelection] = useState<(string | number)[]>([]);
   const [reviewKind, setReviewKind] = useState<ReviewKind>();
@@ -189,18 +209,22 @@ function Audit() {
           page,
           pageSize: 20,
           q: appliedQuery,
-          scopes: scopes.join(','),
+          scopes: appliedScopes.join(','),
         },
       });
-      setFileTasks(
-        (response.data.items || []).map((task: FileTask) => ({
-          ...task,
-          rowKey: `task:${task.id}`,
-          children: (task.children || []).map((file) => ({
+      setFileRows(
+        (response.data.items || []).map((task: FileTask) => {
+          const children = (task.children || []).map((file) => ({
             ...file,
             rowKey: `file:${file.resourceId}`,
-          })),
-        }))
+          }));
+          if (task.fileCount === 1 && children.length === 1) return children[0];
+          return {
+            ...task,
+            rowKey: `task:${task.id}`,
+            children,
+          };
+        })
       );
       setFileTotal(response.data.total || 0);
       setFilePage(page);
@@ -220,7 +244,7 @@ function Audit() {
           page,
           pageSize: 20,
           q: appliedQuery,
-          scopes: scopes.join(','),
+          scopes: appliedScopes.join(','),
         },
       });
       setShareItems(response.data.items || []);
@@ -251,23 +275,27 @@ function Audit() {
     else if (activeTab === 'shares') loadShares(1);
     else loadAudit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, appliedQuery]);
+  }, [activeTab, appliedQuery, appliedScopes]);
 
   const selectedFiles = useMemo(() => {
     const selected = new Set(fileSelection);
     const output: FileReview[] = [];
-    fileTasks.forEach((task) => {
-      const wholeTask = selected.has(`task:${task.id}`);
-      task.children.forEach((file) => {
-        if (wholeTask || selected.has(`file:${file.resourceId}`))
-          output.push(file);
-      });
+    fileRows.forEach((row) => {
+      if ('children' in row) {
+        const wholeTask = selected.has(`task:${row.id}`);
+        row.children.forEach((file) => {
+          if (wholeTask || selected.has(`file:${file.resourceId}`))
+            output.push(file);
+        });
+      } else if (selected.has(`file:${row.resourceId}`)) {
+        output.push(row);
+      }
     });
     return output.filter(
       (item, index, all) =>
         all.findIndex((other) => other.resourceId === item.resourceId) === index
     );
-  }, [fileSelection, fileTasks]);
+  }, [fileSelection, fileRows]);
 
   const selectedShares = useMemo(
     () => shareItems.filter((item) => shareSelection.includes(item.shareId)),
@@ -384,33 +412,39 @@ function Audit() {
     {
       title: 'ID',
       width: 210,
-      render: (_: unknown, item: FileTask | FileReview) =>
+      render: (_: unknown, item: FileReviewRow) =>
         'id' in item ? item.id : item.resourceId,
     },
     {
       title: uiText('文件名'),
-      render: (_: unknown, item: FileTask | FileReview) =>
-        'children' in item
-          ? `${uiText('上传任务')}（${item.children.length}）`
-          : item.relativePath || item.name,
+      render: (_: unknown, item: FileReviewRow) =>
+        'children' in item ? (
+          <div className={styles['review-file-name-list']}>
+            {item.children.map((file) => (
+              <span key={file.resourceId}>
+                {file.relativePath || file.name}
+              </span>
+            ))}
+          </div>
+        ) : (
+          item.relativePath || item.name
+        ),
     },
     {
       title: uiText('上传者'),
       width: 140,
-      render: (_: unknown, item: FileTask | FileReview) =>
-        item.ownerName || '-',
+      render: (_: unknown, item: FileReviewRow) => item.ownerName || '-',
     },
     {
       title: uiText('上传时间'),
       width: 190,
-      render: (_: unknown, item: FileTask | FileReview) =>
+      render: (_: unknown, item: FileReviewRow) =>
         formatTime('uploadedAt' in item ? item.uploadedAt : item.submittedAt),
     },
     {
       title: uiText('状态'),
       width: 120,
-      render: (_: unknown, item: FileTask | FileReview) =>
-        statusTag(item.status),
+      render: (_: unknown, item: FileReviewRow) => statusTag(item.status),
     },
   ];
 
@@ -465,7 +499,8 @@ function Audit() {
       />
       <Card className={styles['table-card']}>
         <Tabs activeTab={activeTab} onChange={setActiveTab}>
-          <TabPane key="files" title={uiText('文件审查')}>
+          {canReviewFiles && (
+            <TabPane key="files" title={uiText('文件审查')}>
             <div className={styles['review-toolbar']}>
               <SearchBox
                 value={query}
@@ -475,6 +510,7 @@ function Audit() {
                 onSearch={() => {
                   setFilePage(1);
                   setAppliedQuery(query.trim());
+                  setAppliedScopes([...scopes]);
                 }}
               />
               <Space wrap>
@@ -497,7 +533,7 @@ function Audit() {
               rowKey="rowKey"
               loading={loading}
               columns={fileColumns}
-              data={fileTasks}
+              data={fileRows}
               pagination={false}
               rowSelection={{
                 type: 'checkbox',
@@ -515,8 +551,10 @@ function Audit() {
               onChange={loadFiles}
               className={styles['review-pagination']}
             />
-          </TabPane>
-          <TabPane key="shares" title={uiText('分享审查')}>
+            </TabPane>
+          )}
+          {canReviewShares && (
+            <TabPane key="shares" title={uiText('分享审查')}>
             <div className={styles['review-toolbar']}>
               <SearchBox
                 value={query}
@@ -526,6 +564,7 @@ function Audit() {
                 onSearch={() => {
                   setSharePage(1);
                   setAppliedQuery(query.trim());
+                  setAppliedScopes([...scopes]);
                 }}
               />
               <Space wrap>
@@ -565,8 +604,10 @@ function Audit() {
               onChange={loadShares}
               className={styles['review-pagination']}
             />
-          </TabPane>
-          <TabPane key="audit" title={uiText('系统审计')}>
+            </TabPane>
+          )}
+          {canReadAudit && (
+            <TabPane key="audit" title={uiText('系统审计')}>
             <Table
               rowKey="id"
               loading={loading}
@@ -574,7 +615,8 @@ function Audit() {
               data={auditItems}
               pagination={{ pageSize: 20 }}
             />
-          </TabPane>
+            </TabPane>
+          )}
         </Tabs>
       </Card>
 

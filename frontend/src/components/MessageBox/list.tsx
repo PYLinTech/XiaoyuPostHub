@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   List,
   Avatar,
@@ -8,6 +8,8 @@ import {
   Result,
   Tag,
 } from '@arco-design/web-react';
+import { IconDelete } from '@arco-design/web-react/icon';
+import uiText from '@/utils/uiText';
 import useLocale from '../../utils/useLocale';
 import styles from './style/index.module.less';
 
@@ -33,6 +35,7 @@ interface MessageListProps {
   data: MessageItemData[];
   unReadData: MessageItemData[];
   onItemClick?: (item: MessageItemData, index: number) => void;
+  onItemDelete?: (item: MessageItemData, index: number) => void;
   onAllBtnClick?: (
     unReadData: MessageItemData[],
     data: MessageItemData[]
@@ -42,9 +45,10 @@ interface MessageListProps {
 function MessageList(props: MessageListProps) {
   const t = useLocale();
   const { data, unReadData } = props;
+  const [expandedId, setExpandedId] = useState<string | number>();
 
   function onItemClick(item: MessageItemData, index: number) {
-    if (item.status) return;
+    setExpandedId((current) => (current === item.id ? undefined : item.id));
     props.onItemClick && props.onItemClick(item, index);
   }
 
@@ -74,9 +78,9 @@ function MessageList(props: MessageListProps) {
         <List.Item
           key={item.id}
           actionLayout="vertical"
-          style={{
-            opacity: item.status ? 0.5 : 1,
-          }}
+          className={`${styles['message-item']} ${
+            item.status ? styles.read : styles.unread
+          }`}
         >
           <div
             style={{
@@ -105,11 +109,28 @@ function MessageList(props: MessageListProps) {
                   {item.tag && item.tag.text ? (
                     <Tag color={item.tag.color}>{item.tag.text}</Tag>
                   ) : null}
+                  <Button
+                    className={styles['delete-button']}
+                    type="text"
+                    size="mini"
+                    status="danger"
+                    icon={<IconDelete />}
+                    aria-label={uiText('删除消息')}
+                    title={uiText('删除消息')}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      props.onItemDelete?.(item, index);
+                    }}
+                  />
                 </div>
               }
               description={
                 <div>
-                  <Typography.Paragraph style={{ marginBottom: 0 }} ellipsis>
+                  <Typography.Paragraph
+                    className={styles['message-content']}
+                    style={{ marginBottom: 0 }}
+                    ellipsis={expandedId !== item.id}
+                  >
                     {item.content}
                   </Typography.Paragraph>
                   {item.codes && item.codes.length > 0 && (

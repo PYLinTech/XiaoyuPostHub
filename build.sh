@@ -27,6 +27,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR="${ROOT_DIR}/frontend"
 BACKEND_DIR="${ROOT_DIR}/backend"
+MIGRATIONS_DIR="${ROOT_DIR}/migrations"
+MIGRATION_ASSISTANT_SOURCE="${ROOT_DIR}/migration-assistant.sh"
 DEPLOY_DIR="${ROOT_DIR}/deploy"
 APP_DIR="${DEPLOY_DIR}/app"
 IMAGE_DIR="${DEPLOY_DIR}/images"
@@ -240,6 +242,8 @@ check_project() {
 
     [[ -d "${FRONTEND_DIR}" ]] || fail "未找到前端目录：${FRONTEND_DIR}"
     [[ -d "${BACKEND_DIR}" ]] || fail "未找到后端目录：${BACKEND_DIR}"
+    [[ -d "${MIGRATIONS_DIR}" ]] || fail "未找到迁移目录：${MIGRATIONS_DIR}"
+    [[ -f "${MIGRATION_ASSISTANT_SOURCE}" ]] || fail "未找到迁移助手：${MIGRATION_ASSISTANT_SOURCE}"
     [[ -d "${DEPLOY_DIR}" ]] || fail "未找到部署目录：${DEPLOY_DIR}"
 
     [[ -f "${FRONTEND_DIR}/build.sh" ]] || fail "未找到前端构建脚本：${FRONTEND_DIR}/build.sh"
@@ -261,6 +265,11 @@ prepare_frontend_app() {
 prepare_backend_app() {
     cp "${BACKEND_BINARY}" "${APP_DIR}/${BINARY_NAME}"
     chmod +x "${APP_DIR}/${BINARY_NAME}"
+    rm -f "${APP_DIR}/migration-assistant.sh"
+    cp "${MIGRATION_ASSISTANT_SOURCE}" "${APP_DIR}/migration-assistant.sh"
+    chmod 750 "${APP_DIR}/migration-assistant.sh"
+    rm -rf "${APP_DIR}/migrations"
+    cp -R "${MIGRATIONS_DIR}" "${APP_DIR}/migrations"
 }
 
 image_tag_for_arch() {

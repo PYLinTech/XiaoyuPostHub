@@ -232,8 +232,8 @@ export default function DirectLinksPage() {
           </div>
           <Typography.Text type="secondary">
             {selectedKeys.length
-              ? `${uiText('已选择')} ${selectedKeys.length}`
-              : `${uiText('共')} ${items.length}`}
+              ? `${uiText('已选择')} ${selectedKeys.length} ${uiText('项')}`
+              : `${uiText('共')} ${items.length} ${uiText('项')}`}
           </Typography.Text>
         </div>
         <Table

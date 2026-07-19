@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -43,12 +44,8 @@ func Queries() *sqlcgen.Queries { return queries }
 // SetupOrExit 在 TestMain 里调用：读 DATABASE_URL、打开连接、reset + apply schema。
 // 任何一步失败直接 os.Exit(1)——缺 DB 时绝不能 skip，否则测的是空气。
 //
-// reset 行为：DROP SCHEMA public CASCADE + CREATE SCHEMA public，
-// 把项目自建的所有表清空，再通过 db.ApplyEmbeddedSchema 按文件名顺序 apply。
-// 这样**每个测试包都从干净状态开始**，避免跨包 schema 状态污染。
-//
-// Schema 来源走 embed.FS（与运行时启动期完全一致），不再依赖磁盘路径，
-// 确保测试用的就是"装进 xph-backend 二进制"的那一份。
+// reset 行为：DROP SCHEMA public CASCADE + CREATE SCHEMA public，再按数字顺序
+// 执行根目录 migrations 中的 SQL，使每个测试包都从干净状态开始。
 func SetupOrExit(m *testing.M) {
 	url := requireDBURL()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -68,12 +65,40 @@ func SetupOrExit(m *testing.M) {
 		os.Exit(1)
 	}
 
-	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer schemaCancel()
-	if err := db.ApplyEmbeddedSchema(schemaCtx, pool); err != nil {
+	if err := applyTestSQL(schemaCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "dbtest: 应用 schema 失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func applyTestSQL(ctx context.Context) error {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return fmt.Errorf("无法定位测试目录")
+	}
+	dir := filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "migrations")
+	files, err := filepath.Glob(filepath.Join(dir, "[0-9][0-9][0-9].sql"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	for _, file := range files {
+		body, readErr := os.ReadFile(file)
+		if readErr != nil {
+			return readErr
+		}
+		if _, execErr := tx.Exec(ctx, string(body)); execErr != nil {
+			return fmt.Errorf("执行 %s: %w", filepath.Base(file), execErr)
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // Teardown 关闭连接池。TestMain 退出前调用。

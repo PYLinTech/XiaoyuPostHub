@@ -114,7 +114,7 @@ function Overview() {
             </Card>
           ))}
         </div>
-        <Row gutter={16}>
+        <Row gutter={16} className={styles['overview-detail-row']}>
           <Col xs={24} lg={16}>
             <Card className={styles['section-card']}>
               <div className={styles['section-title']}>
@@ -163,18 +163,20 @@ function Overview() {
                 <Title heading={6}>{uiText('分享消耗')}</Title>
                 <IconCloud />
               </div>
-              <Statistic
-                title={uiText('累计下载')}
-                value={data.shareDownloadCount}
-                suffix={uiText('次')}
-              />
-              <div
-                style={{
-                  marginTop: 18,
-                }}
-              >
-                <Text type="secondary">{uiText('累计流量')}</Text>
-                <Title heading={5}>{formatBytes(data.shareTrafficBytes)}</Title>
+              <div className={styles['usage-list']}>
+                <div className={styles['usage-item']}>
+                  <Statistic
+                    title={uiText('累计下载')}
+                    value={data.shareDownloadCount}
+                    suffix={uiText('次')}
+                  />
+                </div>
+                <div className={styles['usage-item']}>
+                  <Text type="secondary">{uiText('累计流量')}</Text>
+                  <Title heading={5}>
+                    {formatBytes(data.shareTrafficBytes)}
+                  </Title>
+                </div>
               </div>
             </Card>
           </Col>

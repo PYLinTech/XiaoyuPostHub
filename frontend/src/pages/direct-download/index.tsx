@@ -1,6 +1,11 @@
-import React, { useContext, useState } from 'react';
-import { Button, Card, Typography } from '@arco-design/web-react';
-import { IconDownload } from '@arco-design/web-react/icon';
+import React, { useContext, useEffect, useState } from 'react';
+import axios from 'axios';
+import { Button, Card, Spin, Typography } from '@arco-design/web-react';
+import {
+  IconCloseCircle,
+  IconDownload,
+  IconExclamationCircle,
+} from '@arco-design/web-react/icon';
 import { useParams } from 'react-router-dom';
 import { GlobalContext } from '@/context';
 import logoUrl from '@/assets/logo.svg';
@@ -12,7 +17,41 @@ export default function PublicDirectDownloadPage() {
   }>();
   const { siteName, siteIconUrl } = useContext(GlobalContext);
   const [downloadAttempt, setDownloadAttempt] = useState(0);
+  const [checking, setChecking] = useState(true);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState('');
+  const [errorKind, setErrorKind] = useState<
+    'blocked' | 'expired' | 'unavailable'
+  >('unavailable');
   const downloadURL = `/api/direct/${encodeURIComponent(token)}`;
+  useEffect(() => {
+    setChecking(true);
+    setReady(false);
+    setError('');
+    setErrorKind('unavailable');
+    axios
+      .head(downloadURL)
+      .then(() => setReady(true))
+      .catch((requestError) => {
+        const status = requestError?.response?.status;
+        setErrorKind(
+          status === 403
+            ? 'blocked'
+            : status === 410
+            ? 'expired'
+            : 'unavailable'
+        );
+        setError(
+          requestError?.response?.data?.msg ||
+            (status === 403
+              ? uiText('该直链已被管理员封禁')
+              : status === 410
+              ? uiText('该直链已过期')
+              : uiText('直链不存在或无法访问'))
+        );
+      })
+      .finally(() => setChecking(false));
+  }, [downloadURL]);
   return (
     <div className={styles.page}>
       <header className={styles.header}>
@@ -23,29 +62,58 @@ export default function PublicDirectDownloadPage() {
         <span className={styles['header-label']}>{uiText('文件下载')}</span>
       </header>
       <main className={styles.main}>
-        <Card className={styles['download-card']}>
-          <IconDownload className={styles['download-icon']} />
-          <Typography.Title heading={5}>
-            {uiText('下载已开始')}
-          </Typography.Title>
-          <Typography.Text type="secondary">
-            {uiText('如果浏览器没有自动下载，请点击下方按钮重试。')}
-          </Typography.Text>
-          <Button
-            type="primary"
-            size="large"
-            icon={<IconDownload />}
-            onClick={() => setDownloadAttempt((value) => value + 1)}
-          >
-            {uiText('重新下载')}
-          </Button>
-        </Card>
-        <iframe
-          key={downloadAttempt}
-          title={uiText('直链下载')}
-          src={downloadURL}
-          hidden
-        />
+        {checking ? (
+          <Card className={styles['status-card']}>
+            <Spin size={32} />
+            <Typography.Text type="secondary">
+              {uiText('正在检查直链状态')}
+            </Typography.Text>
+          </Card>
+        ) : error ? (
+          <Card className={`${styles['status-card']} ${styles.danger}`}>
+            {errorKind === 'blocked' ? (
+              <IconCloseCircle className={styles['status-icon']} />
+            ) : (
+              <IconExclamationCircle className={styles['status-icon']} />
+            )}
+            <Typography.Title heading={4}>
+              {errorKind === 'blocked'
+                ? uiText('直链已被封禁')
+                : errorKind === 'expired'
+                ? uiText('直链已过期')
+                : uiText('无法打开直链')}
+            </Typography.Title>
+            <Typography.Text type="secondary">{error}</Typography.Text>
+          </Card>
+        ) : (
+          <>
+            <Card className={styles['download-card']}>
+              <IconDownload className={styles['download-icon']} />
+              <Typography.Title heading={5}>
+                {uiText('下载已开始')}
+              </Typography.Title>
+              <Typography.Text type="secondary">
+                {uiText('如果浏览器没有自动下载，请点击下方按钮重试。')}
+              </Typography.Text>
+              <Button
+                type="primary"
+                size="large"
+                icon={<IconDownload />}
+                onClick={() => setDownloadAttempt((value) => value + 1)}
+              >
+                {uiText('重新下载')}
+              </Button>
+            </Card>
+            {ready && (
+              <iframe
+                key={downloadAttempt}
+                title={uiText('直链下载')}
+                src={downloadURL}
+                hidden
+              />
+            )}
+          </>
+        )}
       </main>
       <footer className={styles.footer}>
         {siteName || 'XiaoyuPostHub'}

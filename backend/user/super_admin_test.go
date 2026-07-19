@@ -44,12 +44,12 @@ func TestBootstrapSuperAdminMatchesDefaultGroupPermissionsAndQuota(t *testing.T)
 		t.Fatalf("get default group: %v", err)
 	}
 
-	// 模拟一个原本属于其他用户组、随后被配置为超级管理员的既有账号。
+	// 超级管理员账号始终以默认用户组为唯一所属组。
 	otherGroup, err := q.CreateUserGroup(ctx, sqlcgen.CreateUserGroupParams{
-		Name: "legacy_admin_group", QuotaProfileID: defaultQuota.ID, Priority: 100,
+		Name: "other_admin_group", QuotaProfileID: defaultQuota.ID, Priority: 100,
 	})
 	if err != nil {
-		t.Fatalf("create legacy group: %v", err)
+		t.Fatalf("create other group: %v", err)
 	}
 	oldHash, err := user.HashPassword("old-admin-password")
 	if err != nil {
@@ -64,7 +64,7 @@ func TestBootstrapSuperAdminMatchesDefaultGroupPermissionsAndQuota(t *testing.T)
 	if _, err := q.AssignUserToGroup(ctx, sqlcgen.AssignUserToGroupParams{
 		UserID: dbUser.ID, GroupID: otherGroup.ID,
 	}); err != nil {
-		t.Fatalf("assign legacy group: %v", err)
+		t.Fatalf("assign other group: %v", err)
 	}
 
 	configuredHash, err := user.HashPassword("configured-admin-password")
@@ -122,7 +122,7 @@ func TestBootstrapSuperAdminMatchesDefaultGroupPermissionsAndQuota(t *testing.T)
 		t.Fatal("super admin lost its all-permissions override")
 	}
 
-	// 新建路径也必须直接绑定默认组，不能只修复既有账号迁移路径。
+	// 新创建的超级管理员同样直接绑定默认组。
 	newHash, err := user.HashPassword("new-admin-password")
 	if err != nil {
 		t.Fatalf("hash new admin password: %v", err)

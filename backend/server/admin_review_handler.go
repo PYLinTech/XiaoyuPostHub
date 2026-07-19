@@ -34,6 +34,7 @@ type fileReviewTask struct {
 	OwnerName  string                 `json:"ownerName"`
 	UploadedAt time.Time              `json:"uploadedAt"`
 	Status     string                 `json:"status"`
+	FileCount  int                    `json:"fileCount"`
 	Children   []admin.FileReviewItem `json:"children"`
 }
 
@@ -112,6 +113,10 @@ func handleFileReviewList(w http.ResponseWriter, r *http.Request, deps Deps) {
 		task.Status = aggregateFileStatus(task.Children)
 		if query != "" && !fileTaskMatches(*task, query, scopes) {
 			continue
+		}
+		task.FileCount = len(task.Children)
+		if len(task.Children) > 10 {
+			task.Children = task.Children[:10]
 		}
 		tasks = append(tasks, *task)
 	}

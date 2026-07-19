@@ -1,6 +1,6 @@
 .container {
   display: flex;
-  height: 100vh;
+  min-height: 100vh;
 
   .banner {
     width: 550px;
@@ -8,16 +8,15 @@
   }
 
   .content {
+    display: flex;
+    flex-direction: column;
     flex: 1;
-    position: relative;
-    padding-bottom: 40px;
+    min-width: 0;
+    min-height: 100vh;
   }
 
   .footer {
     width: 100%;
-    position: absolute;
-    bottom: 0;
-    right: 0;
   }
 }
 
@@ -44,6 +43,37 @@
   }
 }
 
+.language-switch {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 2;
+  display: inline-flex;
+  height: 36px;
+  padding: 0 12px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 8%);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease,
+    background-color 0.15s ease;
+
+  &:hover {
+    border-color: rgb(var(--primary-6));
+    color: rgb(var(--primary-6));
+    background: var(--color-fill-1);
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgb(var(--primary-6));
+    outline-offset: 2px;
+  }
+}
+
 .banner {
   display: flex;
   justify-content: center;
@@ -56,9 +86,14 @@
 }
 
 .content {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+  &-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+  }
 }
 
 .carousel {
@@ -130,7 +165,6 @@
 @media (max-width: 900px) {
   .container {
     min-height: 100vh;
-    height: auto;
 
     .banner {
       display: none;
@@ -139,7 +173,7 @@
     .content {
       width: 100%;
       min-height: 100vh;
-      padding: 76px 20px 64px;
+      padding: 76px 20px 0;
       box-sizing: border-box;
     }
   }
@@ -153,19 +187,33 @@
     }
   }
 
+  .language-switch {
+    top: 16px;
+    right: 18px;
+  }
+
   .login-form-wrapper {
     width: min(100%, 360px);
   }
 }
 
 @media (max-width: 420px) {
-  .container .content {
+  .container .content-inner {
+    align-items: flex-start;
     justify-content: flex-start;
+  }
+
+  .container .content {
     padding-right: 16px;
     padding-left: 16px;
   }
 
   .login-form-wrapper {
     width: 100%;
+  }
+
+  .language-switch {
+    right: 16px;
+    padding: 0 10px;
   }
 }

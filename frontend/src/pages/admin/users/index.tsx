@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import axios from 'axios';
 import {
   Button,
@@ -9,20 +15,25 @@ import {
   Select,
   Space,
   Table,
+  Tabs,
   Tag,
   Typography,
 } from '@arco-design/web-react';
 import {
   IconDelete,
+  IconEdit,
   IconLock,
   IconPlus,
   IconSearch,
   IconSettings,
   IconStop,
+  IconUserGroup,
 } from '@arco-design/web-react/icon';
 import { AdminPageHeader } from '../shared';
 import styles from '../style/index.module.less';
 import uiText from '@/utils/uiText';
+import { GlobalContext } from '@/context';
+const TabPane = Tabs.TabPane;
 interface UserItem {
   id: number;
   username: string;
@@ -36,6 +47,7 @@ interface UserGroupItem {
   name: string;
   description?: string;
   isSystem: boolean;
+  createdAt?: string;
 }
 function errorMessage(error: unknown, fallback: string) {
   return axios.isAxiosError(error) && error.response?.data?.msg
@@ -43,6 +55,14 @@ function errorMessage(error: unknown, fallback: string) {
     : fallback;
 }
 function Users() {
+  const { userInfo } = useContext(GlobalContext);
+  const adminPermissions = userInfo?.adminPermissions || [];
+  const canManageUsers = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('manage_users')
+  );
+  const canManageGroups = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('manage_user_groups')
+  );
   const [items, setItems] = useState<UserItem[]>([]);
   const [groups, setGroups] = useState<UserGroupItem[]>([]);
   const [superAdmin, setSuperAdmin] = useState('');
@@ -57,6 +77,11 @@ function Users() {
   const [groupModalVisible, setGroupModalVisible] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
+  const [editingGroup, setEditingGroup] = useState<UserGroupItem>();
+  const [editGroupName, setEditGroupName] = useState('');
+  const [editGroupDescription, setEditGroupDescription] = useState('');
+  const [membersGroup, setMembersGroup] = useState<UserGroupItem>();
+  const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -101,6 +126,72 @@ function Users() {
       await load();
     } catch (error) {
       Message.error(errorMessage(error, uiText('新增用户组失败')));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const updateGroup = async () => {
+    if (!editingGroup) return;
+    const name = editGroupName.trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_]{1,31}$/.test(name)) {
+      Message.warning(
+        uiText('名称须为 2 至 32 位小写字母、数字或下划线，并以字母开头')
+      );
+      return;
+    }
+    setSaving(true);
+    try {
+      await axios.put(`/api/admin/user-groups/${editingGroup.id}`, {
+        name,
+        description: editGroupDescription.trim(),
+      });
+      Message.success(uiText('用户组已更新'));
+      setEditingGroup(undefined);
+      await load();
+    } catch (error) {
+      Message.error(errorMessage(error, uiText('更新用户组失败')));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const deleteGroup = (group: UserGroupItem) => {
+    const memberCount = items.filter((item) =>
+      item.groupIds.includes(group.id)
+    ).length;
+    Modal.confirm({
+      title: `${uiText('删除用户组')} · ${group.name}`,
+      content: memberCount
+        ? `${uiText('删除后，该组内的')} ${memberCount} ${uiText(
+            '名用户将失去此用户组提供的权限与配额。'
+          )}`
+        : uiText('删除后无法恢复。'),
+      okButtonProps: { status: 'danger' },
+      onOk: async () => {
+        try {
+          await axios.delete(`/api/admin/user-groups/${group.id}`);
+          Message.success(uiText('用户组已删除'));
+          await load();
+        } catch (error) {
+          Message.error(errorMessage(error, uiText('删除用户组失败')));
+          throw error;
+        }
+      },
+    });
+  };
+  const saveGroupMembers = async () => {
+    if (!membersGroup) return;
+    setSaving(true);
+    try {
+      await axios.put(`/api/admin/user-groups/${membersGroup.id}/members`, {
+        userIds: selectedMemberIds.filter(
+          (id) => items.find((item) => item.id === id)?.username !== superAdmin
+        ),
+      });
+      Message.success(uiText('用户组成员已更新'));
+      setMembersGroup(undefined);
+      await load();
+    } catch (error) {
+      Message.error(errorMessage(error, uiText('配置用户组成员失败')));
     } finally {
       setSaving(false);
     }
@@ -238,97 +329,210 @@ function Users() {
         const protectedUser = record.username === superAdmin;
         return (
           <Space size={4} wrap>
-            <Button
-              size="mini"
-              type="text"
-              icon={<IconSettings />}
-              disabled={protectedUser}
-              onClick={() => {
-                setSelectedGroupIds(record.groupIds || []);
-                setGroupTarget(record);
-              }}
-            >
-              {uiText('用户组')}
-            </Button>
-            <Button
-              size="mini"
-              type="text"
-              icon={<IconLock />}
-              disabled={protectedUser}
-              onClick={() => setPasswordTarget(record)}
-            >
-              {uiText('重设密码')}
-            </Button>
-            <Button
-              size="mini"
-              type="text"
-              status={record.disabled ? 'success' : 'warning'}
-              icon={<IconStop />}
-              disabled={protectedUser}
-              onClick={() => changeDisabled(record)}
-            >
-              {record.disabled ? uiText('启用') : uiText('禁用')}
-            </Button>
-            <Button
-              size="mini"
-              type="text"
-              status="danger"
-              icon={<IconDelete />}
-              disabled={protectedUser}
-              onClick={() => deleteUser(record)}
-            >
-              {uiText('删除')}
-            </Button>
+            {canManageGroups && (
+              <Button
+                size="mini"
+                type="text"
+                icon={<IconSettings />}
+                disabled={protectedUser}
+                onClick={() => {
+                  setSelectedGroupIds(record.groupIds || []);
+                  setGroupTarget(record);
+                }}
+              >
+                {uiText('用户组')}
+              </Button>
+            )}
+            {canManageUsers && (
+              <>
+                <Button
+                  size="mini"
+                  type="text"
+                  icon={<IconLock />}
+                  disabled={protectedUser}
+                  onClick={() => setPasswordTarget(record)}
+                >
+                  {uiText('重设密码')}
+                </Button>
+                <Button
+                  size="mini"
+                  type="text"
+                  status={record.disabled ? 'success' : 'warning'}
+                  icon={<IconStop />}
+                  disabled={protectedUser}
+                  onClick={() => changeDisabled(record)}
+                >
+                  {record.disabled ? uiText('启用') : uiText('禁用')}
+                </Button>
+                <Button
+                  size="mini"
+                  type="text"
+                  status="danger"
+                  icon={<IconDelete />}
+                  disabled={protectedUser}
+                  onClick={() => deleteUser(record)}
+                >
+                  {uiText('删除')}
+                </Button>
+              </>
+            )}
           </Space>
         );
       },
+    },
+  ];
+  const groupColumns = [
+    {
+      title: uiText('用户组'),
+      dataIndex: 'name',
+      width: 220,
+      render: (value, record: UserGroupItem) => (
+        <div className={styles['user-name-cell']}>
+          <b>{value}</b>
+          {record.isSystem && (
+            <Tag color="arcoblue">{uiText('系统用户组')}</Tag>
+          )}
+        </div>
+      ),
+    },
+    {
+      title: uiText('说明'),
+      dataIndex: 'description',
+      ellipsis: true,
+      render: (value) => value || '-',
+    },
+    {
+      title: uiText('成员'),
+      width: 300,
+      render: (_, group: UserGroupItem) => {
+        const members = items.filter((item) =>
+          item.groupIds.includes(group.id)
+        );
+        return members.length ? (
+          <div className={styles['group-member-tags']}>
+            {members.slice(0, 4).map((item) => (
+              <Tag key={item.id}>{item.username}</Tag>
+            ))}
+            {members.length > 4 && <Tag>+{members.length - 4}</Tag>}
+          </div>
+        ) : (
+          <Typography.Text type="secondary">
+            {uiText('暂无成员')}
+          </Typography.Text>
+        );
+      },
+    },
+    {
+      title: uiText('操作'),
+      width: 280,
+      render: (_, group: UserGroupItem) => (
+        <Space size={4} wrap>
+          <Button
+            size="mini"
+            type="text"
+            icon={<IconUserGroup />}
+            onClick={() => {
+              setSelectedMemberIds(
+                items
+                  .filter((item) => item.groupIds.includes(group.id))
+                  .map((item) => item.id)
+              );
+              setMembersGroup(group);
+            }}
+          >
+            {uiText('配置人员')}
+          </Button>
+          <Button
+            size="mini"
+            type="text"
+            icon={<IconEdit />}
+            disabled={group.isSystem}
+            onClick={() => {
+              setEditGroupName(group.name);
+              setEditGroupDescription(group.description || '');
+              setEditingGroup(group);
+            }}
+          >
+            {uiText('编辑')}
+          </Button>
+          <Button
+            size="mini"
+            type="text"
+            status="danger"
+            icon={<IconDelete />}
+            disabled={group.isSystem}
+            onClick={() => deleteGroup(group)}
+          >
+            {uiText('删除')}
+          </Button>
+        </Space>
+      ),
     },
   ];
   return (
     <div className={styles.page}>
       <AdminPageHeader
         title={uiText('用户管理')}
-        description={uiText('管理站点账户、用户组归属、登录状态和密码。')}
-        extra={
-          <Button
-            type="primary"
-            icon={<IconPlus />}
-            onClick={() => setGroupModalVisible(true)}
-          >
-            {uiText('新增用户组')}
-          </Button>
-        }
+        description={uiText('分别管理站点用户和用户组。')}
       />
       <Card className={styles['table-card']}>
-        <div className={styles.toolbar}>
-          <Input
-            allowClear
-            prefix={<IconSearch />}
-            placeholder={uiText('搜索用户名')}
-            value={keyword}
-            onChange={setKeyword}
-            style={{
-              width: 280,
-            }}
-          />
-          <Tag>
-            {data.length}
-            {uiText('个账户')}
-          </Tag>
-        </div>
-        <Table
-          rowKey="id"
-          loading={loading}
-          columns={columns}
-          data={data}
-          pagination={{
-            pageSize: 10,
-            showTotal: true,
-          }}
-          scroll={{
-            x: 970,
-          }}
-        />
+        <Tabs defaultActiveTab={canManageUsers ? 'users' : 'groups'}>
+          {canManageUsers && (
+            <TabPane key="users" title={uiText('用户管理')}>
+            <div className={styles.toolbar}>
+              <Input
+                allowClear
+                prefix={<IconSearch />}
+                placeholder={uiText('搜索用户名')}
+                value={keyword}
+                onChange={setKeyword}
+                style={{ width: 280 }}
+              />
+              <Tag>
+                {data.length}
+                {uiText('个账户')}
+              </Tag>
+            </div>
+            <Table
+              rowKey="id"
+              loading={loading}
+              columns={columns}
+              data={data}
+              pagination={{ pageSize: 10, showTotal: true }}
+              scroll={{ x: 970 }}
+            />
+            </TabPane>
+          )}
+          {canManageGroups && (
+            <TabPane key="groups" title={uiText('用户组管理')}>
+            <div className={styles['group-section-toolbar']}>
+              <div>
+                <Typography.Title heading={6}>
+                  {uiText('用户组管理')}
+                </Typography.Title>
+                <Typography.Text type="secondary">
+                  {uiText('新增、编辑、删除用户组，并配置组内人员。')}
+                </Typography.Text>
+              </div>
+              <Button
+                type="primary"
+                icon={<IconPlus />}
+                onClick={() => setGroupModalVisible(true)}
+              >
+                {uiText('新增用户组')}
+              </Button>
+            </div>
+            <Table
+              rowKey="id"
+              loading={loading}
+              columns={groupColumns}
+              data={groups}
+              pagination={false}
+              scroll={{ x: 920 }}
+            />
+            </TabPane>
+          )}
+        </Tabs>
       </Card>
 
       <Modal
@@ -372,6 +576,71 @@ function Users() {
             />
           </div>
         </Space>
+      </Modal>
+
+      <Modal
+        title={`${uiText('编辑用户组')}${
+          editingGroup ? ` · ${editingGroup.name}` : ''
+        }`}
+        visible={Boolean(editingGroup)}
+        confirmLoading={saving}
+        onOk={updateGroup}
+        onCancel={() => setEditingGroup(undefined)}
+        unmountOnExit
+      >
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <div>
+            <Typography.Text>{uiText('用户组名称')}</Typography.Text>
+            <Input
+              value={editGroupName}
+              maxLength={32}
+              onChange={setEditGroupName}
+            />
+          </div>
+          <div>
+            <Typography.Text>{uiText('说明')}</Typography.Text>
+            <Input.TextArea
+              value={editGroupDescription}
+              maxLength={500}
+              autoSize={{ minRows: 3, maxRows: 6 }}
+              onChange={setEditGroupDescription}
+            />
+          </div>
+        </Space>
+      </Modal>
+
+      <Modal
+        title={`${uiText('配置人员')}${
+          membersGroup ? ` · ${membersGroup.name}` : ''
+        }`}
+        visible={Boolean(membersGroup)}
+        confirmLoading={saving}
+        onOk={saveGroupMembers}
+        onCancel={() => setMembersGroup(undefined)}
+        unmountOnExit
+      >
+        <Typography.Paragraph type="secondary">
+          {uiText('选择需要加入此用户组的人员，系统超级管理员不会被变更。')}
+        </Typography.Paragraph>
+        <Select
+          mode="multiple"
+          allowClear
+          value={selectedMemberIds}
+          placeholder={uiText('选择人员')}
+          onChange={setSelectedMemberIds}
+          style={{ width: '100%' }}
+        >
+          {items.map((item) => (
+            <Select.Option
+              key={item.id}
+              value={item.id}
+              disabled={item.username === superAdmin}
+            >
+              {item.username}
+              {item.username === superAdmin ? uiText('（系统超级管理员）') : ''}
+            </Select.Option>
+          ))}
+        </Select>
       </Modal>
 
       <Modal

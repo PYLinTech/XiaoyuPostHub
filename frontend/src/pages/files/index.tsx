@@ -25,6 +25,7 @@ import {
   IconDownload,
   IconEdit,
   IconEye,
+  IconFolder,
   IconFolderAdd,
   IconLink,
   IconShareAlt,
@@ -436,8 +437,8 @@ export default function FilesPage() {
           </div>
           <Typography.Text type="secondary">
             {selectedItems.length
-              ? `${uiText('已选择')} ${selectedItems.length}`
-              : `${uiText('共')} ${items.length}`}
+              ? `${uiText('已选择')} ${selectedItems.length} ${uiText('项')}`
+              : `${uiText('共')} ${items.length} ${uiText('项')}`}
           </Typography.Text>
         </div>
         <div className={styles.crumbs}>
@@ -445,12 +446,14 @@ export default function FilesPage() {
             {path.map((item, index) => (
               <Breadcrumb.Item key={item.id || 'root'}>
                 <Button
+                  className={styles['crumb-button']}
                   type="text"
                   size="mini"
                   onClick={() =>
                     setPath((current) => current.slice(0, index + 1))
                   }
                 >
+                  <IconFolder />
                   {item.name}
                 </Button>
               </Breadcrumb.Item>

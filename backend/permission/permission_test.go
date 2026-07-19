@@ -25,10 +25,13 @@ func TestDefinitions_AllCodeNonEmptyAndUnique(t *testing.T) {
 	}
 }
 
-func TestDefinitions_AllDescriptionNonEmpty(t *testing.T) {
+func TestDefinitions_AllDescriptionsNonEmpty(t *testing.T) {
 	for i, d := range Definitions {
 		if d.Description == "" {
 			t.Errorf("Definitions[%d] (%q) 的 description 为空", i, d.Code)
+		}
+		if d.DescriptionEN == "" {
+			t.Errorf("Definitions[%d] (%q) 的英文 description 为空", i, d.Code)
 		}
 	}
 }

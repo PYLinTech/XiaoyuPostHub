@@ -2,7 +2,7 @@ version: "2"
 sql:
   - engine: "postgresql"
     queries: "db/queries"
-    schema:  "db/schema"
+    schema:  "../migrations"
     gen:
       go:
         package: "sqlcgen"

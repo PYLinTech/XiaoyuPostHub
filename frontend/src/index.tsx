@@ -86,12 +86,6 @@ function Index() {
 
   useEffect(() => {
     changeTheme(projectSettings.theme, projectSettings.themeColor);
-    // 清除旧版本曾保存的明文登录凭据。
-    try {
-      window.localStorage.removeItem('loginParams');
-    } catch {
-      // 浏览器禁用存储时无需处理。
-    }
   }, []);
 
   useEffect(() => {

@@ -23,10 +23,12 @@ CONTAINER_NAME="XiaoyuPostHub"
 IMAGE_DEFAULT="pylintech/xiaoyuposthub:latest"
 PORT_DEFAULT="8080"
 NETWORK_DEFAULT="xiaoyuposthub-network"
+MIGRATION_POSTGRES_IMAGE="${XPH_MIGRATION_POSTGRES_IMAGE:-postgres:18-alpine}"
 
 INSTALL_DIR="${XIAOYUPOSTHUB_HOME:-/opt/xiaoyuposthub}"
 COMPOSE_FILE="${INSTALL_DIR}/compose.yaml"
 ENV_FILE="${INSTALL_DIR}/.env"
+MIGRATION_ASSISTANT_FILE="${INSTALL_DIR}/migration-assistant.sh"
 
 ACTION="install"
 ACTION_SET=false
@@ -96,6 +98,31 @@ run_step() {
 }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+extract_migration_assistant() {
+    local image="$1"
+    local source_container=""
+    local temp_dir=""
+    local extracted_file=""
+
+    temp_dir="$(mktemp -d)"
+    extracted_file="${temp_dir}/migration-assistant.sh"
+    if ! source_container="$(docker create --entrypoint /bin/true "${image}")"; then
+        rmdir "${temp_dir}"
+        return 1
+    fi
+    if ! docker cp "${source_container}:/app/migration-assistant.sh" "${extracted_file}" \
+        || [[ ! -s "${extracted_file}" ]]; then
+        docker rm -f "${source_container}" >/dev/null 2>&1 || true
+        rm -f "${extracted_file}"
+        rmdir "${temp_dir}"
+        return 1
+    fi
+    docker rm -f "${source_container}" >/dev/null
+    chmod 700 "${extracted_file}"
+    mv "${extracted_file}" "${MIGRATION_ASSISTANT_FILE}"
+    rmdir "${temp_dir}"
+}
 
 need_sudo() {
     [[ "$(id -u)" -ne 0 && ! -w "$(dirname "${INSTALL_DIR}")" ]]
@@ -664,6 +691,8 @@ install_or_update() {
     export XIAOYUPOSTHUB_IMAGE="${image}"
     write_env_value XIAOYUPOSTHUB_IMAGE "${image}"
     run_step "拉取镜像 ${image}" docker pull "${image}"
+    run_step "从目标镜像提取数据库迁移助手" extract_migration_assistant "${image}"
+    run_step "拉取数据库迁移客户端 ${MIGRATION_POSTGRES_IMAGE}" docker pull "${MIGRATION_POSTGRES_IMAGE}"
 
     ensure_network
     prepare_selected_network
@@ -678,6 +707,16 @@ install_or_update() {
     configure_super_admin "${image}"
     chmod 600 "${ENV_FILE}" || true
     remove_conflicting_container
+
+    if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        run_step "停止旧服务" docker stop "${CONTAINER_NAME}"
+    fi
+    run_step "按顺序迁移数据库" env \
+        DATABASE_URL="$(read_env_value DATABASE_URL)" \
+        XIAOYUPOSTHUB_IMAGE="${image}" \
+        XIAOYUPOSTHUB_NETWORK="${network}" \
+        XPH_MIGRATION_POSTGRES_IMAGE="${MIGRATION_POSTGRES_IMAGE}" \
+        bash "${MIGRATION_ASSISTANT_FILE}"
 
     run_step "检查 Docker Compose 配置" compose config --quiet
     run_step "更新并启动服务" compose up -d --force-recreate --remove-orphans

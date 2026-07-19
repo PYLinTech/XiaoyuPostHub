@@ -23,7 +23,7 @@ import MessageBox from '@/components/MessageBox';
 import IconButton from './IconButton';
 import styles from './style/index.module.less';
 import defaultLocale from '@/locale';
-import { hasManagementAccess } from '@/routes';
+import { getRoutesForUser, hasManagementAccess } from '@/routes';
 import uiText from '@/utils/uiText';
 function NavActions({
   mobile = false,
@@ -48,7 +48,8 @@ function NavActions({
     if (key === 'logout') {
       logout();
     } else if (key === 'identity-admin') {
-      history.push('/admin/overview');
+      const [, defaultAdminRoute] = getRoutesForUser(userInfo, true);
+      history.push(`/${defaultAdminRoute}`);
     } else if (key === 'identity-user') {
       history.push('/files');
     }
