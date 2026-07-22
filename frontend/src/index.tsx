@@ -23,6 +23,7 @@ axios.interceptors.response.use(undefined, (error) => {
   if (
     error?.response?.status === 401 &&
     path !== '/login' &&
+    path !== '/m' &&
     !path.startsWith('/s/') &&
     !path.startsWith('/d/')
   ) {
@@ -34,6 +35,7 @@ const PublicSharePage = React.lazy(() => import('./pages/share'));
 const PublicDirectDownloadPage = React.lazy(
   () => import('./pages/direct-download')
 );
+const PickupPage = React.lazy(() => import('./pages/pickup'));
 
 function Index() {
   const [lang, setLang] = useStorage('xph-lang', 'zh-CN');
@@ -43,8 +45,10 @@ function Index() {
   });
   const privatePage =
     window.location.pathname !== '/login' &&
+    window.location.pathname !== '/m' &&
     !window.location.pathname.startsWith('/s/') &&
     !window.location.pathname.startsWith('/d/');
+
   const [userInfo, setUserInfo] = useState<UserInfo>();
   const [userLoading, setUserLoading] = useState(privatePage);
 
@@ -142,6 +146,11 @@ function Index() {
             <Route path="/s/:token">
               <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
                 <PublicSharePage />
+              </Suspense>
+            </Route>
+            <Route exact path="/m">
+              <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
+                <PickupPage />
               </Suspense>
             </Route>
             <Route path="/d/:token">

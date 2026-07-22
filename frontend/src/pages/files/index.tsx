@@ -401,24 +401,24 @@ export default function FilesPage() {
             >
               {uiText('下载')}
             </Button>
-            <Button
-              icon={<IconShareAlt />}
-              disabled={!can('share') || !selectedItems.length}
-              onClick={() => openGenerator('share')}
-            >
-              {uiText('分享')}
-            </Button>
-            <Button
-              icon={<IconLink />}
-              disabled={
-                !can('direct_link') ||
-                selectedItems.length !== 1 ||
-                selectedItems[0]?.kind !== 'file'
-              }
-              onClick={() => openGenerator('direct')}
-            >
-              {uiText('直链')}
-            </Button>
+            {(can('share') || can('pickup_share')) && (
+              <Button
+                icon={<IconShareAlt />}
+                disabled={!selectedItems.length}
+                onClick={() => openGenerator('share')}
+              >
+                {uiText('分享')}
+              </Button>
+            )}
+            {can('direct_link') && (
+              <Button
+                icon={<IconLink />}
+                disabled={selectedItems.length !== 1 || selectedItems[0]?.kind !== 'file'}
+                onClick={() => openGenerator('direct')}
+              >
+                {uiText('直链')}
+              </Button>
+            )}
             <Button
               status="danger"
               icon={<IconDelete />}
@@ -512,6 +512,8 @@ export default function FilesPage() {
         mode={linkMode}
         resources={selectedItems}
         visible={linkVisible}
+        allowLinkShare={can('share')}
+        allowPickupShare={can('pickup_share')}
         onClose={() => setLinkVisible(false)}
       />
       <Modal

@@ -89,6 +89,13 @@ func (r *Repo) Create(ctx context.Context, userID int64) (string, time.Time, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	q := sqlcgen.New(r.db).WithTx(tx)
+	// 同一用户的登录串行化，保证并发登录时也是最后一次登录使之前的 token 失效。
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, userID); err != nil {
+		return "", time.Time{}, fmt.Errorf("lock user session: %w", err)
+	}
+	if err := q.DeleteUserSessionsByUserID(ctx, userID); err != nil {
+		return "", time.Time{}, fmt.Errorf("replace user session: %w", err)
+	}
 	_, err = q.CreateUserSession(ctx, sqlcgen.CreateUserSessionParams{
 		UserID:    userID,
 		TokenHash: tokenHash,
@@ -96,9 +103,6 @@ func (r *Repo) Create(ctx context.Context, userID int64) (string, time.Time, err
 	})
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("create user session: %w", err)
-	}
-	if err := q.TrimUserSessions(ctx, userID); err != nil {
-		return "", time.Time{}, fmt.Errorf("trim user sessions: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", time.Time{}, fmt.Errorf("commit session transaction: %w", err)

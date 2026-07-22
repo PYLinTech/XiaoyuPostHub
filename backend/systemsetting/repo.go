@@ -10,6 +10,7 @@ import (
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const (
@@ -30,6 +31,7 @@ var (
 	ErrUploadConcurrency  = errors.New("systemsetting: 上传并发数必须在 1 到 8 之间")
 	ErrTrashRetention     = errors.New("systemsetting: 回收期限必须在 1 到 3650 天之间")
 	ErrDownloadMode       = errors.New("systemsetting: 下载策略无效")
+	ErrPickupLifetime     = errors.New("systemsetting: 取件码有效期上限无效")
 )
 
 type Config struct {
@@ -45,6 +47,12 @@ type Config struct {
 	ShareCaseSensitive         bool
 	ShareIncludeLetters        bool
 	ShareIncludeNumbers        bool
+	PickupLength               int16
+	PickupCaseSensitive        bool
+	PickupIncludeLetters       bool
+	PickupIncludeNumbers       bool
+	PickupMaxLifetimeSeconds   *int64
+	LoginTOTPEnabled           bool
 	UploadRequiresReview       bool
 	CustomShareRequiresReview  bool
 	UploadChunkSizeBytes       int32
@@ -90,8 +98,12 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 		return sqlcgen.SystemSetting{}, ErrDownloadMode
 	}
 	if !validCodeConfig(config.InvitationLength, config.InvitationIncludeLetters, config.InvitationIncludeNumbers) ||
-		!validCodeConfig(config.ShareLength, config.ShareIncludeLetters, config.ShareIncludeNumbers) {
+		!validCodeConfig(config.ShareLength, config.ShareIncludeLetters, config.ShareIncludeNumbers) ||
+		config.PickupLength < 1 || config.PickupLength > 64 || (!config.PickupIncludeLetters && !config.PickupIncludeNumbers) {
 		return sqlcgen.SystemSetting{}, ErrRandomCodeInvalid
+	}
+	if config.PickupMaxLifetimeSeconds != nil && *config.PickupMaxLifetimeSeconds <= 0 {
+		return sqlcgen.SystemSetting{}, ErrPickupLifetime
 	}
 	if config.UploadChunkSizeBytes < 1<<20 || config.UploadChunkSizeBytes > 64<<20 {
 		return sqlcgen.SystemSetting{}, ErrUploadChunkSize
@@ -110,12 +122,23 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 		InvitationIncludeLetters: config.InvitationIncludeLetters, InvitationIncludeNumbers: config.InvitationIncludeNumbers,
 		ShareLength: config.ShareLength, ShareCaseSensitive: config.ShareCaseSensitive,
 		ShareIncludeLetters: config.ShareIncludeLetters, ShareIncludeNumbers: config.ShareIncludeNumbers,
-		UploadRequiresReview: config.UploadRequiresReview, CustomShareRequiresReview: config.CustomShareRequiresReview,
+		PickupLength: config.PickupLength, PickupCaseSensitive: config.PickupCaseSensitive,
+		PickupIncludeLetters: config.PickupIncludeLetters, PickupIncludeNumbers: config.PickupIncludeNumbers,
+		PickupMaxLifetimeSeconds: nullableInt8(config.PickupMaxLifetimeSeconds),
+		LoginTotpEnabled:         config.LoginTOTPEnabled,
+		UploadRequiresReview:     config.UploadRequiresReview, CustomShareRequiresReview: config.CustomShareRequiresReview,
 		UploadChunkSizeBytes:       config.UploadChunkSizeBytes,
 		UploadTaskChunkConcurrency: config.UploadTaskChunkConcurrency,
 		UploadUserTaskConcurrency:  config.UploadUserTaskConcurrency,
 		TrashRetentionDays:         config.TrashRetentionDays,
 	})
+}
+
+func nullableInt8(value *int64) pgtype.Int8 {
+	if value == nil {
+		return pgtype.Int8{}
+	}
+	return pgtype.Int8{Int64: *value, Valid: true}
 }
 
 func validateIdentity(siteName, storagePath string) (string, string, error) {

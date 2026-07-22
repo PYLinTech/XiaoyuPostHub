@@ -31,6 +31,8 @@ import writeClipboard from '@/utils/clipboard';
 interface ShareItem {
   id: number;
   url?: string;
+  shareType?: 'link' | 'pickup';
+  pickupCode?: string;
   password?: string;
   resource: ResourceItem;
   expiresAt?: string;
@@ -117,9 +119,12 @@ export default function SharesPage() {
       ),
     },
     {
-      title: uiText('分享链接'),
+      title: uiText('分享方式'),
       width: 360,
       render: (_, item: ShareItem) => {
+        if (item.shareType === 'pickup' && item.pickupCode) {
+          return <div className={styles['link-cell']}><code>{uiText('取件码')}：{item.pickupCode}</code><Button size="mini" type="text" icon={<IconCopy />} onClick={() => copyValue(item.pickupCode as string)} /></div>;
+        }
         if (!item.url)
           return (
             <Typography.Text type="secondary">

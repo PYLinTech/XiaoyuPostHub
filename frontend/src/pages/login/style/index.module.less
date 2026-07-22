@@ -20,6 +20,28 @@
   }
 }
 
+.totp-code {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+  margin: 12px 0 24px;
+
+  span {
+    height: 48px;
+    border: 1px solid var(--color-border-3);
+    border-radius: 8px;
+    background: var(--color-bg-2);
+    color: var(--color-text-1);
+    font-size: 22px;
+    line-height: 48px;
+    text-align: center;
+  }
+
+  &:focus-within span { border-color: rgb(var(--primary-6)); }
+  input { position: absolute; inset: 0; opacity: 0; cursor: text; }
+}
+
 .logo {
   position: fixed;
   top: 24px;

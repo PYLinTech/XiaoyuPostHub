@@ -631,7 +631,9 @@ function Access() {
       <Card className={styles['table-card']}>
         <Tabs
           defaultActiveTab={
-            canManageQuotas
+            new URLSearchParams(window.location.search).get('tab') === 'permissions' && canManagePermissions
+              ? 'permissions'
+              : canManageQuotas
               ? 'quotas'
               : canManagePermissions
               ? 'permissions'
@@ -884,7 +886,16 @@ function Access() {
       >
         <Checkbox.Group
           value={selectedPermissions}
-          onChange={setSelectedPermissions}
+          onChange={(values) => {
+            let next = values as string[];
+            if (next.includes('require_login_totp') && !next.includes('use_login_totp')) {
+              next = [...next, 'use_login_totp'];
+            }
+            if (!next.includes('use_login_totp')) {
+              next = next.filter((code) => code !== 'require_login_totp');
+            }
+            setSelectedPermissions(next);
+          }}
           className={styles['permission-checkbox-grid']}
         >
           {permissions.map((item) => (

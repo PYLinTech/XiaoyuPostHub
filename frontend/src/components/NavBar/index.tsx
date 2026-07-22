@@ -25,6 +25,7 @@ import styles from './style/index.module.less';
 import defaultLocale from '@/locale';
 import { getRoutesForUser, hasManagementAccess } from '@/routes';
 import uiText from '@/utils/uiText';
+import UserSettingsModal from '@/components/UserSettingsModal';
 function NavActions({
   mobile = false,
   onNavigate,
@@ -52,6 +53,8 @@ function NavActions({
       history.push(`/${defaultAdminRoute}`);
     } else if (key === 'identity-user') {
       history.push('/files');
+    } else if (key === 'user-settings') {
+      window.dispatchEvent(new Event('xph-open-user-settings'));
     }
   }
   const adminMode = history.location.pathname.startsWith('/admin');
@@ -81,6 +84,10 @@ function NavActions({
           </Menu.Item>
         </Menu.SubMenu>
       )}
+      <Menu.Item key="user-settings">
+        <IconSafe className={styles['dropdown-icon']} />
+        {uiText('用户配置')}
+      </Menu.Item>
       {canSwitchIdentity && (
         <Divider
           style={{
@@ -226,6 +233,7 @@ function Navbar({
         </div>
       </div>
       <NavActions />
+      <UserSettingsModal />
     </div>
   );
 }

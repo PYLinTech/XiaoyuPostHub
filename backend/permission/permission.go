@@ -22,8 +22,11 @@ const (
 	DeleteOwn = "delete_own" // 删自己的资源
 
 	// 分享/直链（卡的是"创建动作"，不是"我能不能下载"）
-	Share      = "share"       // 创建分享页（密码 + 有效期）
-	DirectLink = "direct_link" // 创建直链（curl 友好 + 有效期）
+	Share            = "share"              // 创建分享页（密码 + 有效期）
+	PickupShare      = "pickup_share"       // 生成取件码分享
+	UseLoginTOTP     = "use_login_totp"     // 允许使用登录动态令牌
+	RequireLoginTOTP = "require_login_totp" // 强制使用登录动态令牌
+	DirectLink       = "direct_link"        // 创建直链（curl 友好 + 有效期）
 
 	// 后台管理
 	ViewAdminOverview = "view_admin_overview" // 查看实时概览
@@ -55,6 +58,9 @@ var Definitions = []Definition{
 	{Rename, "重命名自己的资源", "Rename own resources"},
 	{DeleteOwn, "删除自己的资源", "Delete own resources"},
 	{Share, "创建分享页", "Create share pages"},
+	{PickupShare, "生成取件码", "Create pickup codes"},
+	{UseLoginTOTP, "允许使用登录动态令牌", "Allow login authenticator tokens"},
+	{RequireLoginTOTP, "强制使用登录动态令牌", "Require login authenticator tokens"},
 	{DirectLink, "创建直链", "Create direct links"},
 	{ViewAdminOverview, "查看实时概览", "View live overview"},
 	{ManageUsers, "管理用户", "Manage users"},

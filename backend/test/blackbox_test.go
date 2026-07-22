@@ -37,21 +37,23 @@ func newTestServer(t *testing.T) *httptest.Server {
 
 // --- NewRouter：路由分流 ---
 
-func TestNewRouter_ServesStaticRoot(t *testing.T) {
+func TestNewRouter_RootRedirectsToLoginWithoutCustomHomepage(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/")
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(srv.URL + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "<h1>home</h1>" {
-		t.Errorf("body = %q, want %q", string(body), "<h1>home</h1>")
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want 302", resp.StatusCode)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
+	if location := resp.Header.Get("Location"); location != "/login" {
+		t.Errorf("Location = %q, want /login", location)
 	}
 }
 

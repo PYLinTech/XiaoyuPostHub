@@ -11,6 +11,8 @@ export default function LoginForm() {
   const formRef = useRef<FormInstance>();
   const [errorMessage, setErrorMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [challengeToken, setChallengeToken] = useState('');
+  const [totpCode, setTotpCode] = useState('');
   const [registerMode, setRegisterMode] = useState(false);
   const [registrationRequiresInvitation, setRegistrationRequiresInvitation] =
     useState<boolean | null>(null);
@@ -28,8 +30,11 @@ export default function LoginForm() {
       .post('/api/user/login', params)
       .then((res) => {
         const { status, msg } = res.data;
-        if (status === 'ok') {
-          window.location.replace('/');
+        if (status === 'totp_required') {
+          setChallengeToken(res.data.challengeToken || '');
+          setTotpCode('');
+        } else if (status === 'ok') {
+          window.location.replace('/files');
         } else {
           setErrorMessage(msg || t['login.form.login.errMsg']);
         }
@@ -42,6 +47,23 @@ export default function LoginForm() {
         setLoading(false);
       });
   }
+  function verifyTOTP() {
+    if (totpCode.length !== 6) {
+      setErrorMessage(uiText('请输入 6 位动态令牌'));
+      return;
+    }
+    setLoading(true);
+    setErrorMessage('');
+    axios.post('/api/user/login/totp', { challengeToken, code: totpCode })
+      .then(() => window.location.replace('/files'))
+      .catch((error) => setErrorMessage(error?.response?.data?.msg || uiText('动态令牌验证失败')))
+      .finally(() => setLoading(false));
+  }
+  useEffect(() => {
+    if (challengeToken && totpCode.length === 6 && !loading) verifyTOTP();
+    // Only a code edit should trigger an automatic verification attempt.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totpCode]);
   function onSubmitClick() {
     formRef.current.validate().then((values) => {
       if (!registerMode) {
@@ -112,6 +134,22 @@ export default function LoginForm() {
   };
   return (
     <div className={styles['login-form-wrapper']}>
+      {challengeToken ? <>
+        <div className={styles['login-form-title']}>{uiText('验证登录动态令牌')}</div>
+        <div className={styles['login-form-sub-title']}>{uiText('打开验证器应用，输入当前显示的 6 位动态令牌。')}</div>
+        <div className={styles['login-form-error-msg']}>{errorMessage}</div>
+        <div className={styles['totp-code']}>
+          {Array.from({ length: 6 }).map((_, index) => <span key={index}>{totpCode[index] || ''}</span>)}
+          <input autoFocus inputMode="numeric" maxLength={6} value={totpCode}
+            aria-label={uiText('6 位动态令牌')}
+            onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+            onKeyDown={(event) => { if (event.key === 'Enter') verifyTOTP(); }} />
+        </div>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Button type="primary" long loading={loading} onClick={verifyTOTP}>{uiText('验证并登录')}</Button>
+          <Button type="text" long onClick={() => { setChallengeToken(''); setErrorMessage(''); }}>{uiText('返回账号登录')}</Button>
+        </Space>
+      </> : <>
       <div className={styles['login-form-title']}>
         {registerMode ? t['login.form.register.title'] : t['login.form.title']}
       </div>
@@ -241,6 +279,7 @@ export default function LoginForm() {
           </Button>
         </Space>
       </Form>
+      </>}
     </div>
   );
 }

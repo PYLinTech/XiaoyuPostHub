@@ -30,6 +30,14 @@ type registerRequest struct {
 	Password       string `json:"password"`
 	InvitationCode string `json:"invitationCode"`
 }
+type totpLoginRequest struct {
+	ChallengeToken string `json:"challengeToken"`
+	Code           string `json:"code"`
+}
+type totpConfirmRequest struct {
+	Secret string `json:"secret"`
+	Code   string `json:"code"`
+}
 
 // apiStatusResponse 通用返回：status=ok | error，error 时 msg 必填。
 //
@@ -41,12 +49,13 @@ type apiStatusResponse struct {
 
 // userInfoResponse 只返回当前布局和权限路由实际使用的字段。
 type userInfoResponse struct {
-	ID               int64    `json:"id"`
-	Name             string   `json:"name"`
-	Avatar           string   `json:"avatar"`
-	Permissions      []string `json:"permissions"`
-	AdminPermissions []string `json:"adminPermissions"`
-	IsSuperAdmin     bool     `json:"isSuperAdmin"`
+	ID                int64    `json:"id"`
+	Name              string   `json:"name"`
+	Avatar            string   `json:"avatar"`
+	Permissions       []string `json:"permissions"`
+	AdminPermissions  []string `json:"adminPermissions"`
+	IsSuperAdmin      bool     `json:"isSuperAdmin"`
+	RequiresTOTPSetup bool     `json:"requiresTOTPSetup"`
 }
 
 const defaultUserAvatar = "/assets/default-avatar.svg"
@@ -144,6 +153,30 @@ func loginHandler(deps Deps) http.HandlerFunc {
 			writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
 			return
 		}
+		settings, settingsErr := deps.SystemSettings.Get(r.Context())
+		if settingsErr != nil {
+			writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
+			return
+		}
+		forced := settings.LoginTotpEnabled && u.HasAssignedPermission(permission.RequireLoginTOTP)
+		allowed := settings.LoginTotpEnabled && u.HasPermission(permission.UseLoginTOTP)
+		if allowed && u.TotpSecret.Valid {
+			challenge, challengeErr := deps.UserRepo.CreateTOTPChallenge(r.Context(), u.ID)
+			if challengeErr != nil {
+				writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"status": "totp_required", "challengeToken": challenge})
+			return
+		}
+		showSetupWarning := false
+		if forced && !u.TotpSecret.Valid {
+			if u.TotpGraceUsed {
+				writeJSON(w, http.StatusForbidden, apiStatusResponse{Status: "error", Msg: "账号必须先配置登录动态令牌，请联系系统管理员"})
+				return
+			}
+			showSetupWarning = true
+		}
 		token, _, err := deps.SessionRepo.Create(r.Context(), u.ID)
 		if err != nil {
 			log.Printf("创建登录会话失败：%v", err)
@@ -153,12 +186,100 @@ func loginHandler(deps Deps) http.HandlerFunc {
 			})
 			return
 		}
+		// 会话成功创建后再消耗首次放行机会，避免瞬时会话故障把用户锁在登录页外。
+		if showSetupWarning {
+			if err := deps.UserRepo.MarkTOTPGraceUsed(r.Context(), u.ID); err != nil {
+				writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
+				return
+			}
+		}
 
 		http.SetCookie(w, newSessionCookie(token, deps.CookieSecure))
 
-		writeJSON(w, http.StatusOK, apiStatusResponse{
-			Status: "ok",
-		})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requiresTOTPSetup": showSetupWarning})
+	}
+}
+
+func totpLoginHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, 405, apiStatusResponse{Status: "error", Msg: "method not allowed"})
+			return
+		}
+		var req totpLoginRequest
+		if decodeJSON(w, r, &req) != nil {
+			writeJSON(w, 400, apiStatusResponse{Status: "error", Msg: "请求格式错误"})
+			return
+		}
+		userID, err := deps.UserRepo.ConsumeTOTPChallenge(r.Context(), req.ChallengeToken, req.Code)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "动态令牌无效或已过期"})
+			return
+		}
+		u, err := deps.UserRepo.GetByID(r.Context(), userID)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "账号不可用"})
+			return
+		}
+		settings, err := deps.SystemSettings.Get(r.Context())
+		if err != nil || !settings.LoginTotpEnabled || !u.HasPermission(permission.UseLoginTOTP) {
+			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "登录动态令牌策略已变更，请重新登录"})
+			return
+		}
+		token, _, err := deps.SessionRepo.Create(r.Context(), userID)
+		if err != nil {
+			writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "创建登录会话失败"})
+			return
+		}
+		http.SetCookie(w, newSessionCookie(token, deps.CookieSecure))
+		writeJSON(w, 200, apiStatusResponse{Status: "ok"})
+	}
+}
+
+func totpSettingsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r, deps)
+		if !ok {
+			return
+		}
+		settings, err := deps.SystemSettings.Get(r.Context())
+		if err != nil {
+			writeBusinessError(w, 500, "读取动态令牌配置失败")
+			return
+		}
+		allowed := settings.LoginTotpEnabled && u.HasPermission(permission.UseLoginTOTP)
+		switch {
+		case r.Method == http.MethodGet:
+			writeJSON(w, 200, map[string]any{"status": "ok", "enabled": settings.LoginTotpEnabled, "allowed": allowed, "configured": u.TotpSecret.Valid, "required": u.HasAssignedPermission(permission.RequireLoginTOTP)})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/begin"):
+			if !allowed {
+				writeBusinessError(w, 403, "没有配置动态令牌权限")
+				return
+			}
+			setup, err := deps.UserRepo.BeginTOTPSetup(r.Context(), u.ID, settings.SiteName, u.Username)
+			if err != nil {
+				writeBusinessError(w, 500, "生成动态令牌失败")
+				return
+			}
+			writeJSON(w, 200, map[string]any{"status": "ok", "setup": setup})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/confirm"):
+			if !allowed {
+				writeBusinessError(w, 403, "没有配置动态令牌权限")
+				return
+			}
+			var req totpConfirmRequest
+			if decodeJSON(w, r, &req) != nil {
+				writeBusinessError(w, 400, "请求格式错误")
+				return
+			}
+			if err := deps.UserRepo.SaveTOTP(r.Context(), u.ID, req.Secret, req.Code); err != nil {
+				writeBusinessError(w, 400, "动态令牌校验失败")
+				return
+			}
+			writeJSON(w, 200, apiStatusResponse{Status: "ok"})
+		default:
+			writeBusinessError(w, 405, "method not allowed")
+		}
 	}
 }
 
@@ -309,7 +430,11 @@ func userInfoHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, buildUserInfoResponse(u))
+		response := buildUserInfoResponse(u)
+		if settings, settingsErr := deps.SystemSettings.Get(r.Context()); settingsErr == nil {
+			response.RequiresTOTPSetup = settings.LoginTotpEnabled && u.HasAssignedPermission(permission.RequireLoginTOTP) && !u.TotpSecret.Valid
+		}
+		writeJSON(w, http.StatusOK, response)
 	}
 }
 

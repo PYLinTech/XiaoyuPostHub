@@ -14,6 +14,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type adminSystemConfigRequest struct {
@@ -29,12 +30,26 @@ type adminSystemConfigRequest struct {
 	ShareCodeCaseSensitive       bool   `json:"shareCodeCaseSensitive"`
 	ShareCodeIncludeLetters      bool   `json:"shareCodeIncludeLetters"`
 	ShareCodeIncludeNumbers      bool   `json:"shareCodeIncludeNumbers"`
+	PickupCodeLength             int16  `json:"pickupCodeLength"`
+	PickupCodeCaseSensitive      bool   `json:"pickupCodeCaseSensitive"`
+	PickupCodeIncludeLetters     bool   `json:"pickupCodeIncludeLetters"`
+	PickupCodeIncludeNumbers     bool   `json:"pickupCodeIncludeNumbers"`
+	PickupMaxLifetimeSeconds     *int64 `json:"pickupMaxLifetimeSeconds"`
+	LoginTOTPEnabled             bool   `json:"loginTOTPEnabled"`
 	UploadRequiresReview         bool   `json:"uploadRequiresReview"`
 	CustomShareRequiresReview    bool   `json:"customShareRequiresReview"`
 	UploadChunkSizeBytes         int32  `json:"uploadChunkSizeBytes"`
 	UploadTaskChunkConcurrency   int16  `json:"uploadTaskChunkConcurrency"`
 	UploadUserTaskConcurrency    int16  `json:"uploadUserTaskConcurrency"`
 	TrashRetentionDays           int16  `json:"trashRetentionDays"`
+}
+
+func nullableInt64(value pgtype.Int8) *int64 {
+	if !value.Valid {
+		return nil
+	}
+	result := value.Int64
+	return &result
 }
 
 type adminInvitationIssueRequest struct {
@@ -201,6 +216,11 @@ func adminHandler(deps Deps) http.HandlerFunc {
 				return
 			}
 			handleAdminSiteIcon(w, r, deps, u)
+		case "homepage":
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
+				return
+			}
+			handleAdminHomepage(w, r, deps, u)
 		default:
 			writeBusinessError(w, 404, "管理接口不存在")
 		}
@@ -760,13 +780,17 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		InvitationIncludeLetters: req.InvitationCodeIncludeLetters, InvitationIncludeNumbers: req.InvitationCodeIncludeNumbers,
 		ShareLength: req.ShareCodeLength, ShareCaseSensitive: req.ShareCodeCaseSensitive,
 		ShareIncludeLetters: req.ShareCodeIncludeLetters, ShareIncludeNumbers: req.ShareCodeIncludeNumbers,
-		UploadRequiresReview: req.UploadRequiresReview, CustomShareRequiresReview: req.CustomShareRequiresReview,
+		PickupLength: req.PickupCodeLength, PickupCaseSensitive: req.PickupCodeCaseSensitive,
+		PickupIncludeLetters: req.PickupCodeIncludeLetters, PickupIncludeNumbers: req.PickupCodeIncludeNumbers,
+		PickupMaxLifetimeSeconds: req.PickupMaxLifetimeSeconds,
+		LoginTOTPEnabled:         req.LoginTOTPEnabled,
+		UploadRequiresReview:     req.UploadRequiresReview, CustomShareRequiresReview: req.CustomShareRequiresReview,
 		UploadChunkSizeBytes:       req.UploadChunkSizeBytes,
 		UploadTaskChunkConcurrency: req.UploadTaskChunkConcurrency,
 		UploadUserTaskConcurrency:  req.UploadUserTaskConcurrency,
 		TrashRetentionDays:         req.TrashRetentionDays,
 	})
-	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) {
+	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) || errors.Is(err, systemsetting.ErrPickupLifetime) {
 		writeBusinessError(w, 400, err.Error())
 		return
 	}
@@ -786,12 +810,17 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 func systemConfigResponse(settings sqlcgen.SystemSetting) map[string]any {
 	return map[string]any{
 		"status": "ok", "siteName": settings.SiteName, "siteIconUrl": currentSiteIconURL(settings.StoragePath),
-		"storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode,
+		"customHomepageConfigured": customHomepageConfigured(settings.StoragePath),
+		"storagePath":              settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode,
 		"invitationCodeLength": settings.InvitationLength, "invitationCodeCaseSensitive": settings.InvitationCaseSensitive,
 		"invitationCodeIncludeLetters": settings.InvitationIncludeLetters, "invitationCodeIncludeNumbers": settings.InvitationIncludeNumbers,
 		"shareCodeLength": settings.ShareLength, "shareCodeCaseSensitive": settings.ShareCaseSensitive,
 		"shareCodeIncludeLetters": settings.ShareIncludeLetters, "shareCodeIncludeNumbers": settings.ShareIncludeNumbers,
-		"uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview,
+		"pickupCodeLength": settings.PickupLength, "pickupCodeCaseSensitive": settings.PickupCaseSensitive,
+		"pickupCodeIncludeLetters": settings.PickupIncludeLetters, "pickupCodeIncludeNumbers": settings.PickupIncludeNumbers,
+		"pickupMaxLifetimeSeconds": nullableInt64(settings.PickupMaxLifetimeSeconds),
+		"loginTOTPEnabled":         settings.LoginTotpEnabled,
+		"uploadRequiresReview":     settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview,
 		"uploadChunkSizeBytes":       settings.UploadChunkSizeBytes,
 		"uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency,
 		"uploadUserTaskConcurrency":  settings.UploadUserTaskConcurrency,

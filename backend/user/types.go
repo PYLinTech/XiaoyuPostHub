@@ -3,6 +3,7 @@ package user
 import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/config"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 )
 
 // User 业务层用户类型，内嵌 sqlc 生成的 db.User（基础字段）+ 运行时状态。
@@ -45,8 +46,16 @@ func (u User) HasPermission(code string) bool {
 	if u.isSuperAdmin {
 		return true
 	}
+	// 强制动态令牌是允许动态令牌的更强约束；即使数据库被异常写成仅强制，
+	// 授权层仍按同时允许处理，避免用户无法进入配置页面。
+	if code == permission.UseLoginTOTP && u.permissionSet[permission.RequireLoginTOTP] {
+		return true
+	}
 	return u.permissionSet[code]
 }
+
+// HasAssignedPermission 不对超级管理员短路，用于“强制”类策略判断。
+func (u User) HasAssignedPermission(code string) bool { return u.permissionSet[code] }
 
 // GroupIDs 返回该 user 的实际 group id 列表（包括超管的 default_user）。
 // 用于展示/审计，不参与权限判断。

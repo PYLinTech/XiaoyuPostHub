@@ -42,15 +42,6 @@ WHERE token_hash = $1;
 -- name: DeleteUserSessionsByUserID :exec
 DELETE FROM user_sessions WHERE user_id = $1;
 
--- name: TrimUserSessions :exec
-DELETE FROM user_sessions AS target WHERE target.id IN (
-    SELECT retained.id
-    FROM user_sessions AS retained
-    WHERE retained.user_id = $1
-    ORDER BY retained.created_at DESC
-    OFFSET 10
-);
-
 -- name: GetLoginRetryAfter :one
 WITH dimensions AS (
     SELECT COUNT(*)::BIGINT AS failure_count, MAX(failed_at) AS last_failed_at

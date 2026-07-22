@@ -86,11 +86,13 @@ function saveBlob(blob: Blob, name: string) {
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-export default function PublicSharePage() {
+export default function PublicSharePage({ pickupCode }: { pickupCode?: string }) {
   const { token } = useParams<{
     token: string;
   }>();
   const { siteName, siteIconUrl } = useContext(GlobalContext);
+  const identifier = pickupCode || token;
+  const apiBase = pickupCode ? '/api/pickups' : '/api/shares';
   const [metadata, setMetadata] = useState<ShareMetadata>();
   const [password, setPassword] = useState('');
   const [activePassword, setActivePassword] = useState('');
@@ -123,7 +125,7 @@ export default function PublicSharePage() {
     setError('');
     try {
       const response = await axios.get<ShareMetadata>(
-        `/api/shares/${encodeURIComponent(token)}`,
+        `${apiBase}/${encodeURIComponent(identifier)}`,
         {
           headers: sharePassword
             ? {
@@ -164,7 +166,7 @@ export default function PublicSharePage() {
     loadMetadata();
     // token 变化时重新载入公开分享。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
+  }, [identifier]);
   useEffect(
     () => () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -189,7 +191,7 @@ export default function PublicSharePage() {
         return;
       }
       const response = await axios.get(
-        `/api/shares/${encodeURIComponent(token)}/preview`,
+        `${apiBase}/${encodeURIComponent(identifier)}/preview`,
         {
           responseType: 'blob',
           headers: activePassword
@@ -307,7 +309,7 @@ export default function PublicSharePage() {
           <img src={siteIconUrl || logoUrl} alt={uiText('站点图标')} />
           <span>{siteName || 'XiaoyuPostHub'}</span>
         </div>
-        <span className={styles['header-label']}>{uiText('文件分享')}</span>
+        <span className={styles['header-label']}>{uiText(pickupCode ? '取件码' : '文件分享')}</span>
       </header>
 
       <main className={styles.main}>

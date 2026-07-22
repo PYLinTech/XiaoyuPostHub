@@ -1,6 +1,6 @@
-import React, { Suspense, useContext, useState } from 'react';
+import React, { Suspense, useContext, useEffect, useState } from 'react';
 import { Redirect, Route, Switch, useHistory } from 'react-router-dom';
-import { Layout, Menu, Spin } from '@arco-design/web-react';
+import { Button, Layout, Menu, Modal, Spin } from '@arco-design/web-react';
 import cs from 'classnames';
 import {
   IconClose,
@@ -68,6 +68,10 @@ function PageLayout() {
   );
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuVisible, setMobileMenuVisible] = useState(false);
+  const [totpWarningVisible, setTOTPWarningVisible] = useState(false);
+  useEffect(() => {
+    if (userInfo?.requiresTOTPSetup) setTOTPWarningVisible(true);
+  }, [userInfo?.requiresTOTPSetup]);
   const menuWidth = collapsed ? 48 : projectSettings.menuWidth;
   function openRoute(key: string) {
     history.push(`/${key}`);
@@ -82,6 +86,14 @@ function PageLayout() {
   }
   return (
     <UploadProvider>
+      <Modal title={uiText('请配置登录动态令牌')} visible={totpWarningVisible} footer={null}
+        closable={false} maskClosable={false}>
+        <p>{uiText('管理员已要求你的用户组使用登录动态令牌。你本次仍可继续使用，但下一次登录将强制验证，请务必现在完成配置。')}</p>
+        <Button type="primary" long onClick={() => {
+          setTOTPWarningVisible(false);
+          window.dispatchEvent(new Event('xph-open-user-settings'));
+        }}>{uiText('去配置')}</Button>
+      </Modal>
       <Layout className={styles.layout}>
         <div className={styles['layout-navbar']}>
           <Navbar

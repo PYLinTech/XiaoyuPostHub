@@ -25,21 +25,38 @@ function SystemConfig() {
   const [form] = Form.useForm();
   const { setSiteConfig } = useContext(GlobalContext);
   const iconInputRef = useRef<HTMLInputElement>();
+  const homepageInputRef = useRef<HTMLInputElement>();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [iconUploading, setIconUploading] = useState(false);
+  const [homepageUploading, setHomepageUploading] = useState(false);
   const [chunkTesting, setChunkTesting] = useState(false);
   const [iconUrl, setIconUrl] = useState('');
+  const [customHomepageConfigured, setCustomHomepageConfigured] =
+    useState(false);
+  const [customHomepageEnabled, setCustomHomepageEnabled] = useState(false);
+  const [customHomepageHTML, setCustomHomepageHTML] = useState('');
   useEffect(() => {
     axios
       .get('/api/admin/system-config')
       .then((res) => {
         form.setFieldsValue({
           ...res.data,
+          pickupLifetimeHours:
+            res.data.pickupMaxLifetimeSeconds == null
+              ? 0
+              : res.data.pickupMaxLifetimeSeconds / 3600,
           uploadChunkSizeMB:
             (res.data.uploadChunkSizeBytes || 8 * 1024 * 1024) / 1024 / 1024,
         });
         setIconUrl(res.data.siteIconUrl || '');
+        setCustomHomepageConfigured(Boolean(res.data.customHomepageConfigured));
+        setCustomHomepageEnabled(Boolean(res.data.customHomepageConfigured));
+        if (res.data.customHomepageConfigured) {
+          axios.get('/api/admin/homepage').then((homepageRes) => {
+            setCustomHomepageHTML(homepageRes.data.html || '');
+          }).catch(() => Message.error(uiText('自定义首页内容加载失败')));
+        }
       })
       .catch(() => Message.error(uiText('系统配置加载失败')))
       .finally(() => setLoading(false));
@@ -50,17 +67,24 @@ function SystemConfig() {
       (!values.invitationCodeIncludeLetters &&
         !values.invitationCodeIncludeNumbers) ||
       (!values.shareCodeIncludeLetters && !values.shareCodeIncludeNumbers)
+      || (!values.pickupCodeIncludeLetters && !values.pickupCodeIncludeNumbers)
     ) {
       Message.error(uiText('邀请码和分享码都必须至少包含字母或数字'));
       throw new Error('invalid random code charset');
     }
-    const { uploadChunkSizeMB, ...payload } = values;
+    const { uploadChunkSizeMB, pickupLifetimeHours, ...payload } = values;
     const res = await axios.put('/api/admin/system-config', {
       ...payload,
+      pickupMaxLifetimeSeconds:
+        pickupLifetimeHours > 0 ? Math.round(pickupLifetimeHours * 3600) : null,
       uploadChunkSizeBytes: uploadChunkSizeMB * 1024 * 1024,
     });
     form.setFieldsValue({
       ...res.data,
+      pickupLifetimeHours:
+        res.data.pickupMaxLifetimeSeconds == null
+          ? 0
+          : res.data.pickupMaxLifetimeSeconds / 3600,
       uploadChunkSizeMB: res.data.uploadChunkSizeBytes / 1024 / 1024,
     });
     setIconUrl(res.data.siteIconUrl || '');
@@ -125,6 +149,51 @@ function SystemConfig() {
       Message.error(error?.response?.data?.msg || uiText('恢复默认图标失败'));
     } finally {
       setIconUploading(false);
+    }
+  };
+  const loadHomepageFile = async (file: File) => {
+    try {
+      setCustomHomepageHTML(await file.text());
+      setCustomHomepageEnabled(true);
+      Message.success(uiText('HTML 文件已读取，请确认内容后保存'));
+    } catch (error) {
+      Message.error(uiText('HTML 文件读取失败'));
+    } finally {
+      if (homepageInputRef.current) homepageInputRef.current.value = '';
+    }
+  };
+  const saveHomepageHTML = async () => {
+    if (!customHomepageHTML.trim()) {
+      Message.warning(uiText('请输入自定义首页 HTML'));
+      return;
+    }
+    try {
+      setHomepageUploading(true);
+      await persistConfig(false);
+      const res = await axios.post('/api/admin/homepage', {
+        html: customHomepageHTML,
+      });
+      setCustomHomepageConfigured(Boolean(res.data.customHomepageConfigured));
+      setCustomHomepageEnabled(true);
+      Message.success(uiText('自定义首页已保存并实时生效'));
+    } catch (error) {
+      Message.error(error?.response?.data?.msg || uiText('首页保存失败'));
+    } finally {
+      setHomepageUploading(false);
+    }
+  };
+  const removeHomepage = async () => {
+    try {
+      setHomepageUploading(true);
+      await axios.delete('/api/admin/homepage');
+      setCustomHomepageConfigured(false);
+      setCustomHomepageEnabled(false);
+      setCustomHomepageHTML('');
+      Message.success(uiText('已恢复默认首页行为'));
+    } catch (error) {
+      Message.error(error?.response?.data?.msg || uiText('恢复默认首页失败'));
+    } finally {
+      setHomepageUploading(false);
     }
   };
   const testUploadChunk = async () => {
@@ -229,9 +298,78 @@ function SystemConfig() {
                     </div>
                   </div>
                   <Text type="secondary" className={styles['site-icon-hint']}>
-                    {uiText('支持 SVG、PNG、JPEG、WebP，最大 2MB。')}
+                    {uiText('支持 SVG、PNG、JPEG 和 WebP。')}
                   </Text>
                 </FormItem>
+                <FormItem label={uiText('自定义首页')}>
+                  <Checkbox checked={customHomepageEnabled} disabled={homepageUploading} onChange={(checked) => {
+                    if (checked) setCustomHomepageEnabled(true);
+                    else if (customHomepageConfigured) removeHomepage();
+                    else setCustomHomepageEnabled(false);
+                  }}>{uiText('启用自定义首页')}</Checkbox>
+                  {customHomepageEnabled && <>
+                    <Input.TextArea
+                      value={customHomepageHTML}
+                      onChange={setCustomHomepageHTML}
+                      autoSize={{ minRows: 8, maxRows: 18 }}
+                      placeholder={uiText('在此粘贴完整的 HTML 内容')}
+                      style={{ marginTop: 12, fontFamily: 'monospace' }}
+                    />
+                    <div className={styles['site-icon-actions']} style={{ marginTop: 12 }}>
+                    <input
+                      ref={homepageInputRef}
+                      type="file"
+                      accept="text/html,.html,.htm"
+                      hidden
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) loadHomepageFile(file);
+                      }}
+                    />
+                    <Button
+                      icon={<IconUpload />}
+                      onClick={() => homepageInputRef.current?.click()}
+                    >
+                      {uiText('从 HTML 文件填充')}
+                    </Button>
+                    <Button
+                      type="primary"
+                      icon={<IconSave />}
+                      loading={homepageUploading}
+                      onClick={saveHomepageHTML}
+                    >
+                      {uiText('保存填写内容')}
+                    </Button>
+                    {customHomepageConfigured && (
+                      <Button
+                        status="danger"
+                        icon={<IconDelete />}
+                        disabled={homepageUploading}
+                        onClick={removeHomepage}
+                      >
+                        {uiText('恢复默认')}
+                      </Button>
+                    )}
+                    </div>
+                  </>}
+                  <Text type="secondary" className={styles['site-icon-hint']}>
+                    {customHomepageConfigured
+                      ? uiText('当前已启用自定义首页。')
+                      : uiText('未配置时访问首页将跳转到登录页面。')}
+                    {uiText('支持单个 HTML 文件，可包含内嵌 CSS 和 JavaScript。')}
+                    {uiText('建议为登录页 /login、取件码 /m 等设计对应入口！')}
+                  </Text>
+                </FormItem>
+                <FormItem field="loginTOTPEnabled" triggerPropName="checked">
+                  <Checkbox>{uiText('登录动态令牌')}</Checkbox>
+                </FormItem>
+                <Form.Item shouldUpdate noStyle>
+                  {(values) => values.loginTOTPEnabled ? (
+                    <Button onClick={() => { window.location.href = '/admin/access?tab=permissions'; }}>
+                      {uiText('按用户组配置')}
+                    </Button>
+                  ) : null}
+                </Form.Item>
               </div>
               <div className={styles['config-section']}>
                 <div className={styles['config-section-header']}>
@@ -384,6 +522,21 @@ function SystemConfig() {
                         <Checkbox>{uiText('包含数字')}</Checkbox>
                       </FormItem>
                     </div>
+                  </div>
+                  <div className={styles['random-code-group']}>
+                    <Typography.Title heading={6}>{uiText('取件码')}</Typography.Title>
+                    <FormItem label={uiText('位数')} field="pickupCodeLength" rules={[{ required: true }]}>
+                      <InputNumber min={1} max={64} precision={0} />
+                    </FormItem>
+                    <div className={styles['random-code-options']}>
+                      <FormItem field="pickupCodeCaseSensitive" triggerPropName="checked"><Checkbox>{uiText('区分大小写')}</Checkbox></FormItem>
+                      <FormItem field="pickupCodeIncludeLetters" triggerPropName="checked"><Checkbox>{uiText('包含字母')}</Checkbox></FormItem>
+                      <FormItem field="pickupCodeIncludeNumbers" triggerPropName="checked"><Checkbox>{uiText('包含数字')}</Checkbox></FormItem>
+                    </div>
+                    <FormItem label={uiText('取件码有效期')} field="pickupLifetimeHours" rules={[{ required: true }]}>
+                      <InputNumber min={0} precision={2} suffix={uiText('小时')} />
+                      <Text type="secondary">{uiText('所有取件码统一使用该有效期；填写 0 表示永久有效')}</Text>
+                    </FormItem>
                   </div>
                   <div className={styles['random-code-group']}>
                     <Typography.Title heading={6}>

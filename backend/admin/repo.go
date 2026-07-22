@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"net"
 	"strings"
 	"syscall"
@@ -506,6 +507,15 @@ func (r *Repo) ListAccessGroups(ctx context.Context) ([]AccessGroupItem, error) 
 }
 
 func (r *Repo) SetGroupPermissions(ctx context.Context, groupID int64, codes []string) error {
+	// “强制使用”必然包含“允许使用”，服务端兜底修正异常客户端请求。
+	hasRequired, hasAllowed := false, false
+	for _, code := range codes {
+		hasRequired = hasRequired || code == permission.RequireLoginTOTP
+		hasAllowed = hasAllowed || code == permission.UseLoginTOTP
+	}
+	if hasRequired && !hasAllowed {
+		codes = append(codes, permission.UseLoginTOTP)
+	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err

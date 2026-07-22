@@ -53,7 +53,7 @@ func NewRouter(staticDir string, deps Deps) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", APIHandler(deps))
 	// API 必须保留结构化 JSON 错误；浏览器静态页面继续使用内置 HTML 错误页。
-	mux.Handle("/", WithErrorPage(staticH))
+	mux.Handle("/", WithErrorPage(homePageHandler(deps, staticH)))
 	return mux, nil
 }
 
@@ -77,6 +77,10 @@ func APIHandler(deps Deps) http.Handler {
 	}
 
 	mux.HandleFunc("/api/user/login", loginHandler(deps))
+	mux.HandleFunc("/api/user/login/totp", totpLoginHandler(deps))
+	mux.HandleFunc("/api/user/totp", totpSettingsHandler(deps))
+	mux.HandleFunc("/api/user/totp/begin", totpSettingsHandler(deps))
+	mux.HandleFunc("/api/user/totp/confirm", totpSettingsHandler(deps))
 	mux.HandleFunc("/api/user/register", registerHandler(deps))
 	mux.HandleFunc("/api/user/registration-settings", registrationSettingsHandler(deps))
 	mux.HandleFunc("/api/user/userInfo", userInfoHandler(deps))
@@ -103,6 +107,7 @@ func APIHandler(deps Deps) http.Handler {
 		mux.HandleFunc("/api/shares/manage", shareBatchManageHandler(deps))
 		mux.HandleFunc("/api/shares/manage/", shareManageHandler(deps))
 		mux.HandleFunc("/api/shares/", publicShareHandler(deps))
+		mux.HandleFunc("/api/pickups/", publicPickupHandler(deps))
 		mux.HandleFunc("/api/direct-links", createDirectLinkHandler(deps))
 		mux.HandleFunc("/api/direct-links/manage", directLinkBatchManageHandler(deps))
 		mux.HandleFunc("/api/direct-links/manage/", directLinkManageHandler(deps))

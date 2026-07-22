@@ -7,6 +7,7 @@ export interface UserInfo {
   permissions?: string[];
   adminPermissions?: string[];
   isSuperAdmin?: boolean;
+  requiresTOTPSetup?: boolean;
 }
 
 export const GlobalContext = createContext<{

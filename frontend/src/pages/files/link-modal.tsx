@@ -22,8 +22,11 @@ interface Props {
   resources: ResourceItem[];
   visible: boolean;
   onClose: () => void;
+  allowLinkShare?: boolean;
+  allowPickupShare?: boolean;
 }
 const expiryOptions = () => [
+  { label: uiText('1 小时'), value: '3600' },
   {
     label: uiText('1 天'),
     value: '86400',
@@ -46,10 +49,13 @@ export default function LinkModal({
   resources,
   visible,
   onClose,
+  allowLinkShare = true,
+  allowPickupShare = true,
 }: Props) {
   const resource = resources[0];
   const resourceKey = resources.map((item) => item.id).join(',');
   const [expiry, setExpiry] = useState('86400');
+  const [shareType, setShareType] = useState<'link' | 'pickup'>('link');
   const [downloadLimit, setDownloadLimit] = useState<number>();
   const [trafficGB, setTrafficGB] = useState<number>();
   const [passwordMode, setPasswordMode] = useState('random');
@@ -61,19 +67,21 @@ export default function LinkModal({
   const [result, setResult] = useState<{
     url: string;
     generatedPassword?: string;
+    pickupCode?: string;
   }>();
   useEffect(() => {
     if (!visible) return;
-    setExpiry('86400');
+    setExpiry(allowLinkShare ? '86400' : '3600');
+    setShareType(allowLinkShare ? 'link' : 'pickup');
     setDownloadLimit(undefined);
     setTrafficGB(undefined);
-    setPasswordMode('random');
+    setPasswordMode(allowLinkShare ? 'random' : 'none');
     setPassword('');
     setShowOwner(false);
     setDescriptionFormat('markdown');
     setDescription('');
     setResult(undefined);
-  }, [visible, resourceKey, mode]);
+  }, [visible, resourceKey, mode, allowLinkShare, allowPickupShare]);
   const create = async () => {
     if (!resource) return;
     if (
@@ -90,7 +98,9 @@ export default function LinkModal({
     setLoading(true);
     try {
       const common = {
-        expiresInSeconds: Number(expiry),
+        ...(mode === 'share' && shareType === 'pickup'
+          ? {}
+          : { expiresInSeconds: Number(expiry) }),
         downloadLimit: downloadLimit ?? null,
         trafficLimitBytes:
           trafficGB == null ? null : Math.round(trafficGB * 1024 * 1024 * 1024),
@@ -99,6 +109,7 @@ export default function LinkModal({
         mode === 'share'
           ? await axios.post('/api/shares', {
               ...common,
+              shareType,
               resourceIds: resources.map((item) => item.id),
               noPassword: passwordMode === 'none',
               ...(passwordMode === 'custom'
@@ -115,8 +126,11 @@ export default function LinkModal({
               resourceId: resource.id,
             });
       setResult({
-        url: new URL(response.data.url, window.location.origin).toString(),
+        url: response.data.url
+          ? new URL(response.data.url, window.location.origin).toString()
+          : '',
         generatedPassword: response.data.generatedPassword,
+        pickupCode: response.data.pickupCode,
       });
     } catch (error) {
       Message.error(
@@ -166,14 +180,27 @@ export default function LinkModal({
             {mode === 'share' ? uiText('分享已生成') : uiText('直链已生成')}
           </Typography.Title>
           <Typography.Text type="secondary">
-            {uiText('完整链接仅在生成后提供，请及时保存。')}
+            {result.pickupCode
+              ? uiText('取件码仅在生成后提供，请及时保存。')
+              : uiText('完整链接仅在生成后提供，请及时保存。')}
           </Typography.Text>
-          <div className={styles['result-line']}>
-            <code>{result.url}</code>
-            <Button icon={<IconCopy />} onClick={() => copyText(result.url)}>
-              {uiText('复制')}
-            </Button>
-          </div>
+          {result.pickupCode ? (
+            <>
+              <div className={styles['result-line']}>
+                <code>{uiText('取件码')}：{result.pickupCode}</code>
+                <Button icon={<IconCopy />} onClick={() => copyText(result.pickupCode as string)}>{uiText('复制')}</Button>
+              </div>
+              <div className={styles['result-line']}>
+                <code>{uiText('取件页面')}：{result.url}</code>
+                <Button icon={<IconCopy />} onClick={() => copyText(result.url)}>{uiText('复制链接')}</Button>
+              </div>
+            </>
+          ) : (
+            <div className={styles['result-line']}>
+              <code>{result.url}</code>
+              <Button icon={<IconCopy />} onClick={() => copyText(result.url)}>{uiText('复制')}</Button>
+            </div>
+          )}
           {result.generatedPassword && (
             <div className={styles['result-line']}>
               <code>
@@ -191,6 +218,23 @@ export default function LinkModal({
         </div>
       ) : (
         <div className={styles['modal-grid']}>
+          {mode === 'share' && allowLinkShare && allowPickupShare && (
+            <div className={`${styles['modal-field']} ${styles.wide}`}>
+              <Typography.Text>{uiText('分享方式')}</Typography.Text>
+              <Radio.Group type="button" value={shareType} onChange={(value) => {
+                setShareType(value);
+                if (value === 'link') {
+                  setExpiry('86400');
+                  setPasswordMode('random');
+                } else {
+                  setPasswordMode('none');
+                }
+              }}>
+                <Radio value="link">{uiText('链接')}</Radio>
+                <Radio value="pickup">{uiText('取件码')}</Radio>
+              </Radio.Group>
+            </div>
+          )}
           {resources.length === 1 && (
             <div className={`${styles['modal-field']} ${styles.wide}`}>
               <Typography.Text type="secondary">
@@ -199,18 +243,19 @@ export default function LinkModal({
               <Typography.Text bold>{resource?.name}</Typography.Text>
             </div>
           )}
-          <div className={styles['modal-field']}>
+          {shareType !== 'pickup' && <div className={styles['modal-field']}>
             <Typography.Text>{uiText('有效期')}</Typography.Text>
             <Select
               value={expiry}
               options={expiryOptions()}
               onChange={setExpiry}
             />
-          </div>
+          </div>}
           <div className={styles['modal-field']}>
             <Typography.Text>{uiText('下载次数限制')}</Typography.Text>
             <InputNumber
               min={1}
+              precision={0}
               placeholder={uiText('不限制')}
               value={downloadLimit}
               onChange={setDownloadLimit}

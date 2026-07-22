@@ -74,7 +74,7 @@ func seedDefaultUserGroup(ctx context.Context, q *sqlcgen.Queries) error {
 		}
 		defaults := []string{
 			permission.Login, permission.Upload, permission.Download, permission.Preview,
-			permission.Rename, permission.DeleteOwn, permission.Share, permission.DirectLink,
+			permission.Rename, permission.DeleteOwn, permission.Share, permission.PickupShare, permission.DirectLink,
 		}
 		for _, code := range defaults {
 			if err := q.InsertDefaultGroupPermissionIfMissing(ctx, sqlcgen.InsertDefaultGroupPermissionIfMissingParams{
