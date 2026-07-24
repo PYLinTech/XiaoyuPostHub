@@ -102,16 +102,83 @@ export default function DirectLinksPage() {
   const columns = [
     {
       title: uiText('直链内容'),
-      render: (_, item: DirectLinkItem) => (
-        <div className={styles['resource-name']}>
-          <ResourceIcon kind={item.resource.kind} />
-          <span>{item.resource.name}</span>
-        </div>
-      ),
+      render: (_, item: DirectLinkItem) => {
+        const status = linkStatus(item);
+        const url = item.url
+          ? new URL(item.url, window.location.origin).toString()
+          : uiText('旧记录不可恢复');
+        return (
+          <div className={styles['resource-name']}>
+            <ResourceIcon kind={item.resource.kind} />
+            <div className={styles['resource-main']}>
+              <span className={styles['share-resource-title']}>
+                {item.resource.name}
+              </span>
+              <div className={styles['share-mobile-meta']}>
+                <div className={styles['share-mobile-value']}>
+                  <span className={styles['share-mobile-label']}>
+                    {uiText('直链地址：')}
+                  </span>
+                  <span className={styles['share-mobile-code']}>
+                    <code title={url}>{url}</code>
+                    {item.url && (
+                      <Tooltip content={uiText('复制直链')}>
+                        <Button
+                          className={styles['share-copy-button']}
+                          size="small"
+                          type="text"
+                          icon={<IconCopy />}
+                          aria-label={uiText('复制直链')}
+                          onClick={() => copyValue(url)}
+                        />
+                      </Tooltip>
+                    )}
+                  </span>
+                </div>
+                <div className={styles['share-mobile-details']}>
+                  <span>
+                    {uiText('状态')}：{status.text}
+                  </span>
+                  <span>
+                    {uiText('下载次数')}：{item.downloadCount} /{' '}
+                    {item.downloadLimit ?? uiText('不限')}
+                  </span>
+                  <span>
+                    {uiText('下载流量')}：
+                    {formatBytes(item.trafficUsedBytes)} /{' '}
+                    {item.trafficLimitBytes == null
+                      ? uiText('不限')
+                      : formatBytes(item.trafficLimitBytes)}
+                  </span>
+                  <span>
+                    {uiText('有效期至')}：
+                    {item.expiresAt
+                      ? formatTime(item.expiresAt)
+                      : uiText('永久')}
+                  </span>
+                  <span>
+                    {uiText('创建时间')}：{formatTime(item.createdAt)}
+                  </span>
+                </div>
+                <Button
+                  className={styles['share-mobile-config']}
+                  type="text"
+                  size="small"
+                  icon={<IconEdit />}
+                  onClick={() => setEditing(item)}
+                >
+                  {uiText('配置')}
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      },
     },
     {
       title: uiText('直链地址'),
       width: 360,
+      className: styles['mobile-hidden'],
       render: (_, item: DirectLinkItem) => {
         if (!item.url)
           return (
@@ -140,6 +207,7 @@ export default function DirectLinksPage() {
     {
       title: uiText('状态'),
       width: 110,
+      className: styles['mobile-hidden'],
       render: (_, item) => {
         const status = linkStatus(item);
         return <Tag color={status.color}>{status.text}</Tag>;
@@ -148,12 +216,14 @@ export default function DirectLinksPage() {
     {
       title: uiText('下载次数'),
       width: 140,
+      className: styles['mobile-hidden'],
       render: (_, item) =>
         `${item.downloadCount} / ${item.downloadLimit ?? uiText('不限')}`,
     },
     {
       title: uiText('下载流量'),
       width: 180,
+      className: styles['mobile-hidden'],
       render: (_, item) =>
         `${formatBytes(item.trafficUsedBytes)} / ${
           item.trafficLimitBytes == null
@@ -164,12 +234,14 @@ export default function DirectLinksPage() {
     {
       title: uiText('有效期至'),
       width: 210,
+      className: styles['mobile-hidden'],
       dataIndex: 'expiresAt',
       render: (value) => (value ? formatTime(value) : uiText('永久')),
     },
     {
       title: uiText('创建时间'),
       width: 210,
+      className: styles['mobile-hidden'],
       dataIndex: 'createdAt',
       render: formatTime,
     },
@@ -177,6 +249,7 @@ export default function DirectLinksPage() {
       title: uiText('操作'),
       width: 90,
       fixed: 'right' as const,
+      className: styles['mobile-hidden'],
       render: (_, item: DirectLinkItem) => (
         <Button
           type="text"
@@ -237,6 +310,7 @@ export default function DirectLinksPage() {
           </Typography.Text>
         </div>
         <Table
+          className={styles['share-table']}
           rowKey="id"
           loading={loading}
           columns={columns}

@@ -390,7 +390,10 @@ func (r *Repo) ResetUserPassword(ctx context.Context, userID int64, passwordHash
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var username string
-	if err := tx.QueryRow(ctx, `UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING username`, userID, passwordHash).Scan(&username); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `
+		UPDATE users
+		SET password_hash=$2,totp_secret=NULL,totp_grace_used=FALSE
+		WHERE id=$1 RETURNING username`, userID, passwordHash).Scan(&username); errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrUserNotFound
 	} else if err != nil {
 		return "", err
@@ -398,7 +401,40 @@ func (r *Repo) ResetUserPassword(ctx context.Context, userID int64, passwordHash
 	if _, err := tx.Exec(ctx, `DELETE FROM user_sessions WHERE user_id=$1`, userID); err != nil {
 		return "", err
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM login_totp_challenges WHERE user_id=$1`, userID); err != nil {
+		return "", err
+	}
 	return username, tx.Commit(ctx)
+}
+
+func (r *Repo) ListTOTPPolicyGroups(ctx context.Context) (allowed, required []string, err error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT g.name,
+		       BOOL_OR(gp.permission=$1) AS allowed,
+		       BOOL_OR(gp.permission=$2) AS required
+		FROM user_groups g
+		JOIN group_permissions gp ON gp.group_id=g.id
+		WHERE gp.permission IN ($1,$2)
+		GROUP BY g.id,g.name
+		ORDER BY g.name`, permission.UseLoginTOTP, permission.RequireLoginTOTP)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var hasAllowed, hasRequired bool
+		if err := rows.Scan(&name, &hasAllowed, &hasRequired); err != nil {
+			return nil, nil, err
+		}
+		if hasAllowed || hasRequired {
+			allowed = append(allowed, name)
+		}
+		if hasRequired {
+			required = append(required, name)
+		}
+	}
+	return allowed, required, rows.Err()
 }
 
 func (r *Repo) SetUserDisabled(ctx context.Context, userID int64, disabled bool) (string, error) {
@@ -596,20 +632,6 @@ func (r *Repo) GetReviewSettings(ctx context.Context) (ReviewSettings, error) {
 		&out.UploadRequiresReview, &out.CustomShareRequiresReview,
 	)
 	return out, err
-}
-
-func (r *Repo) MarkFilePending(ctx context.Context, resourceID, uploadTaskID string) error {
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO file_moderations(resource_id,owner_user_id,file_name,size_bytes,mime_type,upload_task_id,status,reason,submitted_at,reviewed_at,reviewer_user_id)
-		SELECT resource.id,resource.owner_user_id,resource.name,resource.size_bytes,resource.mime_type,
-		       COALESCE(NULLIF($2,''),resource.id),'pending','',NOW(),NULL,NULL
-		FROM resources resource
-		WHERE resource.id=$1
-		ON CONFLICT(resource_id) DO UPDATE SET
-		owner_user_id=EXCLUDED.owner_user_id,file_name=EXCLUDED.file_name,size_bytes=EXCLUDED.size_bytes,
-		mime_type=EXCLUDED.mime_type,upload_task_id=EXCLUDED.upload_task_id,status='pending',reason='',
-		delete_file=FALSE,blocked=FALSE,submitted_at=NOW(),reviewed_at=NULL,reviewer_user_id=NULL`, resourceID, uploadTaskID)
-	return err
 }
 
 func (r *Repo) MarkSharePending(ctx context.Context, shareID int64) error {

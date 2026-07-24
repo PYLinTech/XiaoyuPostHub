@@ -44,7 +44,7 @@ function SystemConfig() {
           ...res.data,
           pickupLifetimeHours:
             res.data.pickupMaxLifetimeSeconds == null
-              ? 0
+              ? undefined
               : res.data.pickupMaxLifetimeSeconds / 3600,
           uploadChunkSizeMB:
             (res.data.uploadChunkSizeBytes || 8 * 1024 * 1024) / 1024 / 1024,
@@ -76,14 +76,16 @@ function SystemConfig() {
     const res = await axios.put('/api/admin/system-config', {
       ...payload,
       pickupMaxLifetimeSeconds:
-        pickupLifetimeHours > 0 ? Math.round(pickupLifetimeHours * 3600) : null,
+        pickupLifetimeHours == null || pickupLifetimeHours === ''
+          ? null
+          : pickupLifetimeHours * 3600,
       uploadChunkSizeBytes: uploadChunkSizeMB * 1024 * 1024,
     });
     form.setFieldsValue({
       ...res.data,
       pickupLifetimeHours:
         res.data.pickupMaxLifetimeSeconds == null
-          ? 0
+          ? undefined
           : res.data.pickupMaxLifetimeSeconds / 3600,
       uploadChunkSizeMB: res.data.uploadChunkSizeBytes / 1024 / 1024,
     });
@@ -340,16 +342,6 @@ function SystemConfig() {
                     >
                       {uiText('保存填写内容')}
                     </Button>
-                    {customHomepageConfigured && (
-                      <Button
-                        status="danger"
-                        icon={<IconDelete />}
-                        disabled={homepageUploading}
-                        onClick={removeHomepage}
-                      >
-                        {uiText('恢复默认')}
-                      </Button>
-                    )}
                     </div>
                   </>}
                   <Text type="secondary" className={styles['site-icon-hint']}>
@@ -360,16 +352,6 @@ function SystemConfig() {
                     {uiText('建议为登录页 /login、取件码 /m 等设计对应入口！')}
                   </Text>
                 </FormItem>
-                <FormItem field="loginTOTPEnabled" triggerPropName="checked">
-                  <Checkbox>{uiText('登录动态令牌')}</Checkbox>
-                </FormItem>
-                <Form.Item shouldUpdate noStyle>
-                  {(values) => values.loginTOTPEnabled ? (
-                    <Button onClick={() => { window.location.href = '/admin/access?tab=permissions'; }}>
-                      {uiText('按用户组配置')}
-                    </Button>
-                  ) : null}
-                </Form.Item>
               </div>
               <div className={styles['config-section']}>
                 <div className={styles['config-section-header']}>
@@ -435,6 +417,31 @@ function SystemConfig() {
                     '单任务并发数控制一个文件同时上传的分片数，单用户任务并发数控制同时上传的文件数。'
                   )}
                 </Text>
+              </div>
+              <div className={styles['config-section']}>
+                <div className={styles['config-title']}>
+                  {uiText('登录动态令牌')}
+                </div>
+                <FormItem field="loginTOTPEnabled" triggerPropName="checked">
+                  <Checkbox>{uiText('启用登录动态令牌')}</Checkbox>
+                </FormItem>
+                <Form.Item shouldUpdate noStyle>
+                  {(values) => values.loginTOTPEnabled ? (
+                    <>
+                      <Button onClick={() => { window.location.href = '/admin/access?tab=permissions'; }}>
+                        {uiText('前往配置用户组权限')}
+                      </Button>
+                      <div style={{ marginTop: 8, minWidth: 0 }}>
+                        <Text type="secondary" ellipsis={{ showTooltip: true }} style={{ display: 'block' }}>
+                          {uiText('当前允许使用的用户组：')}{(values.loginTOTPAllowedGroups || []).join('、') || uiText('无')}
+                        </Text>
+                        <Text type="secondary" ellipsis={{ showTooltip: true }} style={{ display: 'block' }}>
+                          {uiText('强制使用的用户组：')}{(values.loginTOTPRequiredGroups || []).join('、') || uiText('无')}
+                        </Text>
+                      </div>
+                    </>
+                  ) : null}
+                </Form.Item>
               </div>
               <div className={styles['config-section']}>
                 <div className={styles['config-title']}>{uiText('回收站')}</div>
@@ -533,9 +540,8 @@ function SystemConfig() {
                       <FormItem field="pickupCodeIncludeLetters" triggerPropName="checked"><Checkbox>{uiText('包含字母')}</Checkbox></FormItem>
                       <FormItem field="pickupCodeIncludeNumbers" triggerPropName="checked"><Checkbox>{uiText('包含数字')}</Checkbox></FormItem>
                     </div>
-                    <FormItem label={uiText('取件码有效期')} field="pickupLifetimeHours" rules={[{ required: true }]}>
-                      <InputNumber min={0} precision={2} suffix={uiText('小时')} />
-                      <Text type="secondary">{uiText('所有取件码统一使用该有效期；填写 0 表示永久有效')}</Text>
+                    <FormItem label={uiText('取件码有效期')} field="pickupLifetimeHours" rules={[{ type: 'integer', min: 1 }]}>
+                      <InputNumber min={1} step={1} precision={0} suffix={uiText('小时')} placeholder={uiText('永久有效')} />
                     </FormItem>
                   </div>
                   <div className={styles['random-code-group']}>

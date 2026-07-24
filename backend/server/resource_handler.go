@@ -327,6 +327,8 @@ func writeResourceMutationError(w http.ResponseWriter, err error) {
 		writeBusinessError(w, http.StatusBadRequest, "名称不合法")
 	case errors.Is(err, resource.ErrNotFound), errors.Is(err, resource.ErrNotFolder), errors.Is(err, resource.ErrOwnerMismatch):
 		writeBusinessError(w, http.StatusNotFound, "父文件夹不存在")
+	case errors.Is(err, resource.ErrNameConflict):
+		writeBusinessError(w, http.StatusConflict, "同一目录下已存在同名资源")
 	case errors.As(err, &pgErr) && pgErr.Code == "23505":
 		writeBusinessError(w, http.StatusConflict, "同一目录下已存在同名资源")
 	default:

@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"net"
 	"net/http"
@@ -262,7 +263,8 @@ func notifyFileReview(r *http.Request, deps Deps, item admin.FileReviewItem, req
 			body += "该文件已被拉黑，无法继续使用。"
 		}
 	}
-	_, _ = deps.InboxRepo.InsertUser(r.Context(), item.OwnerUserID, "moderation", map[string]any{"title": "文件审核结果", "body": body})
+	content := "<p>" + html.EscapeString(body) + "</p>"
+	_, _ = deps.InboxRepo.InsertUser(r.Context(), item.OwnerUserID, "文件审核结果", content, "审核结果")
 }
 
 func handleShareModeration(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User) {
@@ -306,7 +308,8 @@ func notifyShareReview(r *http.Request, deps Deps, item admin.ShareReviewItem, r
 			body += "该分享已被管理员封禁。"
 		}
 	}
-	_, _ = deps.InboxRepo.InsertUser(r.Context(), item.OwnerUserID, "moderation", map[string]any{"title": "分享审核结果", "body": body})
+	content := "<p>" + html.EscapeString(body) + "</p>"
+	_, _ = deps.InboxRepo.InsertUser(r.Context(), item.OwnerUserID, "分享审核结果", content, "审核结果")
 }
 
 func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {

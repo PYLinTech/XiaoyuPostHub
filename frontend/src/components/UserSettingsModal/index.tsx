@@ -34,11 +34,6 @@ export default function UserSettingsModal() {
     } catch (error) { Message.error(error?.response?.data?.msg || uiText('动态令牌校验失败')); }
     finally { setLoading(false); }
   };
-  useEffect(() => {
-    if (setup && code.length === 6 && !loading) confirm();
-    // Only a code edit should trigger an automatic verification attempt.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [code]);
   return <Modal title={setup ? uiText('配置动态令牌') : uiText('用户配置')} visible={visible}
     footer={null} onCancel={() => setVisible(false)} unmountOnExit>
     {setup ? <div>

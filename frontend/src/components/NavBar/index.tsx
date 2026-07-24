@@ -1,7 +1,6 @@
 import React, { useContext } from 'react';
 import axios from 'axios';
 import {
-  Select,
   Dropdown,
   Menu,
   Divider,
@@ -12,6 +11,8 @@ import {
   IconNotification,
   IconPoweroff,
   IconSafe,
+  IconSettings,
+  IconSwap,
   IconUser,
   IconMenu,
 } from '@arco-design/web-react/icon';
@@ -61,6 +62,7 @@ function NavActions({
   const canSwitchIdentity = hasManagementAccess(userInfo);
   const droplist = (
     <Menu
+      className={styles['identity-menu']}
       onClickMenuItem={onMenuItemClick}
       selectedKeys={[adminMode ? 'identity-admin' : 'identity-user']}
     >
@@ -69,7 +71,7 @@ function NavActions({
           key="identity"
           title={
             <div className={styles['identity-title']}>
-              <IconSafe className={styles['dropdown-icon']} />
+              <IconSwap className={styles['dropdown-icon']} />
               {t['menu.user.switchRoles']}
             </div>
           }
@@ -85,7 +87,7 @@ function NavActions({
         </Menu.SubMenu>
       )}
       <Menu.Item key="user-settings">
-        <IconSafe className={styles['dropdown-icon']} />
+        <IconSettings className={styles['dropdown-icon']} />
         {uiText('用户配置')}
       </Menu.Item>
       {canSwitchIdentity && (
@@ -128,41 +130,37 @@ function NavActions({
       icon={<IconNotification />}
     />
   );
+  const languageDroplist = (
+    <Menu
+      className={styles['language-menu']}
+      selectedKeys={[lang]}
+      onClickMenuItem={(value) => {
+        setLang(value);
+        const nextLang = defaultLocale[value];
+        Message.info(
+          `${nextLang['message.lang.tips']}${
+            value === 'zh-CN' ? '中文' : 'English'
+          }`
+        );
+      }}
+    >
+      <Menu.Item key="zh-CN">中文</Menu.Item>
+      <Menu.Item key="en-US">English</Menu.Item>
+    </Menu>
+  );
   return (
     <ul className={mobile ? styles['mobile-actions'] : styles.right}>
       <li>
-        <Select
-          triggerElement={languageTrigger}
-          options={[
-            {
-              label: uiText('中文'),
-              value: 'zh-CN',
-            },
-            {
-              label: 'English',
-              value: 'en-US',
-            },
-          ]}
-          value={lang}
-          triggerProps={{
-            autoAlignPopupWidth: false,
-            autoAlignPopupMinWidth: true,
-            position: mobile ? 'rt' : 'br',
-          }}
-          trigger={mobile ? 'click' : 'hover'}
-          onChange={(value) => {
-            setLang(value);
-            const nextLang = defaultLocale[value];
-            Message.info(
-              `${nextLang['message.lang.tips']}${
-                value === 'zh-CN' ? '中文' : 'English'
-              }`
-            );
-          }}
-        />
+        <Dropdown
+          droplist={languageDroplist}
+          position={mobile ? 'tr' : 'br'}
+          trigger="click"
+        >
+          {languageTrigger}
+        </Dropdown>
       </li>
       <li>
-        <MessageBox position={mobile ? 'rt' : 'br'}>
+        <MessageBox mobile={mobile} onNavigate={onNavigate}>
           {messageTrigger}
         </MessageBox>
       </li>

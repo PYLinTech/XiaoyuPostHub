@@ -83,6 +83,29 @@
   font-weight: 400;
 }
 
+.identity-menu {
+  :global(.arco-dropdown-menu-item.arco-dropdown-menu-selected) {
+    position: relative;
+    color: rgb(var(--primary-6));
+    background: rgb(var(--primary-1));
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 rgb(var(--primary-6));
+
+    svg {
+      color: rgb(var(--primary-6));
+    }
+  }
+}
+
+.language-menu {
+  width: 96px;
+  min-width: 96px;
+
+  :global(.arco-dropdown-menu-item) {
+    box-sizing: border-box;
+  }
+}
+
 @media (max-width: 768px) {
   .navbar {
     position: relative;
@@ -142,7 +165,7 @@
     left: 0;
     z-index: 2;
     margin: 0;
-    padding: 8px 10px;
+    padding: 8px 10px max(8px, env(safe-area-inset-bottom));
     list-style: none;
     box-sizing: border-box;
     border-top: 1px solid var(--color-border);

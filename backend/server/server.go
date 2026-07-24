@@ -95,6 +95,7 @@ func APIHandler(deps Deps) http.Handler {
 	if deps.ResourceRepo != nil && deps.SharingRepo != nil && deps.FileStore != nil && deps.QuotaRepo != nil && deps.SystemSettings != nil {
 		if deps.UploadRepo != nil {
 			mux.HandleFunc("/api/uploads/config", uploadConfigHandler(deps))
+			mux.HandleFunc("/api/uploads/conflicts", uploadConflictsHandler(deps))
 			mux.HandleFunc("/api/uploads", uploadSessionsHandler(deps))
 			mux.HandleFunc("/api/uploads/", uploadSessionItemHandler(deps))
 		}

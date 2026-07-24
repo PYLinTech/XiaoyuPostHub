@@ -456,8 +456,30 @@
   }
 
   .file-row {
+    min-height: 52px;
     padding-right: 10px;
     padding-left: 10px;
+
+    :global(.arco-btn) {
+      min-width: 38px;
+      min-height: 38px;
+    }
+  }
+
+  .folder-breadcrumb {
+    overflow-x: auto;
+    padding-bottom: 4px;
+    white-space: nowrap;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .file-size {
+    max-width: 84px;
+    margin-left: 8px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .preview-frame {

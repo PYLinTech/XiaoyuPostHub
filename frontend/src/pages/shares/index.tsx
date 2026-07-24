@@ -111,16 +111,99 @@ export default function SharesPage() {
   const columns = [
     {
       title: uiText('分享内容'),
-      render: (_, item: ShareItem) => (
-        <div className={styles['resource-name']}>
-          <ResourceIcon kind={item.resource.kind} />
-          <span>{item.resource.name}</span>
-        </div>
-      ),
+      render: (_, item: ShareItem) => {
+        const status = linkStatus(item);
+        const isPickup = item.shareType === 'pickup' && item.pickupCode;
+        const shareValue =
+          isPickup
+            ? item.pickupCode
+            : item.url
+            ? new URL(item.url, window.location.origin).toString()
+            : uiText('旧记录不可恢复');
+        return (
+          <div className={styles['resource-name']}>
+            <ResourceIcon kind={item.resource.kind} />
+            <div className={styles['resource-main']}>
+              <span className={styles['share-resource-title']}>
+                {item.resource.name}
+              </span>
+              <div className={styles['share-mobile-meta']}>
+                <div className={styles['share-mobile-value']}>
+                  <span className={styles['share-mobile-label']}>
+                    {uiText(isPickup ? '取件码：' : '分享链接：')}
+                  </span>
+                  <span className={styles['share-mobile-code']}>
+                    <code title={shareValue}>{shareValue}</code>
+                    {(item.pickupCode || item.url) && (
+                      <Tooltip content={uiText('复制')}>
+                        <Button
+                          className={styles['share-copy-button']}
+                          size="small"
+                          type="text"
+                          icon={<IconCopy />}
+                          aria-label={uiText('复制')}
+                          onClick={() =>
+                            copyValue(
+                              isPickup
+                                ? (item.pickupCode as string)
+                                : shareValue
+                            )
+                          }
+                        />
+                      </Tooltip>
+                    )}
+                  </span>
+                </div>
+                <div className={styles['share-mobile-details']}>
+                  <span>
+                    {uiText('状态')}：{status.text}
+                  </span>
+                  <span>
+                    {uiText('访问密码')}：
+                    {item.hasPassword
+                      ? item.password || uiText('旧记录不可恢复')
+                      : uiText('无密码')}
+                  </span>
+                  <span>
+                    {uiText('下载次数')}：{item.downloadCount} /{' '}
+                    {item.downloadLimit ?? uiText('不限')}
+                  </span>
+                  <span>
+                    {uiText('下载流量')}：
+                    {formatBytes(item.trafficUsedBytes)} /{' '}
+                    {item.trafficLimitBytes == null
+                      ? uiText('不限')
+                      : formatBytes(item.trafficLimitBytes)}
+                  </span>
+                  <span>
+                    {uiText('有效期至')}：
+                    {item.expiresAt
+                      ? formatTime(item.expiresAt)
+                      : uiText('永久')}
+                  </span>
+                  <span>
+                    {uiText('创建时间')}：{formatTime(item.createdAt)}
+                  </span>
+                </div>
+                <Button
+                  className={styles['share-mobile-config']}
+                  type="text"
+                  size="small"
+                  icon={<IconEdit />}
+                  onClick={() => setEditing(item)}
+                >
+                  {uiText('配置')}
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      },
     },
     {
       title: uiText('分享方式'),
       width: 360,
+      className: styles['mobile-hidden'],
       render: (_, item: ShareItem) => {
         if (item.shareType === 'pickup' && item.pickupCode) {
           return <div className={styles['link-cell']}><code>{uiText('取件码')}：{item.pickupCode}</code><Button size="mini" type="text" icon={<IconCopy />} onClick={() => copyValue(item.pickupCode as string)} /></div>;
@@ -152,6 +235,7 @@ export default function SharesPage() {
     {
       title: uiText('状态'),
       width: 110,
+      className: styles['mobile-hidden'],
       render: (_, item) => {
         const status = linkStatus(item);
         const tag = <Tag color={status.color}>{status.text}</Tag>;
@@ -165,6 +249,7 @@ export default function SharesPage() {
     {
       title: uiText('访问密码'),
       width: 190,
+      className: styles['mobile-hidden'],
       render: (_, item: ShareItem) => {
         if (!item.hasPassword) return uiText('无密码');
         if (!item.password)
@@ -191,12 +276,14 @@ export default function SharesPage() {
     {
       title: uiText('下载次数'),
       width: 140,
+      className: styles['mobile-hidden'],
       render: (_, item) =>
         `${item.downloadCount} / ${item.downloadLimit ?? uiText('不限')}`,
     },
     {
       title: uiText('下载流量'),
       width: 180,
+      className: styles['mobile-hidden'],
       render: (_, item) =>
         `${formatBytes(item.trafficUsedBytes)} / ${
           item.trafficLimitBytes == null
@@ -207,12 +294,14 @@ export default function SharesPage() {
     {
       title: uiText('有效期至'),
       width: 210,
+      className: styles['mobile-hidden'],
       dataIndex: 'expiresAt',
       render: (value) => (value ? formatTime(value) : uiText('永久')),
     },
     {
       title: uiText('创建时间'),
       width: 210,
+      className: styles['mobile-hidden'],
       dataIndex: 'createdAt',
       render: formatTime,
     },
@@ -220,6 +309,7 @@ export default function SharesPage() {
       title: uiText('操作'),
       width: 90,
       fixed: 'right' as const,
+      className: styles['mobile-hidden'],
       render: (_, item: ShareItem) => (
         <Button
           type="text"
@@ -280,6 +370,7 @@ export default function SharesPage() {
           </Typography.Text>
         </div>
         <Table
+          className={styles['share-table']}
           rowKey="id"
           loading={loading}
           columns={columns}

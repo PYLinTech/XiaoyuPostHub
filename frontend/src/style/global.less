@@ -19,16 +19,138 @@ body {
     overflow-x: hidden;
   }
 
+  .arco-btn:not(.arco-btn-size-mini) {
+    min-height: 38px;
+  }
+
   .arco-message-wrapper,
   .arco-notification-wrapper {
     max-width: calc(100vw - 24px);
   }
 
+  .arco-modal-wrapper {
+    padding: 12px 0;
+    box-sizing: border-box;
+  }
+
+  .arco-modal-wrapper.arco-modal-wrapper-align-center {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .arco-modal-wrapper.arco-modal-wrapper-align-center::after {
+    display: none;
+  }
+
   .arco-modal-wrapper .arco-modal {
+    display: flex !important;
+    max-height: calc(100dvh - 24px);
+    margin: 0 auto;
+    flex-direction: column;
     max-width: calc(100vw - 24px);
+  }
+
+  .arco-modal-header {
+    flex: none;
+    padding-right: 44px;
+  }
+
+  .arco-modal-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: calc(100dvh - 184px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .arco-modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .arco-modal-footer {
+    display: flex;
+    flex: none;
+    gap: 8px;
+    padding-top: 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    flex-wrap: wrap;
+  }
+
+  .arco-modal-footer .arco-btn {
+    min-width: 112px;
+    min-height: 40px;
+    margin-left: 0 !important;
+    flex: 1;
+  }
+
+  .arco-modal-simple {
+    width: calc(100vw - 24px);
+    max-height: none;
+    padding: 24px 20px;
+  }
+
+  .arco-modal-simple .arco-modal-header {
+    margin-bottom: 14px;
+  }
+
+  .arco-modal-simple .arco-modal-content {
+    max-height: none;
+    padding: 0;
+    overflow: visible;
+    text-align: center;
+  }
+
+  .arco-modal-simple .arco-modal-footer {
+    margin-top: 20px;
+    padding: 0;
+    border-top: 0;
   }
 
   .arco-drawer {
     max-width: 92vw;
+  }
+
+  .arco-table-container {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .arco-tabs-header-nav {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .arco-tabs-header-title {
+    min-height: 42px;
+    white-space: nowrap;
+  }
+
+  .arco-form-message {
+    overflow-wrap: anywhere;
+  }
+
+  .arco-trigger-popup,
+  .arco-select-popup,
+  .arco-dropdown-popup {
+    max-width: calc(100vw - 16px);
+  }
+}
+
+@media (max-width: 380px) {
+  .arco-modal-wrapper .arco-modal {
+    max-width: calc(100vw - 12px);
+  }
+
+  .arco-modal-content {
+    padding-right: 14px;
+    padding-left: 14px;
   }
 }

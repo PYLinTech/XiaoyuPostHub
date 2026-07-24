@@ -33,6 +33,7 @@ const routePages = {
   shares: React.lazy(() => import('./pages/shares')),
   'direct-links': React.lazy(() => import('./pages/direct-links')),
   trash: React.lazy(() => import('./pages/trash')),
+  messages: React.lazy(() => import('./pages/messages')),
   'admin/overview': React.lazy(() => import('./pages/admin/overview')),
   'admin/users': React.lazy(() => import('./pages/admin/users')),
   'admin/access': React.lazy(() => import('./pages/admin/access')),
@@ -171,6 +172,11 @@ function PageLayout() {
                 <Content>
                   <Suspense fallback={<Spin className={styles.spin} />}>
                     <Switch>
+                      <Route
+                        exact
+                        path={['/messages', '/admin/messages']}
+                        component={routePages.messages}
+                      />
                       {visibleRoutes.map((route) => (
                         <Route
                           exact

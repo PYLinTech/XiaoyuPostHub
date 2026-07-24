@@ -286,6 +286,60 @@ function Users() {
       },
     });
   };
+  const renderUserActions = (record: UserItem) => {
+    const protectedUser = record.username === superAdmin;
+    return (
+      <Space size={4} wrap>
+        {canManageGroups && (
+          <Button
+            size="mini"
+            type="text"
+            icon={<IconSettings />}
+            disabled={protectedUser}
+            onClick={() => {
+              setSelectedGroupIds(record.groupIds || []);
+              setGroupTarget(record);
+            }}
+          >
+            {uiText('用户组')}
+          </Button>
+        )}
+        {canManageUsers && (
+          <>
+            <Button
+              size="mini"
+              type="text"
+              icon={<IconLock />}
+              disabled={protectedUser}
+              onClick={() => setPasswordTarget(record)}
+            >
+              {uiText('重设密码')}
+            </Button>
+            <Button
+              size="mini"
+              type="text"
+              status={record.disabled ? 'success' : 'warning'}
+              icon={<IconStop />}
+              disabled={protectedUser}
+              onClick={() => changeDisabled(record)}
+            >
+              {record.disabled ? uiText('启用') : uiText('禁用')}
+            </Button>
+            <Button
+              size="mini"
+              type="text"
+              status="danger"
+              icon={<IconDelete />}
+              disabled={protectedUser}
+              onClick={() => deleteUser(record)}
+            >
+              {uiText('删除')}
+            </Button>
+          </>
+        )}
+      </Space>
+    );
+  };
   const columns = [
     {
       title: uiText('用户'),
@@ -293,11 +347,34 @@ function Users() {
       width: 230,
       render: (value, record: UserItem) => (
         <div className={styles['user-name-cell']}>
-          <b title={value}>{value}</b>
-          {value === superAdmin && (
-            <Tag color="arcoblue">{uiText('系统超级管理员')}</Tag>
-          )}
-          {record.disabled && <Tag color="red">{uiText('已禁用')}</Tag>}
+          <div className={styles['user-name-heading']}>
+            <b title={value}>{value}</b>
+            {value === superAdmin && (
+              <Tag color="arcoblue">{uiText('系统超级管理员')}</Tag>
+            )}
+            {record.disabled && <Tag color="red">{uiText('已禁用')}</Tag>}
+          </div>
+          <div className={styles['admin-mobile-meta']}>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('所属用户组')}：
+              </span>
+              {(record.groups || []).length
+                ? record.groups.join('、')
+                : '-'}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('创建时间')}：
+              </span>
+              {new Date(record.createdAt).toLocaleString('zh-CN', {
+                hour12: false,
+              })}
+            </div>
+            <div className={styles['admin-mobile-actions']}>
+              {renderUserActions(record)}
+            </div>
+          </div>
         </div>
       ),
     },
@@ -305,6 +382,7 @@ function Users() {
       title: uiText('所属用户组'),
       dataIndex: 'groups',
       width: 240,
+      className: styles['mobile-hidden'],
       render: (values: string[] = []) =>
         values.length ? (
           values.map((name) => <Tag key={name}>{name}</Tag>)
@@ -316,6 +394,7 @@ function Users() {
       title: uiText('创建时间'),
       dataIndex: 'createdAt',
       width: 190,
+      className: styles['mobile-hidden'],
       render: (value) =>
         new Date(value).toLocaleString('zh-CN', {
           hour12: false,
@@ -325,60 +404,8 @@ function Users() {
       title: uiText('操作'),
       fixed: 'right' as const,
       width: 310,
-      render: (_, record: UserItem) => {
-        const protectedUser = record.username === superAdmin;
-        return (
-          <Space size={4} wrap>
-            {canManageGroups && (
-              <Button
-                size="mini"
-                type="text"
-                icon={<IconSettings />}
-                disabled={protectedUser}
-                onClick={() => {
-                  setSelectedGroupIds(record.groupIds || []);
-                  setGroupTarget(record);
-                }}
-              >
-                {uiText('用户组')}
-              </Button>
-            )}
-            {canManageUsers && (
-              <>
-                <Button
-                  size="mini"
-                  type="text"
-                  icon={<IconLock />}
-                  disabled={protectedUser}
-                  onClick={() => setPasswordTarget(record)}
-                >
-                  {uiText('重设密码')}
-                </Button>
-                <Button
-                  size="mini"
-                  type="text"
-                  status={record.disabled ? 'success' : 'warning'}
-                  icon={<IconStop />}
-                  disabled={protectedUser}
-                  onClick={() => changeDisabled(record)}
-                >
-                  {record.disabled ? uiText('启用') : uiText('禁用')}
-                </Button>
-                <Button
-                  size="mini"
-                  type="text"
-                  status="danger"
-                  icon={<IconDelete />}
-                  disabled={protectedUser}
-                  onClick={() => deleteUser(record)}
-                >
-                  {uiText('删除')}
-                </Button>
-              </>
-            )}
-          </Space>
-        );
-      },
+      className: styles['mobile-hidden'],
+      render: (_, record: UserItem) => renderUserActions(record),
     },
   ];
   const groupColumns = [
@@ -494,6 +521,7 @@ function Users() {
               </Tag>
             </div>
             <Table
+              className={styles['responsive-user-table']}
               rowKey="id"
               loading={loading}
               columns={columns}
@@ -711,7 +739,7 @@ function Users() {
             onChange={setPasswordAgain}
           />
           <Typography.Text type="secondary">
-            {uiText('保存后该用户的全部现有登录会话会立即失效。')}
+            {uiText('保存后该用户的全部现有登录会话会立即失效，动态令牌绑定也会清除，用户可在下次登录后重新绑定。')}
           </Typography.Text>
         </Space>
       </Modal>

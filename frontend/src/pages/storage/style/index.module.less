@@ -82,6 +82,31 @@
   color: var(--color-text-1) !important;
 }
 
+.resource-main {
+  min-width: 0;
+}
+
+.mobile-resource-meta {
+  display: none;
+}
+
+.share-mobile-meta {
+  display: none;
+}
+
+.share-resource-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.trash-resource-title {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .modal-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -152,6 +177,13 @@
 
 .preview-modal :global(.arco-modal-content) {
   padding: 0;
+}
+
+.compact-modal {
+  :global(.arco-modal-content) {
+    padding-top: 20px;
+    padding-bottom: 20px;
+  }
 }
 
 .preview-modal :global(.arco-modal-body) {
@@ -264,6 +296,7 @@
     > button {
       flex: 1 0 calc(33.333% - 8px);
       min-width: 88px;
+      min-height: 40px;
     }
   }
 
@@ -278,11 +311,142 @@
     display: none !important;
   }
 
-  .workspace {
+  .share-table {
+    :global(.arco-table-content-inner) {
+      width: 100%;
+    }
+
     :global(.arco-table-container table) {
       width: 100% !important;
       min-width: 0 !important;
       table-layout: fixed;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(n + 3)) {
+      display: none;
+      width: 0 !important;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(2)) {
+      width: auto !important;
+    }
+
+    :global(.arco-table-checkbox) {
+      width: 38px !important;
+      padding: 13px 4px;
+      vertical-align: top;
+    }
+
+    :global(.arco-table-td) {
+      padding: 12px 6px;
+      vertical-align: top;
+    }
+  }
+
+  .share-table .resource-name {
+    align-items: flex-start;
+  }
+
+  .share-resource-title {
+    display: block;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-weight: 500;
+    line-height: 1.45;
+  }
+
+  .trash-resource-title {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+  }
+
+  .share-mobile-meta {
+    display: block;
+    margin-top: 7px;
+    color: var(--color-text-3);
+    font-size: 12px;
+    line-height: 1.55;
+  }
+
+  .share-mobile-value {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 4px;
+    margin-top: 2px;
+  }
+
+  .share-mobile-code {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    min-height: 30px;
+    padding-left: 8px;
+    border-radius: 5px;
+    background: var(--color-fill-2);
+
+    code {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      color: var(--color-text-2);
+    }
+
+  }
+
+  .share-mobile-label {
+    flex: 0 0 auto;
+    color: var(--color-text-3);
+  }
+
+  .share-copy-button {
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+    min-height: 30px !important;
+    padding: 0 !important;
+  }
+
+  .share-mobile-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+    margin-top: 3px;
+
+    span {
+      min-width: min(128px, 100%);
+      overflow-wrap: anywhere;
+    }
+  }
+
+  .share-mobile-config {
+    min-height: 34px !important;
+    margin-top: 5px;
+    padding: 0 !important;
+  }
+
+  .workspace {
+    :global(.arco-table-content-inner) {
+      width: 100%;
+    }
+
+    :global(.arco-table-container table) {
+      width: 100% !important;
+      min-width: 0 !important;
+      table-layout: fixed;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(n + 3)) {
+      display: none;
+      width: 0 !important;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(2)) {
+      width: auto !important;
     }
 
     :global(.arco-table-checkbox) {
@@ -303,6 +467,55 @@
     max-width: none;
   }
 
+  .resource-name {
+    align-items: flex-start;
+  }
+
+  .resource-icon {
+    flex: 0 0 32px;
+    margin-top: 2px;
+  }
+
+  .resource-main {
+    width: 100%;
+  }
+
+  .name-button {
+    display: block !important;
+    width: 100%;
+    height: auto !important;
+    min-height: 32px !important;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.45;
+    text-align: left;
+  }
+
+  .mobile-resource-meta {
+    display: flex;
+    margin-top: 3px;
+    color: var(--color-text-3);
+    font-size: 12px;
+    line-height: 1.45;
+    flex-wrap: wrap;
+    gap: 3px 10px;
+  }
+
+  .review-pending {
+    color: rgb(var(--orange-6));
+  }
+
+  .review-rejected {
+    color: rgb(var(--red-6));
+  }
+
+  .workspace :global(.arco-table-td) {
+    padding-top: 10px;
+    padding-bottom: 10px;
+    vertical-align: top;
+  }
+
   .result-line {
     align-items: stretch;
     flex-direction: column;
@@ -316,8 +529,31 @@
     padding: 18px 16px;
   }
 
+  .compact-modal {
+    :global(.arco-modal-content) {
+      padding: 18px 16px;
+    }
+
+    :global(.arco-modal-footer) {
+      padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+    }
+  }
+
   :global(.arco-pagination) {
     flex-wrap: wrap;
     row-gap: 8px;
+  }
+}
+
+@media (max-width: 380px) {
+  .toolbar-left > button {
+    flex-basis: calc(50% - 8px);
+  }
+
+  .workspace,
+  .list-card {
+    :global(.arco-card-body) {
+      padding: 10px;
+    }
   }
 }

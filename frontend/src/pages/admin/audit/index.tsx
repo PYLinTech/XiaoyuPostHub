@@ -412,11 +412,43 @@ function Audit() {
     {
       title: 'ID',
       width: 210,
-      render: (_: unknown, item: FileReviewRow) =>
-        'id' in item ? item.id : item.resourceId,
+      render: (_: unknown, item: FileReviewRow) => (
+        <div>
+          <span className={styles['review-mobile-id']}>
+            {'id' in item ? item.id : item.resourceId}
+          </span>
+          <div className={styles['admin-mobile-meta']}>
+            <div className={styles['review-mobile-files']}>
+              {'children' in item
+                ? item.children.map((file) => (
+                    <span key={file.resourceId}>
+                      {file.relativePath || file.name}
+                    </span>
+                  ))
+                : item.relativePath || item.name}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('上传者')}：
+              </span>
+              {item.ownerName || '-'}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('上传时间')}：
+              </span>
+              {formatTime(
+                'uploadedAt' in item ? item.uploadedAt : item.submittedAt
+              )}
+            </div>
+            <div>{statusTag(item.status)}</div>
+          </div>
+        </div>
+      ),
     },
     {
       title: uiText('文件名'),
+      className: styles['mobile-hidden'],
       render: (_: unknown, item: FileReviewRow) =>
         'children' in item ? (
           <div className={styles['review-file-name-list']}>
@@ -433,35 +465,85 @@ function Audit() {
     {
       title: uiText('上传者'),
       width: 140,
+      className: styles['mobile-hidden'],
       render: (_: unknown, item: FileReviewRow) => item.ownerName || '-',
     },
     {
       title: uiText('上传时间'),
       width: 190,
+      className: styles['mobile-hidden'],
       render: (_: unknown, item: FileReviewRow) =>
         formatTime('uploadedAt' in item ? item.uploadedAt : item.submittedAt),
     },
     {
       title: uiText('状态'),
       width: 120,
+      className: styles['mobile-hidden'],
       render: (_: unknown, item: FileReviewRow) => statusTag(item.status),
     },
   ];
 
   const shareColumns = [
-    { title: 'ID', dataIndex: 'shareId', width: 110 },
-    { title: uiText('分享内容'), dataIndex: 'resourceName', ellipsis: true },
-    { title: uiText('分享者'), dataIndex: 'ownerName', width: 150 },
+    {
+      title: 'ID',
+      dataIndex: 'shareId',
+      width: 110,
+      render: (value: number, item: ShareReview) => (
+        <div>
+          <span className={styles['review-mobile-id']}>{value}</span>
+          <div className={styles['admin-mobile-meta']}>
+            <div className={styles['review-mobile-files']}>
+              {item.resourceName}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('分享者')}：
+              </span>
+              {item.ownerName || '-'}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('分享时间')}：
+              </span>
+              {formatTime(item.submittedAt)}
+            </div>
+            <div>
+              {statusTag(
+                item.blocked
+                  ? 'blocked'
+                  : item.deletedAt
+                  ? 'trashed'
+                  : item.status
+              )}
+            </div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      title: uiText('分享内容'),
+      dataIndex: 'resourceName',
+      ellipsis: true,
+      className: styles['mobile-hidden'],
+    },
+    {
+      title: uiText('分享者'),
+      dataIndex: 'ownerName',
+      width: 150,
+      className: styles['mobile-hidden'],
+    },
     {
       title: uiText('分享时间'),
       dataIndex: 'submittedAt',
       width: 190,
+      className: styles['mobile-hidden'],
       render: formatTime,
     },
     {
       title: uiText('状态'),
       dataIndex: 'status',
       width: 120,
+      className: styles['mobile-hidden'],
       render: (_: string, item: ShareReview) =>
         statusTag(
           item.blocked ? 'blocked' : item.deletedAt ? 'trashed' : item.status
@@ -474,12 +556,53 @@ function Audit() {
       title: uiText('时间'),
       dataIndex: 'createdAt',
       width: 190,
-      render: formatTime,
+      render: (value: string, item: AuditItem) => (
+        <div>
+          <span>{formatTime(value)}</span>
+          <div className={styles['admin-mobile-meta']}>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('操作者')}：
+              </span>
+              {item.actorName || '-'}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('动作')}：
+              </span>
+              {item.action}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('对象')}：
+              </span>
+              {item.targetLabel || item.targetType}
+            </div>
+            <div>
+              <span className={styles['admin-mobile-label']}>
+                {uiText('来源 IP')}：
+              </span>
+              {item.clientIp || '-'}
+            </div>
+          </div>
+        </div>
+      ),
     },
-    { title: uiText('操作者'), dataIndex: 'actorName', width: 150 },
-    { title: uiText('动作'), dataIndex: 'action', width: 220 },
+    {
+      title: uiText('操作者'),
+      dataIndex: 'actorName',
+      width: 150,
+      className: styles['mobile-hidden'],
+    },
+    {
+      title: uiText('动作'),
+      dataIndex: 'action',
+      width: 220,
+      className: styles['mobile-hidden'],
+    },
     {
       title: uiText('对象'),
+      className: styles['mobile-hidden'],
       render: (_: unknown, item: AuditItem) =>
         item.targetLabel || item.targetType,
     },
@@ -487,6 +610,7 @@ function Audit() {
       title: uiText('来源 IP'),
       dataIndex: 'clientIp',
       width: 150,
+      className: styles['mobile-hidden'],
       render: (value: string) => value || '-',
     },
   ];
@@ -530,6 +654,7 @@ function Audit() {
               </Space>
             </div>
             <Table
+              className={styles['responsive-review-table']}
               rowKey="rowKey"
               loading={loading}
               columns={fileColumns}
@@ -584,6 +709,7 @@ function Audit() {
               </Space>
             </div>
             <Table
+              className={styles['responsive-review-table']}
               rowKey="shareId"
               loading={loading}
               columns={shareColumns}
@@ -609,6 +735,7 @@ function Audit() {
           {canReadAudit && (
             <TabPane key="audit" title={uiText('系统审计')}>
             <Table
+              className={styles['responsive-audit-table']}
               rowKey="id"
               loading={loading}
               columns={auditColumns}

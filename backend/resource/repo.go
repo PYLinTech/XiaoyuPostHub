@@ -11,6 +11,7 @@ import (
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/randomtoken"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -24,6 +25,7 @@ var (
 	ErrNotFolder     = errors.New("resource: 父资源不是文件夹")
 	ErrInvalidName   = errors.New("resource: 名称不合法")
 	ErrOwnerMismatch = errors.New("resource: 不属于当前用户")
+	ErrNameConflict  = errors.New("resource: 同名资源冲突")
 )
 
 type Resource struct {
@@ -116,6 +118,196 @@ func (r *Repo) CreateFile(
 		          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`,
 		id, ownerID, parentID, name, storageKey, sizeBytes, checksum, mimeType)
 	return scanResource(row)
+}
+
+// SaveUploadedFile 原子地写入上传资源及其审核状态。覆盖时返回待清理的旧存储键；
+// 任一数据库操作失败都会回滚，避免资源元数据和审核状态不一致。
+func (r *Repo) SaveUploadedFile(
+	ctx context.Context, ownerID int64, parentID *string, name, storageKey string,
+	sizeBytes int64, checksum, mimeType string, overwrite, requiresReview bool,
+	uploadTaskID, uploadSessionID string,
+) (Resource, *string, error) {
+	name, err := ValidateName(name)
+	if err != nil {
+		return Resource{}, nil, err
+	}
+	if err := r.validateParent(ctx, ownerID, parentID); err != nil {
+		return Resource{}, nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Resource{}, nil, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	newID, err := randomtoken.New(18)
+	if err != nil {
+		return Resource{}, nil, err
+	}
+	var id, kind string
+	var oldKey pgtype.Text
+	existing := true
+	err = tx.QueryRow(ctx, `
+		SELECT id,kind,storage_key FROM resources
+		WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2
+		  AND name=$3 AND trashed_at IS NULL
+		FOR UPDATE`, ownerID, parentID, name).Scan(&id, &kind, &oldKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		id = newID
+		existing = false
+	} else if err != nil {
+		return Resource{}, nil, err
+	} else if !overwrite || kind != KindFile {
+		return Resource{}, nil, ErrNameConflict
+	}
+
+	var row pgx.Row
+	if existing {
+		row = tx.QueryRow(ctx, `
+			UPDATE resources SET storage_key=$4,size_bytes=$5,sha256_checksum=$6,
+			       mime_type=NULLIF($7,''),updated_at=NOW(),restore_blocked=FALSE,admin_blocked=FALSE
+			WHERE id=$1 AND owner_user_id=$2 AND name=$3
+			RETURNING id, owner_user_id, parent_id, kind, name, storage_key,
+			          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`,
+			id, ownerID, name, storageKey, sizeBytes, checksum, mimeType)
+	} else {
+		row = tx.QueryRow(ctx, `
+			INSERT INTO resources (
+				id, owner_user_id, parent_id, kind, name, storage_key,
+				size_bytes, sha256_checksum, mime_type
+			) VALUES ($1, $2, $3, 'file', $4, $5, $6, $7, NULLIF($8, ''))
+			RETURNING id, owner_user_id, parent_id, kind, name, storage_key,
+			          size_bytes, sha256_checksum, mime_type, trashed_at, restore_blocked, admin_blocked, created_at, updated_at`,
+			id, ownerID, parentID, name, storageKey, sizeBytes, checksum, mimeType)
+	}
+	item, err := scanResource(row)
+	if err != nil {
+		return Resource{}, nil, err
+	}
+	if requiresReview {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO file_moderations(
+				resource_id,owner_user_id,file_name,size_bytes,mime_type,upload_task_id,
+				status,reason,submitted_at,reviewed_at,reviewer_user_id
+			) VALUES($1,$2,$3,$4,NULLIF($5,''),COALESCE(NULLIF($6,''),$1),
+			         'pending','',NOW(),NULL,NULL)
+			ON CONFLICT(resource_id) DO UPDATE SET
+				owner_user_id=EXCLUDED.owner_user_id,file_name=EXCLUDED.file_name,
+				size_bytes=EXCLUDED.size_bytes,mime_type=EXCLUDED.mime_type,
+				upload_task_id=EXCLUDED.upload_task_id,status='pending',reason='',
+				delete_file=FALSE,blocked=FALSE,submitted_at=NOW(),
+				reviewed_at=NULL,reviewer_user_id=NULL`,
+			item.ID, ownerID, name, sizeBytes, mimeType, uploadTaskID)
+	} else {
+		_, err = tx.Exec(ctx, `DELETE FROM file_moderations WHERE resource_id=$1`, item.ID)
+	}
+	if err != nil {
+		return Resource{}, nil, err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE upload_sessions
+		SET status='completed',resource_id=$3,error_message='',updated_at=NOW()
+		WHERE id=$1 AND owner_user_id=$2
+		  AND status IN ('queued','uploading','paused','completing')`,
+		uploadSessionID, ownerID, item.ID)
+	if err != nil {
+		return Resource{}, nil, err
+	}
+	if result.RowsAffected() == 0 {
+		return Resource{}, nil, fmt.Errorf("resource: 上传任务状态无效")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Resource{}, nil, err
+	}
+	if oldKey.Valid {
+		value := oldKey.String
+		return item, &value, nil
+	}
+	return item, nil, nil
+}
+
+func (r *Repo) ExistingChildNames(ctx context.Context, ownerID int64, parentID *string, names []string) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT name FROM resources
+		WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2
+		  AND trashed_at IS NULL AND name=ANY($3)
+		UNION
+		SELECT filename FROM upload_sessions
+		WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2
+		  AND status IN ('queued','uploading','paused','completing') AND filename=ANY($3)`, ownerID, parentID, names)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
+}
+
+func (r *Repo) AvailableChildName(ctx context.Context, ownerID int64, parentID *string, name string) (string, error) {
+	name, err := ValidateName(name)
+	if err != nil {
+		return "", err
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT name FROM resources
+		WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2
+		  AND trashed_at IS NULL
+		UNION
+		SELECT filename FROM upload_sessions
+		WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2
+		  AND status IN ('queued','uploading','paused','completing')`,
+		ownerID, parentID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	occupied := make(map[string]struct{})
+	for rows.Next() {
+		var occupiedName string
+		if err := rows.Scan(&occupiedName); err != nil {
+			return "", err
+		}
+		occupied[occupiedName] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if _, exists := occupied[name]; !exists {
+		return name, nil
+	}
+	dot := strings.LastIndex(name, ".")
+	base, ext := name, ""
+	if dot > 0 {
+		base, ext = name[:dot], name[dot:]
+	}
+	for index := 1; index < 10000; index++ {
+		candidate := fmt.Sprintf("%s (%d)%s", base, index, ext)
+		if _, exists := occupied[candidate]; !exists {
+			return candidate, nil
+		}
+	}
+	return "", ErrNameConflict
+}
+
+func (r *Repo) ExistingChildFileSize(ctx context.Context, ownerID int64, parentID *string, name string) (int64, error) {
+	name, err := ValidateName(name)
+	if err != nil {
+		return 0, err
+	}
+	var size int64
+	err = r.pool.QueryRow(ctx, `
+		SELECT COALESCE((
+			SELECT size_bytes FROM resources
+			WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2
+			  AND name=$3 AND kind='file' AND trashed_at IS NULL
+		), 0)::BIGINT`, ownerID, parentID, name).Scan(&size)
+	return size, err
 }
 
 func (r *Repo) GetByID(ctx context.Context, id string) (Resource, error) {

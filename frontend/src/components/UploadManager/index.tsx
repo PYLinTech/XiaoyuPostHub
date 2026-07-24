@@ -11,6 +11,7 @@ import axios from 'axios';
 import {
   Button,
   Message,
+  Modal,
   Progress,
   Space,
   Typography,
@@ -49,7 +50,7 @@ interface UploadConfig {
 }
 
 interface UploadContextValue {
-  addFiles: (files: File[], parentId?: string) => Promise<void>;
+  addFiles: (files: File[], parentId?: string, targetPath?: string) => Promise<void>;
 }
 
 const UploadContext = createContext<UploadContextValue>({
@@ -61,6 +62,12 @@ const DEFAULT_CONFIG: UploadConfig = {
   userTaskConcurrency: 2,
 };
 const MAX_PERSISTED_FILE_SIZE = 512 * 1024 * 1024;
+type ConflictAction = 'overwrite' | 'skip' | 'auto_rename';
+interface UploadConflict {
+  index: number;
+  filename: string;
+  action: ConflictAction;
+}
 
 export function useUploadManager() {
   return useContext(UploadContext);
@@ -128,6 +135,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<UploadConfig>(DEFAULT_CONFIG);
   const [collapsed, setCollapsed] = useState(false);
   const [schedulerTick, setSchedulerTick] = useState(0);
+  const [conflicts, setConflicts] = useState<UploadConflict[]>([]);
+  const [conflictPath, setConflictPath] = useState('/');
+  const [conflictVisible, setConflictVisible] = useState(false);
+  const conflictResolver = useRef<(value?: Map<number, ConflictAction>) => void>();
   const running = useRef(new Set<string>());
   const polling = useRef(new Set<string>());
   const blocked = useRef(new Set<string>());
@@ -150,6 +161,31 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       })
     );
   }, []);
+
+  const resolveUploadConflicts = useCallback(
+    async (files: File[], parentId?: string, targetPath = '/') => {
+      if (conflictResolver.current) {
+        Message.warning(uiText('请先处理当前的同名文件'));
+        return undefined;
+      }
+      const response = await axios.post('/api/uploads/conflicts', {
+        parentId: parentId || null,
+        files: files.map((file) => file.name),
+      });
+      const found = (response.data.conflicts || []).map((item) => ({
+        ...item,
+        action: 'skip' as ConflictAction,
+      }));
+      if (!found.length) return new Map<number, ConflictAction>();
+      return new Promise<Map<number, ConflictAction> | undefined>((resolve) => {
+        setConflicts(found);
+        setConflictPath(targetPath);
+        setConflictVisible(true);
+        conflictResolver.current = resolve;
+      });
+    },
+    []
+  );
 
   const runTask = useCallback(
     async (task: UploadTask, file: File) => {
@@ -305,6 +341,10 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     activeOwner.current = ownerId;
+    conflictResolver.current?.(undefined);
+    conflictResolver.current = undefined;
+    setConflictVisible(false);
+    setConflicts([]);
     blocked.current.clear();
     running.current.clear();
     polling.current.clear();
@@ -382,13 +422,25 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   }, [notifyCompleted, ownerId, schedulerTick, tasks, updateTask]);
 
   const addFiles = useCallback(
-    async (files: File[], parentId?: string) => {
+    async (files: File[], parentId?: string, targetPath?: string) => {
       if (!ownerId) return;
+      let decisions: Map<number, ConflictAction> | undefined;
+      try {
+        decisions = await resolveUploadConflicts(files, parentId, targetPath);
+      } catch (error) {
+        Message.error(
+          error?.response?.data?.msg || uiText('检查同名文件失败')
+        );
+        return;
+      }
+      if (!decisions) return;
       const batchId = `batch-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2)}`;
       setCollapsed(false);
-      for (const file of files) {
+      for (const [fileIndex, file] of files.entries()) {
+        const conflictAction = decisions.get(fileIndex);
+        if (conflictAction === 'skip') continue;
         const localId = `local-${Date.now()}-${Math.random()}`;
         const localTask: UploadTask = {
           id: localId,
@@ -420,6 +472,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             size: file.size,
             mimeType: file.type,
             sha256: checksum,
+            conflictAction: conflictAction || 'error',
           });
           const task = normalizeTask(response.data.task);
           fileCache.current.delete(localId);
@@ -458,7 +511,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }
       }
     },
-    [notifyCompleted, ownerId, updateTask]
+    [notifyCompleted, ownerId, resolveUploadConflicts, updateTask]
   );
 
   const pauseTask = async (task: UploadTask) => {
@@ -601,6 +654,62 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           event.target.value = '';
         }}
       />
+      <Modal
+        title={uiText('处理同名文件')}
+        visible={conflictVisible}
+        style={{ width: 760, maxWidth: 'calc(100vw - 32px)' }}
+        okText={uiText('继续上传')}
+        cancelText={uiText('取消本次上传')}
+        autoFocus={false}
+        onCancel={() => {
+          setConflictVisible(false);
+          conflictResolver.current?.(undefined);
+          conflictResolver.current = undefined;
+        }}
+        onOk={() => {
+          setConflictVisible(false);
+          conflictResolver.current?.(
+            new Map(conflicts.map((item) => [item.index, item.action]))
+          );
+          conflictResolver.current = undefined;
+        }}
+        unmountOnExit
+      >
+        <Typography.Paragraph type="secondary">
+          {uiText('以下文件与待上传目录中的现有文件同名，请分别选择处理方式。')}
+        </Typography.Paragraph>
+        <div className={styles['conflict-list']}>
+          <div className={styles['conflict-list-header']}>
+            <span>{uiText('冲突文件名')}</span>
+            <span>{uiText('待上传路径')}</span>
+            <span>{uiText('处理方式')}</span>
+          </div>
+          {conflicts.map((item) => (
+            <div className={styles['conflict-row']} key={`${item.index}-${item.filename}`}>
+              <Typography.Text ellipsis={{ showTooltip: true }}>
+                {item.filename}
+              </Typography.Text>
+              <Typography.Text type="secondary" ellipsis={{ showTooltip: true }}>
+                {conflictPath || '/'}
+              </Typography.Text>
+              <Space size={4} className={styles['conflict-actions']}>
+                {(['overwrite', 'skip', 'auto_rename'] as ConflictAction[]).map((action) => (
+                  <Button
+                    key={action}
+                    size="small"
+                    type={item.action === action ? 'primary' : 'secondary'}
+                    onClick={() => setConflicts((current) => current.map((conflict) =>
+                      conflict.index === item.index ? { ...conflict, action } : conflict
+                    ))}
+                  >
+                    {uiText(action === 'overwrite' ? '覆盖' : action === 'skip' ? '跳过' : '自动重命名')}
+                  </Button>
+                ))}
+              </Space>
+            </div>
+          ))}
+        </div>
+      </Modal>
       {tasks.length > 0 && collapsed && (
         <LiquidCapsuleProgress
           progress={progress}

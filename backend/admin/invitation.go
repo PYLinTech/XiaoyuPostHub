@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
+	"strings"
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/inbox"
@@ -162,11 +164,27 @@ func (r *Repo) IssueInvitationCodes(ctx context.Context, actorID int64, targetTy
 		}
 		codes = append(codes, code)
 	}
-	messageID, err := inbox.InsertTx(ctx, tx, targetType, &targetID, "invitation", map[string]any{
-		"title": "邀请码已发放",
-		"body":  fmt.Sprintf("系统已向你发放 %d 个邀请码，请妥善保管。", quantity),
-		"codes": codes,
-	})
+	var content strings.Builder
+	fmt.Fprintf(&content, "<p>系统已向你发放 %d 个邀请码，请妥善保管。</p><div class=\"message-copy-actions\">", quantity)
+	for _, code := range codes {
+		escapedCode := html.EscapeString(code)
+		fmt.Fprintf(
+			&content,
+			"<button type=\"button\" data-message-action=\"copy\" data-copy-text=\"%s\"><span>复制邀请码</span><code>%s</code></button>",
+			escapedCode,
+			escapedCode,
+		)
+	}
+	content.WriteString("</div>")
+	messageID, err := inbox.InsertTx(
+		ctx,
+		tx,
+		targetType,
+		&targetID,
+		"邀请码已发放",
+		content.String(),
+		"邀请码",
+	)
 	if err != nil {
 		return 0, err
 	}

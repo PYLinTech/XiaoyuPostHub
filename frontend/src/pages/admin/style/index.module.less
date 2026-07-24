@@ -189,6 +189,21 @@
   }
 }
 
+.user-name-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-mobile-meta {
+  display: none;
+}
+
+.review-mobile-id {
+  overflow-wrap: anywhere;
+}
+
 .access-section-header {
   display: flex;
   align-items: center;
@@ -610,6 +625,148 @@
 }
 
 @media (max-width: 600px) {
+  .mobile-hidden {
+    display: none !important;
+  }
+
+  .responsive-user-table {
+    :global(.arco-table-content-inner) {
+      width: 100%;
+    }
+
+    :global(.arco-table-container table) {
+      width: 100% !important;
+      min-width: 0 !important;
+      table-layout: fixed;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(n + 2)) {
+      display: none;
+      width: 0 !important;
+    }
+
+    :global(.arco-table-container colgroup col:first-child) {
+      width: auto !important;
+    }
+
+    :global(.arco-table-th),
+    :global(.arco-table-td) {
+      padding: 12px 10px;
+      vertical-align: top;
+    }
+  }
+
+  .responsive-review-table {
+    :global(.arco-table-content-inner) {
+      width: 100%;
+    }
+
+    :global(.arco-table-container table) {
+      width: 100% !important;
+      min-width: 0 !important;
+      table-layout: fixed;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(n + 3)) {
+      display: none;
+      width: 0 !important;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(2)) {
+      width: auto !important;
+    }
+
+    :global(.arco-table-checkbox) {
+      width: 38px !important;
+      padding-right: 4px;
+      padding-left: 4px;
+      vertical-align: top;
+    }
+
+    :global(.arco-table-th),
+    :global(.arco-table-td) {
+      padding: 12px 8px;
+      vertical-align: top;
+    }
+  }
+
+  .responsive-audit-table {
+    :global(.arco-table-content-inner) {
+      width: 100%;
+    }
+
+    :global(.arco-table-container table) {
+      width: 100% !important;
+      min-width: 0 !important;
+      table-layout: fixed;
+    }
+
+    :global(.arco-table-container colgroup col:nth-child(n + 2)) {
+      display: none;
+      width: 0 !important;
+    }
+
+    :global(.arco-table-container colgroup col:first-child) {
+      width: auto !important;
+    }
+
+    :global(.arco-table-th),
+    :global(.arco-table-td) {
+      padding: 12px 10px;
+      vertical-align: top;
+    }
+  }
+
+  .review-mobile-files {
+    color: var(--color-text-1);
+    font-size: 13px;
+    font-weight: 500;
+    overflow-wrap: anywhere;
+
+    span {
+      display: block;
+    }
+  }
+
+  .user-name-cell {
+    align-items: stretch;
+  }
+
+  .user-name-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .admin-mobile-meta {
+    display: flex;
+    margin-top: 7px;
+    color: var(--color-text-3);
+    font-size: 12px;
+    line-height: 1.55;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .admin-mobile-label {
+    color: var(--color-text-2);
+  }
+
+  .admin-mobile-actions {
+    margin-top: 5px;
+
+    :global(.arco-space) {
+      row-gap: 2px !important;
+    }
+
+    :global(.arco-btn) {
+      min-height: 32px;
+      padding-right: 5px;
+      padding-left: 5px;
+    }
+  }
+
   .upload-config-grid {
     grid-template-columns: 1fr;
   }
@@ -631,7 +788,7 @@
   .config-section,
   .invitation-policy,
   .invitation-issue {
-    padding: 14px;
+    padding: 12px;
   }
 
   .site-icon-setting {
@@ -655,12 +812,55 @@
 
     :global(.arco-radio-button) {
       flex: 1 1 150px;
+      min-height: 40px;
       text-align: center;
+    }
+  }
+
+  .random-code-group {
+    padding: 12px;
+
+    :global(.arco-input-number) {
+      width: 100%;
     }
   }
 
   .form-actions button {
     width: 100%;
+  }
+
+  .invitation-policy {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+
+    button {
+      width: 100%;
+    }
+  }
+
+  .access-section-header button,
+  .group-section-toolbar button {
+    width: 100%;
+  }
+
+  .table-card {
+    :global(.arco-card-body) {
+      padding: 10px;
+    }
+
+    :global(.arco-table-container) {
+      margin-right: -10px;
+      margin-left: -10px;
+      padding-right: 10px;
+      padding-left: 10px;
+    }
+
+    :global(.arco-btn-size-mini) {
+      min-height: 34px;
+      padding-right: 9px;
+      padding-left: 9px;
+    }
   }
 
   :global(.arco-pagination) {

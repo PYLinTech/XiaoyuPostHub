@@ -31,6 +31,7 @@ type Session struct {
 	Status         string    `json:"status"`
 	ResourceID     *string   `json:"resourceId,omitempty"`
 	ErrorMessage   string    `json:"errorMessage,omitempty"`
+	ConflictAction string    `json:"conflictAction,omitempty"`
 	QueuePosition  int64     `json:"queuePosition"`
 	ReceivedChunks []int32   `json:"receivedChunks"`
 	CreatedAt      time.Time `json:"createdAt"`
@@ -49,11 +50,22 @@ type Chunk struct {
 
 func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
-func (r *Repo) CreateOrResume(ctx context.Context, ownerID int64, batchID string, parentID *string, filename string, totalSize int64, chunkSize, totalChunks int32, mimeType, checksum string) (Session, bool, error) {
+func (r *Repo) CreateOrResume(ctx context.Context, ownerID int64, batchID string, parentID *string, filename string, totalSize int64, chunkSize, totalChunks int32, mimeType, checksum, conflictAction string) (Session, bool, error) {
 	existing, err := r.findActive(ctx, ownerID, parentID, filename, checksum)
 	if err == nil {
 		if existing.TotalSize != totalSize {
 			return Session{}, false, ErrInvalidState
+		}
+		if existing.ConflictAction != conflictAction {
+			if _, err := r.pool.Exec(ctx, `
+				UPDATE upload_sessions
+				SET conflict_action=$3,updated_at=NOW()
+				WHERE id=$1 AND owner_user_id=$2
+				  AND status IN ('queued','uploading','paused','completing')`,
+				existing.ID, ownerID, conflictAction); err != nil {
+				return Session{}, false, err
+			}
+			existing.ConflictAction = conflictAction
 		}
 		return existing, true, nil
 	}
@@ -67,13 +79,13 @@ func (r *Repo) CreateOrResume(ctx context.Context, ownerID int64, batchID string
 	row := r.pool.QueryRow(ctx, `
 		INSERT INTO upload_sessions (
 			id, owner_user_id, batch_id, parent_id, filename, total_size, chunk_size,
-			total_chunks, mime_type, expected_sha256, queue_position
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+			total_chunks, mime_type, expected_sha256, conflict_action, queue_position
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
 			(SELECT COALESCE(MAX(queue_position), 0) + 1024 FROM upload_sessions WHERE owner_user_id=$2))
 		RETURNING id, owner_user_id, batch_id, parent_id, filename, total_size, chunk_size,
 		          total_chunks, mime_type, expected_sha256, status, resource_id,
-		          error_message, queue_position, created_at, updated_at, expires_at`,
-		id, ownerID, batchID, parentID, filename, totalSize, chunkSize, totalChunks, mimeType, checksum)
+		          error_message, conflict_action, queue_position, created_at, updated_at, expires_at`,
+		id, ownerID, batchID, parentID, filename, totalSize, chunkSize, totalChunks, mimeType, checksum, conflictAction)
 	session, err := scanSession(row)
 	if err != nil {
 		return Session{}, false, err
@@ -106,7 +118,7 @@ func (r *Repo) findActive(ctx context.Context, ownerID int64, parentID *string, 
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, owner_user_id, batch_id, parent_id, filename, total_size, chunk_size,
 		       total_chunks, mime_type, expected_sha256, status, resource_id,
-		       error_message, queue_position, created_at, updated_at, expires_at
+		       error_message, conflict_action, queue_position, created_at, updated_at, expires_at
 		FROM upload_sessions
 		WHERE owner_user_id=$1 AND parent_id IS NOT DISTINCT FROM $2 AND filename=$3
 		  AND expected_sha256=$4 AND status IN ('queued','uploading','paused','completing')
@@ -126,7 +138,7 @@ func (r *Repo) GetOwned(ctx context.Context, ownerID int64, id string) (Session,
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, owner_user_id, batch_id, parent_id, filename, total_size, chunk_size,
 		       total_chunks, mime_type, expected_sha256, status, resource_id,
-		       error_message, queue_position, created_at, updated_at, expires_at
+		       error_message, conflict_action, queue_position, created_at, updated_at, expires_at
 		FROM upload_sessions WHERE id=$1 AND owner_user_id=$2`, id, ownerID)
 	session, err := scanSession(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -143,7 +155,7 @@ func (r *Repo) ListOwned(ctx context.Context, ownerID int64) ([]Session, error) 
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, owner_user_id, batch_id, parent_id, filename, total_size, chunk_size,
 		       total_chunks, mime_type, expected_sha256, status, resource_id,
-		       error_message, queue_position, created_at, updated_at, expires_at
+		       error_message, conflict_action, queue_position, created_at, updated_at, expires_at
 		FROM upload_sessions
 		WHERE owner_user_id=$1 AND status NOT IN ('completed','canceled')
 		ORDER BY queue_position, created_at LIMIT 100`, ownerID)
@@ -346,7 +358,7 @@ func scanSession(row scanner) (Session, error) {
 	var createdAt, updatedAt, expiresAt pgtype.Timestamptz
 	err := row.Scan(&item.ID, &item.OwnerUserID, &item.BatchID, &parentID, &item.Filename, &item.TotalSize,
 		&item.ChunkSize, &item.TotalChunks, &item.MimeType, &item.ExpectedSHA256,
-		&item.Status, &resourceID, &item.ErrorMessage, &item.QueuePosition, &createdAt, &updatedAt, &expiresAt)
+		&item.Status, &resourceID, &item.ErrorMessage, &item.ConflictAction, &item.QueuePosition, &createdAt, &updatedAt, &expiresAt)
 	if err != nil {
 		return Session{}, err
 	}

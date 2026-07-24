@@ -23,12 +23,18 @@ var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var uploadBatchPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type initUploadRequest struct {
-	BatchID  string  `json:"batchId"`
-	Filename string  `json:"filename"`
-	ParentID *string `json:"parentId"`
-	Size     int64   `json:"size"`
-	MimeType string  `json:"mimeType"`
-	SHA256   string  `json:"sha256"`
+	BatchID        string  `json:"batchId"`
+	Filename       string  `json:"filename"`
+	ParentID       *string `json:"parentId"`
+	Size           int64   `json:"size"`
+	MimeType       string  `json:"mimeType"`
+	SHA256         string  `json:"sha256"`
+	ConflictAction string  `json:"conflictAction"`
+}
+
+type uploadConflictsRequest struct {
+	ParentID *string  `json:"parentId"`
+	Files    []string `json:"files"`
 }
 
 type uploadActionRequest struct {
@@ -54,6 +60,56 @@ func uploadConfigHandler(deps Deps) http.HandlerFunc {
 			"taskChunkConcurrency": settings.UploadTaskChunkConcurrency,
 			"userTaskConcurrency":  settings.UploadUserTaskConcurrency,
 		})
+	}
+}
+
+func uploadConflictsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u, ok := requireUser(w, r, deps)
+		if !ok {
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !u.HasPermission(permission.Upload) {
+			writeBusinessError(w, http.StatusForbidden, "没有上传权限")
+			return
+		}
+		var req uploadConflictsRequest
+		if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Files) > 1000 {
+			writeBusinessError(w, http.StatusBadRequest, "文件信息无效")
+			return
+		}
+		parentID := normalizeID(req.ParentID)
+		if parentID != nil {
+			parent, err := deps.ResourceRepo.GetOwned(r.Context(), u.ID, *parentID)
+			if err != nil || parent.Kind != resource.KindFolder {
+				writeBusinessError(w, http.StatusNotFound, "父文件夹不存在")
+				return
+			}
+		}
+		for _, name := range req.Files {
+			if _, err := resource.ValidateName(name); err != nil {
+				writeBusinessError(w, http.StatusBadRequest, "文件信息无效")
+				return
+			}
+		}
+		existing, err := deps.ResourceRepo.ExistingChildNames(r.Context(), u.ID, parentID, req.Files)
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "检查同名文件失败")
+			return
+		}
+		seen := make(map[string]bool)
+		conflicts := make([]map[string]any, 0)
+		for index, name := range req.Files {
+			if existing[name] || seen[name] {
+				conflicts = append(conflicts, map[string]any{"index": index, "filename": name})
+			}
+			seen[name] = true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "conflicts": conflicts})
 	}
 }
 
@@ -88,8 +144,16 @@ func uploadSessionsHandler(deps Deps) http.HandlerFunc {
 		req.Filename = strings.TrimSpace(req.Filename)
 		req.BatchID = strings.TrimSpace(req.BatchID)
 		req.SHA256 = strings.ToLower(strings.TrimSpace(req.SHA256))
+		req.ConflictAction = strings.TrimSpace(req.ConflictAction)
+		if req.ConflictAction == "" {
+			req.ConflictAction = "error"
+		}
 		if _, err := resource.ValidateName(req.Filename); err != nil || req.Size < 0 || !sha256Pattern.MatchString(req.SHA256) || (req.BatchID != "" && !uploadBatchPattern.MatchString(req.BatchID)) {
 			writeBusinessError(w, http.StatusBadRequest, "文件信息无效")
+			return
+		}
+		if req.ConflictAction != "error" && req.ConflictAction != "overwrite" && req.ConflictAction != "auto_rename" {
+			writeBusinessError(w, http.StatusBadRequest, "同名文件处理方式无效")
 			return
 		}
 		parentID := normalizeID(req.ParentID)
@@ -100,7 +164,20 @@ func uploadSessionsHandler(deps Deps) http.HandlerFunc {
 				return
 			}
 		}
-		if err := validateUploadQuota(r, deps, u.ID, req.Size, true); err != nil {
+		if req.ConflictAction == "auto_rename" {
+			availableName, nameErr := deps.ResourceRepo.AvailableChildName(r.Context(), u.ID, parentID, req.Filename)
+			if nameErr != nil {
+				writeBusinessError(w, http.StatusConflict, "无法生成可用文件名")
+				return
+			}
+			req.Filename = availableName
+		}
+		storageCredit, err := overwriteStorageCredit(r, deps, u.ID, parentID, req.Filename, req.ConflictAction)
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "读取存储配额失败")
+			return
+		}
+		if err := validateUploadQuota(r, deps, u.ID, req.Size, storageCredit, true); err != nil {
 			writeBusinessError(w, uploadQuotaStatus(err), err.Error())
 			return
 		}
@@ -117,7 +194,7 @@ func uploadSessionsHandler(deps Deps) http.HandlerFunc {
 		if req.BatchID == "" {
 			req.BatchID, _ = randomtoken.New(18)
 		}
-		session, resumed, err := deps.UploadRepo.CreateOrResume(r.Context(), u.ID, req.BatchID, parentID, req.Filename, req.Size, chunkSize, totalChunks, strings.TrimSpace(req.MimeType), req.SHA256)
+		session, resumed, err := deps.UploadRepo.CreateOrResume(r.Context(), u.ID, req.BatchID, parentID, req.Filename, req.Size, chunkSize, totalChunks, strings.TrimSpace(req.MimeType), req.SHA256, req.ConflictAction)
 		if err != nil {
 			writeBusinessError(w, http.StatusConflict, "无法创建上传任务")
 			return
@@ -127,13 +204,15 @@ func uploadSessionsHandler(deps Deps) http.HandlerFunc {
 		source, sourceErr := deps.ResourceRepo.FindFileByChecksum(r.Context(), req.SHA256, req.Size)
 		if sourceErr == nil && source.StorageKey != nil {
 			if _, err := deps.FileStore.ValidateFile(r.Context(), source); err == nil {
-				item, instantErr := cloneUploadedResource(r, deps, u.ID, parentID, req.Filename, req.MimeType, req.Size, req.SHA256, *source.StorageKey, session.BatchID)
+				item, oldStorageKey, instantErr := cloneUploadedResource(r, deps, u.ID, parentID, req.Filename, req.MimeType, req.Size, req.SHA256, *source.StorageKey, session.BatchID, session.ID, req.ConflictAction)
 				if instantErr != nil {
 					_ = deps.UploadRepo.SetStatus(r.Context(), u.ID, session.ID, "failed", "秒传失败")
 					writeResourceMutationError(w, instantErr)
 					return
 				}
-				_ = deps.UploadRepo.MarkCompleted(r.Context(), u.ID, session.ID, item.ID)
+				if oldStorageKey != nil {
+					_ = deps.FileStore.Remove(r.Context(), *oldStorageKey)
+				}
 				session, _ = deps.UploadRepo.GetOwned(r.Context(), u.ID, session.ID)
 				writeJSON(w, http.StatusCreated, map[string]any{"status": "ok", "instant": true, "resumed": resumed, "task": session, "resource": item})
 				return
@@ -349,7 +428,13 @@ func handleUploadComplete(w http.ResponseWriter, r *http.Request, deps Deps, own
 		writeBusinessError(w, http.StatusInternalServerError, "合并文件落盘失败")
 		return
 	}
-	if err := validateUploadQuota(r, deps, ownerID, session.TotalSize, true); err != nil {
+	storageCredit, err := overwriteStorageCredit(r, deps, ownerID, session.ParentID, session.Filename, session.ConflictAction)
+	if err != nil {
+		failUploadTask(r, deps, ownerID, sessionID, "读取存储配额失败")
+		writeBusinessError(w, http.StatusInternalServerError, "读取存储配额失败")
+		return
+	}
+	if err := validateUploadQuota(r, deps, ownerID, session.TotalSize, storageCredit, true); err != nil {
 		failUploadTask(r, deps, ownerID, sessionID, err.Error())
 		writeBusinessError(w, uploadQuotaStatus(err), err.Error())
 		return
@@ -366,64 +451,57 @@ func handleUploadComplete(w http.ResponseWriter, r *http.Request, deps Deps, own
 		return
 	}
 	committed = true
-	item, err := deps.ResourceRepo.CreateFile(r.Context(), ownerID, session.ParentID, session.Filename, storageKey, session.TotalSize, checksum, session.MimeType)
+	item, oldStorageKey, err := saveUploadedResource(r, deps, ownerID, session.ParentID, session.Filename, storageKey, session.TotalSize, checksum, session.MimeType, session.ConflictAction, session.BatchID, session.ID)
 	if err != nil {
 		_ = os.Remove(finalPath)
 		failUploadTask(r, deps, ownerID, sessionID, "保存资源失败")
 		writeResourceMutationError(w, err)
 		return
 	}
-	if err := applyUploadReview(r, deps, ownerID, item, finalPath, session.BatchID); err != nil {
-		failUploadTask(r, deps, ownerID, sessionID, "提交文件审核失败")
-		writeBusinessError(w, http.StatusInternalServerError, "提交文件审核失败")
-		return
-	}
-	if err := deps.UploadRepo.MarkCompleted(r.Context(), ownerID, sessionID, item.ID); err != nil {
-		writeBusinessError(w, http.StatusInternalServerError, "更新上传任务失败")
-		return
+	if oldStorageKey != nil {
+		_ = deps.FileStore.Remove(r.Context(), *oldStorageKey)
 	}
 	_ = deps.FileStore.RemoveUploadSession(r.Context(), sessionID)
 	writeJSON(w, http.StatusCreated, map[string]any{"status": "ok", "resource": item})
 }
 
-func cloneUploadedResource(r *http.Request, deps Deps, ownerID int64, parentID *string, filename, mimeType string, size int64, checksum, sourceStorageKey, uploadTaskID string) (resource.Resource, error) {
+func cloneUploadedResource(r *http.Request, deps Deps, ownerID int64, parentID *string, filename, mimeType string, size int64, checksum, sourceStorageKey, uploadTaskID, uploadSessionID, conflictAction string) (resource.Resource, *string, error) {
 	storageKey, err := resource.StorageKey()
 	if err != nil {
-		return resource.Resource{}, err
+		return resource.Resource{}, nil, err
 	}
 	path, err := deps.FileStore.CloneFile(r.Context(), sourceStorageKey, storageKey)
 	if err != nil {
-		return resource.Resource{}, err
+		return resource.Resource{}, nil, err
 	}
-	item, err := deps.ResourceRepo.CreateFile(r.Context(), ownerID, parentID, filename, storageKey, size, checksum, mimeType)
+	item, oldStorageKey, err := saveUploadedResource(r, deps, ownerID, parentID, filename, storageKey, size, checksum, mimeType, conflictAction, uploadTaskID, uploadSessionID)
 	if err != nil {
 		_ = os.Remove(path)
-		return resource.Resource{}, err
+		return resource.Resource{}, nil, err
 	}
-	if err := applyUploadReview(r, deps, ownerID, item, path, uploadTaskID); err != nil {
-		return resource.Resource{}, err
-	}
-	return item, nil
+	return item, oldStorageKey, nil
 }
 
-func applyUploadReview(r *http.Request, deps Deps, ownerID int64, item resource.Resource, finalPath, uploadTaskID string) error {
+func saveUploadedResource(r *http.Request, deps Deps, ownerID int64, parentID *string, filename, storageKey string, size int64, checksum, mimeType, conflictAction, uploadTaskID, uploadSessionID string) (resource.Resource, *string, error) {
 	settings, err := deps.AdminRepo.GetReviewSettings(r.Context())
 	if err != nil {
-		_, _ = deps.ResourceRepo.DeleteOwned(r.Context(), ownerID, item.ID)
-		_ = os.Remove(finalPath)
-		return err
+		return resource.Resource{}, nil, err
 	}
-	if settings.UploadRequiresReview {
-		if err := deps.AdminRepo.MarkFilePending(r.Context(), item.ID, uploadTaskID); err != nil {
-			_, _ = deps.ResourceRepo.DeleteOwned(r.Context(), ownerID, item.ID)
-			_ = os.Remove(finalPath)
-			return err
-		}
-	}
-	return nil
+	return deps.ResourceRepo.SaveUploadedFile(
+		r.Context(), ownerID, parentID, filename, storageKey, size, checksum,
+		mimeType, conflictAction == "overwrite", settings.UploadRequiresReview,
+		uploadTaskID, uploadSessionID,
+	)
 }
 
-func validateUploadQuota(r *http.Request, deps Deps, ownerID, size int64, includeStorage bool) error {
+func overwriteStorageCredit(r *http.Request, deps Deps, ownerID int64, parentID *string, filename, conflictAction string) (int64, error) {
+	if conflictAction != "overwrite" {
+		return 0, nil
+	}
+	return deps.ResourceRepo.ExistingChildFileSize(r.Context(), ownerID, parentID, filename)
+}
+
+func validateUploadQuota(r *http.Request, deps Deps, ownerID, size, storageCredit int64, includeStorage bool) error {
 	profile, err := deps.QuotaRepo.GetEffectiveQuotaByUser(r.Context(), ownerID)
 	if err != nil {
 		return fmt.Errorf("读取上传配额失败")
@@ -446,7 +524,7 @@ func validateUploadQuota(r *http.Request, deps Deps, ownerID, size int64, includ
 		if err != nil {
 			return fmt.Errorf("读取存储配额失败")
 		}
-		if current+size > profile.StorageBytesLimit.Int64 {
+		if current+size-storageCredit > profile.StorageBytesLimit.Int64 {
 			return fmt.Errorf("存储空间不足")
 		}
 	}

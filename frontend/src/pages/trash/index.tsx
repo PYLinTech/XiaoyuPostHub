@@ -106,7 +106,23 @@ export default function TrashPage() {
       render: (_, item: ResourceItem) => (
         <div className={styles['resource-name']}>
           <ResourceIcon kind={item.kind} />
-          <Typography.Text ellipsis>{item.name}</Typography.Text>
+          <div className={styles['resource-main']}>
+            <span className={styles['trash-resource-title']}>{item.name}</span>
+            <div className={styles['mobile-resource-meta']}>
+              <span>
+                {item.kind === 'folder'
+                  ? uiText('文件夹')
+                  : formatBytes(item.sizeBytes)}
+              </span>
+              <span>
+                {uiText('删除时间')}：{formatTime(item.trashedAt)}
+              </span>
+              <span>
+                {uiText('到期时间')}：
+                {approximateExpiry(item.trashedAt, retentionDays)}
+              </span>
+            </div>
+          </div>
         </div>
       ),
     },

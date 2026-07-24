@@ -87,6 +87,7 @@ export default function FilesPage() {
   const { addFiles } = useUploadManager();
   const permissions = userInfo?.permissions || [];
   const can = (permission: string) => permissions.includes(permission);
+  const canUpload = permissions.includes('upload');
   const [items, setItems] = useState<ResourceItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
@@ -107,6 +108,7 @@ export default function FilesPage() {
   const [previewResource, setPreviewResource] = useState<ResourceItem>();
   const fileInput = useRef<HTMLInputElement>();
   const parentId = path[path.length - 1]?.id;
+  const uploadPath = `/${path.slice(1).map((item) => item.name).join('/')}`;
   const load = useCallback(() => {
     setLoading(true);
     return axios
@@ -226,12 +228,36 @@ export default function FilesPage() {
       setCreatingFolder(false);
     }
   };
-  const upload = async (fileList?: FileList | null) => {
+  const upload = useCallback(async (fileList?: FileList | null) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    await addFiles(files, parentId);
+    await addFiles(files, parentId, uploadPath);
     if (fileInput.current) fileInput.current.value = '';
-  };
+  }, [addFiles, parentId, uploadPath]);
+  useEffect(() => {
+    const containsFiles = (event: DragEvent) =>
+      Array.from(event.dataTransfer?.types || []).includes('Files');
+    const handleDragOver = (event: DragEvent) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = canUpload ? 'copy' : 'none';
+    };
+    const handleDrop = (event: DragEvent) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      if (!canUpload) {
+        Message.warning(uiText('当前用户组未授予上传权限'));
+        return;
+      }
+      upload(event.dataTransfer?.files);
+    };
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('drop', handleDrop);
+    return () => {
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, [canUpload, upload]);
   const renameResource = async () => {
     if (!renameTarget || !renameName.trim()) {
       Message.warning(uiText('请输入新名称'));
@@ -288,13 +314,32 @@ export default function FilesPage() {
       render: (_, item: ResourceItem) => (
         <div className={styles['resource-name']}>
           <ResourceIcon kind={item.kind} />
-          <Button
-            className={styles['name-button']}
-            type="text"
-            onClick={() => openResource(item)}
-          >
-            {item.name}
-          </Button>
+          <div className={styles['resource-main']}>
+            <Button
+              className={styles['name-button']}
+              type="text"
+              onClick={() => openResource(item)}
+            >
+              {item.name}
+            </Button>
+            <div className={styles['mobile-resource-meta']}>
+              <span>
+                {item.kind === 'folder'
+                  ? uiText('文件夹')
+                  : `${uiText('文件')} · ${formatBytes(item.sizeBytes)}`}
+              </span>
+              {item.kind === 'file' &&
+                item.reviewStatus &&
+                item.reviewStatus !== 'approved' && (
+                  <span className={styles[`review-${item.reviewStatus}`]}>
+                    {item.reviewStatus === 'pending'
+                      ? uiText('待审核')
+                      : uiText('已驳回')}
+                  </span>
+                )}
+              <span>{formatTime(item.updatedAt)}</span>
+            </div>
+          </div>
         </div>
       ),
     },
@@ -478,6 +523,7 @@ export default function FilesPage() {
         />
       </Card>
       <Modal
+        className={styles['compact-modal']}
         visible={folderVisible}
         title={uiText('新建文件夹')}
         onCancel={() => {
@@ -517,6 +563,7 @@ export default function FilesPage() {
         onClose={() => setLinkVisible(false)}
       />
       <Modal
+        className={styles['compact-modal']}
         visible={Boolean(renameTarget)}
         title={uiText('重命名')}
         onCancel={() => {

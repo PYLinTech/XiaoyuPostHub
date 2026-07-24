@@ -761,7 +761,12 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 			writeBusinessError(w, 500, "读取系统配置失败")
 			return
 		}
-		writeJSON(w, 200, systemConfigResponse(settings))
+		allowed, required, err := deps.AdminRepo.ListTOTPPolicyGroups(r.Context())
+		if err != nil {
+			writeBusinessError(w, 500, "读取动态令牌用户组失败")
+			return
+		}
+		writeJSON(w, 200, systemConfigResponse(settings, allowed, required))
 		return
 	}
 	if r.Method != http.MethodPut {
@@ -804,10 +809,15 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 	}
 	ip := net.ParseIP(clientIP(r))
 	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview, "uploadChunkSizeBytes": settings.UploadChunkSizeBytes, "uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency, "uploadUserTaskConcurrency": settings.UploadUserTaskConcurrency, "trashRetentionDays": settings.TrashRetentionDays}, ip)
-	writeJSON(w, 200, systemConfigResponse(settings))
+	allowed, required, err := deps.AdminRepo.ListTOTPPolicyGroups(r.Context())
+	if err != nil {
+		writeBusinessError(w, 500, "读取动态令牌用户组失败")
+		return
+	}
+	writeJSON(w, 200, systemConfigResponse(settings, allowed, required))
 }
 
-func systemConfigResponse(settings sqlcgen.SystemSetting) map[string]any {
+func systemConfigResponse(settings sqlcgen.SystemSetting, allowedGroups, requiredGroups []string) map[string]any {
 	return map[string]any{
 		"status": "ok", "siteName": settings.SiteName, "siteIconUrl": currentSiteIconURL(settings.StoragePath),
 		"customHomepageConfigured": customHomepageConfigured(settings.StoragePath),
@@ -820,6 +830,8 @@ func systemConfigResponse(settings sqlcgen.SystemSetting) map[string]any {
 		"pickupCodeIncludeLetters": settings.PickupIncludeLetters, "pickupCodeIncludeNumbers": settings.PickupIncludeNumbers,
 		"pickupMaxLifetimeSeconds": nullableInt64(settings.PickupMaxLifetimeSeconds),
 		"loginTOTPEnabled":         settings.LoginTotpEnabled,
+		"loginTOTPAllowedGroups":   allowedGroups,
+		"loginTOTPRequiredGroups":  requiredGroups,
 		"uploadRequiresReview":     settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview,
 		"uploadChunkSizeBytes":       settings.UploadChunkSizeBytes,
 		"uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency,

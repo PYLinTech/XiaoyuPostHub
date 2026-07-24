@@ -18,7 +18,7 @@ export default function PickupPage() {
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
 
   const lifetimeText = () => {
-    if (lifetimeSeconds == null) return uiText('当前系统配置取件码永久有效');
+    if (lifetimeSeconds == null) return uiText('当前系统配置取件码：永久有效');
     const days = Math.floor(lifetimeSeconds / 86400);
     const remainingHours = (lifetimeSeconds % 86400) / 3600;
     const hours = Number.isInteger(remainingHours)
@@ -83,7 +83,7 @@ export default function PickupPage() {
           <IconDownload className={shareStyles['lock-icon']} />
           <Typography.Title heading={4}>{uiText('输入取件码')}</Typography.Title>
           <Typography.Text type="secondary">{lifetimeText()}</Typography.Text>
-          <div className={styles.code} style={{ gridTemplateColumns: `repeat(${Math.min(length, 12)}, 44px)` }}>
+          <div className={styles.code} style={{ gridTemplateColumns: `repeat(${Math.min(length, 12)}, minmax(36px, 44px))` }}>
             {characters.map((character, index) => (
               <input
                 key={index}
