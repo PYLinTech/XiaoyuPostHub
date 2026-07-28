@@ -540,7 +540,7 @@ function SystemConfig() {
                       <FormItem field="pickupCodeIncludeLetters" triggerPropName="checked"><Checkbox>{uiText('包含字母')}</Checkbox></FormItem>
                       <FormItem field="pickupCodeIncludeNumbers" triggerPropName="checked"><Checkbox>{uiText('包含数字')}</Checkbox></FormItem>
                     </div>
-                    <FormItem label={uiText('取件码有效期')} field="pickupLifetimeHours" rules={[{ type: 'integer', min: 1 }]}>
+                    <FormItem label={uiText('取件码有效期')} field="pickupLifetimeHours" rules={[{ type: 'number', min: 1 }]}>
                       <InputNumber min={1} step={1} precision={0} suffix={uiText('小时')} placeholder={uiText('永久有效')} />
                     </FormItem>
                   </div>

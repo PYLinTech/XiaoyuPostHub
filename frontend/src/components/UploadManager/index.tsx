@@ -686,12 +686,15 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           </div>
           {conflicts.map((item) => (
             <div className={styles['conflict-row']} key={`${item.index}-${item.filename}`}>
-              <Typography.Text ellipsis={{ showTooltip: true }}>
+              <span className={styles['conflict-name']} title={item.filename}>
                 {item.filename}
-              </Typography.Text>
-              <Typography.Text type="secondary" ellipsis={{ showTooltip: true }}>
+              </span>
+              <span className={styles['conflict-path']} title={conflictPath || '/'}>
+                <span className={styles['conflict-path-label']}>
+                  {uiText('待上传路径')}：
+                </span>
                 {conflictPath || '/'}
-              </Typography.Text>
+              </span>
               <Space size={4} className={styles['conflict-actions']}>
                 {(['overwrite', 'skip', 'auto_rename'] as ConflictAction[]).map((action) => (
                   <Button

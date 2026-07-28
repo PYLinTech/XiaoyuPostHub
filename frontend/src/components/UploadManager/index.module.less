@@ -121,9 +121,20 @@
   }
 }
 
-.conflict-row > :global(.arco-typography) {
+.conflict-name,
+.conflict-path {
   min-width: 0;
-  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.conflict-path {
+  color: var(--color-text-3);
+}
+
+.conflict-path-label {
+  display: none;
 }
 
 .conflict-actions {
@@ -131,23 +142,70 @@
 }
 
 @media (max-width: 640px) {
+  .conflict-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    border: 0;
+  }
+
   .conflict-list-header {
     display: none;
   }
 
+  /* 移动端每行冲突以类卡片形式展示，结构与移动端列表项一致 */
   .conflict-row {
     align-items: stretch;
+    gap: 10px;
     grid-template-columns: 1fr;
+    padding: 12px;
+    border: 1px solid var(--color-border-2);
+    border-radius: 8px;
+    background: var(--color-fill-1);
+
+    &:last-child {
+      border-bottom: 1px solid var(--color-border-2);
+    }
+  }
+
+  .conflict-name {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-weight: 500;
+    line-height: 1.45;
+  }
+
+  .conflict-path {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .conflict-path-label {
+    display: inline;
   }
 
   .conflict-actions {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+
+    :global(.arco-space-item) {
+      margin-right: 0 !important;
+    }
 
     :global(.arco-btn) {
+      width: 100%;
+      height: 100%;
       min-width: 0;
+      min-height: 34px;
       padding-right: 6px;
       padding-left: 6px;
+      white-space: normal;
+      line-height: 1.25;
     }
   }
 }
