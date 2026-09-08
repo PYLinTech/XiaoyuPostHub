@@ -24,17 +24,13 @@ axios.interceptors.response.use(undefined, (error) => {
     error?.response?.status === 401 &&
     path !== '/login' &&
     path !== '/m' &&
-    !path.startsWith('/s/') &&
-    !path.startsWith('/d/')
+    !path.startsWith('/s/')
   ) {
     window.location.replace('/login');
   }
   return Promise.reject(error);
 });
 const PublicSharePage = React.lazy(() => import('./pages/share'));
-const PublicDirectDownloadPage = React.lazy(
-  () => import('./pages/direct-download')
-);
 const PickupPage = React.lazy(() => import('./pages/pickup'));
 
 function Index() {
@@ -46,8 +42,7 @@ function Index() {
   const privatePage =
     window.location.pathname !== '/login' &&
     window.location.pathname !== '/m' &&
-    !window.location.pathname.startsWith('/s/') &&
-    !window.location.pathname.startsWith('/d/');
+    !window.location.pathname.startsWith('/s/');
 
   const [userInfo, setUserInfo] = useState<UserInfo>();
   const [userLoading, setUserLoading] = useState(privatePage);
@@ -151,11 +146,6 @@ function Index() {
             <Route exact path="/m">
               <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
                 <PickupPage />
-              </Suspense>
-            </Route>
-            <Route path="/d/:token">
-              <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
-                <PublicDirectDownloadPage />
               </Suspense>
             </Route>
             <Route path="/" component={PageLayout} />

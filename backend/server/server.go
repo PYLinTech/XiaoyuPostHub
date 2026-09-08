@@ -52,6 +52,11 @@ func NewRouter(staticDir string, deps Deps) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", APIHandler(deps))
+	// 直链即数据：/d/<token> 必须挂在外层 mux（APIHandler 只接收 /api/ 前缀），
+	// 由后端直接返回文件流，可直接浏览器下载或 curl 调用；错误保持 JSON 协议。
+	if deps.ResourceRepo != nil && deps.SharingRepo != nil && deps.FileStore != nil && deps.QuotaRepo != nil && deps.SystemSettings != nil {
+		mux.HandleFunc("/d/", directDownloadHandler(deps))
+	}
 	// API 必须保留结构化 JSON 错误；浏览器静态页面继续使用内置 HTML 错误页。
 	mux.Handle("/", WithErrorPage(homePageHandler(deps, staticH)))
 	return mux, nil
@@ -112,7 +117,6 @@ func APIHandler(deps Deps) http.Handler {
 		mux.HandleFunc("/api/direct-links", createDirectLinkHandler(deps))
 		mux.HandleFunc("/api/direct-links/manage", directLinkBatchManageHandler(deps))
 		mux.HandleFunc("/api/direct-links/manage/", directLinkManageHandler(deps))
-		mux.HandleFunc("/api/direct/", directDownloadHandler(deps))
 		mux.HandleFunc("/api/share-downloads/", shareDownloadJobHandler(deps))
 	}
 	if deps.AdminRepo != nil && deps.SystemSettings != nil {

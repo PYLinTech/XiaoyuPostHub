@@ -889,7 +889,7 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		token := strings.TrimPrefix(r.URL.Path, "/api/direct/")
+		token := strings.TrimPrefix(r.URL.Path, "/d/")
 		if token == "" || strings.Contains(token, "/") {
 			writeBusinessError(w, http.StatusNotFound, "直链不存在")
 			return

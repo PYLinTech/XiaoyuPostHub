@@ -10,8 +10,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/server"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/session"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/sharing"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
@@ -114,6 +119,63 @@ func TestNewRouter_APIUnknownReturnsJSON(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"status":"error"`) {
 		t.Errorf("body doesn't look like JSON API error: %q", string(body[:min(80, len(body))]))
+	}
+}
+
+// TestNewRouter_DirectLinkRouteTakesOverFromSPA 验证直链路由挂载在外层 mux:
+// 业务依赖完整时 /d/<token> 由直链数据接口接管(空 token → 404 JSON),
+// 不落入 SPA fallback 返回 HTML;依赖不完整时仍按 SPA 处理(对照)。
+// 回归背景:/d/ 曾误挂在仅接收 /api/ 前缀的 APIHandler 内,导致直链返回 index.html。
+func TestNewRouter_DirectLinkRouteTakesOverFromSPA(t *testing.T) {
+	// 依赖不完整:/d/ 未注册,回落 SPA。
+	spaSrv := newTestServer(t)
+	defer spaSrv.Close()
+	resp, err := http.Get(spaSrv.URL + "/d/whatever")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
+		t.Errorf("incomplete deps: status = %d, content-type = %q, want SPA fallback", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	_ = body
+
+	// 依赖完整(构造期仅校验非 nil,空 token 分支不触库):/d/ → 404 JSON。
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>home</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h, err := server.NewRouter(dir, server.Deps{
+		UserRepo:       &user.Repo{},
+		SessionRepo:    &session.Repo{},
+		ResourceRepo:   &resource.Repo{},
+		SharingRepo:    &sharing.Repo{},
+		FileStore:      &filestore.Store{},
+		QuotaRepo:      &quota.Repo{},
+		SystemSettings: &systemsetting.Repo{},
+		CookieSecure:   true,
+	})
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	apiSrv := httptest.NewServer(h)
+	defer apiSrv.Close()
+
+	resp2, err := http.Get(apiSrv.URL + "/d/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	body2, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 from direct download handler", resp2.StatusCode)
+	}
+	if strings.Contains(resp2.Header.Get("Content-Type"), "text/html") {
+		t.Errorf("content-type = %q, want JSON (not SPA fallback)", resp2.Header.Get("Content-Type"))
+	}
+	if !strings.Contains(string(body2), `"status":"error"`) {
+		t.Errorf("body doesn't look like JSON API error: %q", string(body2[:min(80, len(body2))]))
 	}
 }
 
