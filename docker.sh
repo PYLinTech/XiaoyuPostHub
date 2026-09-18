@@ -56,8 +56,8 @@ XIAOYUPOSTHUB_PORT=8080
 # 前端
 STATIC_DIR=/app/web
 
-# HTTPS 使用 true，直接 HTTP 使用 false
-SESSION_COOKIE_SECURE=false
+# 本地试跑走 HTTP，关闭 HTTPS 相关要求
+HTTPS_ENABLED=false
 EOF
 printf '完成：写入本地配置\n'
 

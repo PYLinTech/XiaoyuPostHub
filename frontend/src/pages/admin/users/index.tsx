@@ -33,6 +33,13 @@ import {
 import { AdminPageHeader } from '../shared';
 import styles from '../style/index.module.less';
 import uiText from '@/utils/uiText';
+import { SealEnvironmentError, isSealStale, submitSealed } from '@/utils/loginSeal';
+import {
+  PASSWORD_MAX_CHARS,
+  PASSWORD_MIN_CHARS,
+  charCount,
+  passwordMeetsStrength,
+} from '@/utils/credentialPolicy';
 import { GlobalContext } from '@/context';
 const TabPane = Tabs.TabPane;
 interface UserItem {
@@ -70,6 +77,21 @@ function Users() {
   const [passwordTarget, setPasswordTarget] = useState<UserItem>();
   const [password, setPassword] = useState('');
   const [passwordAgain, setPasswordAgain] = useState('');
+  // 重设密码的实时提示：与后端 user.ValidateNewPassword 同一套规则，
+  // 直接显示在输入框下方，用户不必等到提交才知道哪里不合规。
+  const passwordHint = useMemo(() => {
+    if (!password) return '';
+    if (charCount(password) > PASSWORD_MAX_CHARS) {
+      return uiText('请勿超过 18 位');
+    }
+    if (charCount(password) < PASSWORD_MIN_CHARS) {
+      return uiText('密码至少 8 位');
+    }
+    if (!passwordMeetsStrength(password)) {
+      return uiText('密码太简单，请混合使用字母、数字或符号');
+    }
+    return '';
+  }, [password]);
   const [groupModalVisible, setGroupModalVisible] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupDescription, setNewGroupDescription] = useState('');
@@ -210,8 +232,8 @@ function Users() {
   };
   const resetPassword = async () => {
     if (!passwordTarget) return;
-    if (password.length < 8) {
-      Message.warning(uiText('密码至少需要 8 个字符'));
+    if (passwordHint) {
+      Message.warning(passwordHint);
       return;
     }
     if (password !== passwordAgain) {
@@ -220,15 +242,21 @@ function Users() {
     }
     setSaving(true);
     try {
-      await resetUserPassword(passwordTarget.id, {
-        password,
-      });
+      await submitSealed({ password }, (envelope) =>
+        resetUserPassword(passwordTarget.id, envelope)
+      );
       Message.success(uiText('密码已重设，该用户的现有登录已失效'));
       setPasswordTarget(undefined);
       setPassword('');
       setPasswordAgain('');
     } catch (error) {
-      Message.error(apiErrorMessage(error, uiText('重设密码失败')));
+      if (isSealStale(error)) {
+        Message.error(uiText('安全通道已更新，请重试'));
+      } else if (error instanceof SealEnvironmentError) {
+        Message.error(uiText('当前站点要求使用 HTTPS 登录，请改用 HTTPS 地址访问'));
+      } else {
+        Message.error(apiErrorMessage(error, uiText('重设密码失败')));
+      }
     } finally {
       setSaving(false);
     }
@@ -722,15 +750,23 @@ function Users() {
             width: '100%',
           }}
         >
-          <Input.Password
-            value={password}
-            maxLength={1024}
-            placeholder={uiText('输入新密码（至少 8 个字符）')}
-            onChange={setPassword}
-          />
+          <div>
+            <Input.Password
+              value={password}
+              placeholder={uiText('输入新密码（8-18 位，建议混合字母与数字）')}
+              onChange={setPassword}
+            />
+            {passwordHint ? (
+              <Typography.Text
+                type="error"
+                style={{ display: 'block', marginTop: 4, fontSize: 12 }}
+              >
+                {passwordHint}
+              </Typography.Text>
+            ) : null}
+          </div>
           <Input.Password
             value={passwordAgain}
-            maxLength={1024}
             placeholder={uiText('再次输入新密码')}
             onChange={setPasswordAgain}
           />

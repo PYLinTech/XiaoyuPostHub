@@ -30,9 +30,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	h, err := server.NewRouter(dir, server.Deps{
-		UserRepo:     &user.Repo{},
-		SessionRepo:  &session.Repo{},
-		CookieSecure: true,
+		UserRepo:    &user.Repo{},
+		SessionRepo: &session.Repo{},
+		HTTPS:       true,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
@@ -154,7 +154,7 @@ func TestNewRouter_DirectLinkRouteTakesOverFromSPA(t *testing.T) {
 		FileStore:      &filestore.Store{},
 		QuotaRepo:      &quota.Repo{},
 		SystemSettings: &systemsetting.Repo{},
-		CookieSecure:   true,
+		HTTPS:          true,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)

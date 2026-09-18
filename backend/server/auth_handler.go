@@ -22,15 +22,17 @@ const lockedFailureDelay = 1500 * time.Millisecond
 
 // ---------- 协议结构 ----------
 
-// loginRequest 对齐前端约定的登录请求体字段名。
+// loginPayload 是解密后的登录载荷（外层是 sealedRequest 加密信封）。
 //
-// 前端固定发 userName / password（驼峰），不能用 username。
-type loginRequest struct {
+// 字段名对齐前端约定的请求体字段名：前端固定发 userName / password（驼峰），
+// 不能用 username。
+type loginPayload struct {
 	UserName string `json:"userName"`
 	Password string `json:"password"`
 }
 
-type registerRequest struct {
+// registerPayload 是解密后的注册载荷。
+type registerPayload struct {
 	UserName       string `json:"userName"`
 	Password       string `json:"password"`
 	InvitationCode string `json:"invitationCode"`
@@ -71,7 +73,8 @@ const defaultUserAvatar = "/assets/default-avatar.svg"
 //
 // 协议：
 //   - Method：仅 POST；其他 → 405
-//   - Body：JSON { userName, password }
+//   - Body：加密信封 sealedRequest，解密后为 { userName, password }；
+//     公钥与 nonce 来自 GET /api/user/login/seal，明文密码不再被接受
 //   - 成功：200 + {"status":"ok"} + Set-Cookie: xph_session=<token>
 //   - 失败：200 + {"status":"error","msg":"..."}（业务错误统一用 200，
 //     让前端只看 status 字段；只有"方法不允许"用 405）
@@ -89,13 +92,14 @@ func loginHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var req loginRequest
-		if err := decodeJSON(w, r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "请求格式错误"})
+		var req loginPayload
+		if !openSealedPayload(w, r, deps, &req) {
 			return
 		}
-		if len(req.UserName) > 64 || len(req.Password) > 1024 {
-			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "请求格式错误"})
+		// 账号与密码统一限制在 18 位以内（按 Unicode 字符计数）：所有合法凭据
+		// 都在该范围内，超长输入直接拒绝。
+		if user.CharCount(req.UserName) > user.UsernameMaxChars || user.CharCount(req.Password) > user.PasswordMaxChars {
+			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "账号与密码均不能超过 18 位"})
 			return
 		}
 
@@ -206,7 +210,7 @@ func loginHandler(deps Deps) http.HandlerFunc {
 			}
 		}
 
-		http.SetCookie(w, newSessionCookie(token, deps.CookieSecure))
+		http.SetCookie(w, newSessionCookie(token, deps.HTTPS))
 
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "requiresTOTPSetup": showSetupWarning})
 	}
@@ -243,7 +247,7 @@ func totpLoginHandler(deps Deps) http.HandlerFunc {
 			writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "创建登录会话失败"})
 			return
 		}
-		http.SetCookie(w, newSessionCookie(token, deps.CookieSecure))
+		http.SetCookie(w, newSessionCookie(token, deps.HTTPS))
 		writeJSON(w, 200, apiStatusResponse{Status: "ok"})
 	}
 }
@@ -323,21 +327,23 @@ func registerHandler(deps Deps) http.HandlerFunc {
 			writeJSON(w, http.StatusMethodNotAllowed, apiStatusResponse{Status: "error", Msg: "method not allowed"})
 			return
 		}
-		var req registerRequest
-		if err := decodeJSON(w, r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "请求格式错误"})
+		var req registerPayload
+		if !openSealedPayload(w, r, deps, &req) {
 			return
 		}
 		_, err := deps.UserRepo.Register(r.Context(), req.UserName, req.Password, req.InvitationCode)
 		switch {
+		case errors.Is(err, user.ErrUsernameLength),
+			errors.Is(err, user.ErrUsernameCharset),
+			errors.Is(err, user.ErrPasswordLength),
+			errors.Is(err, user.ErrPasswordTooWeak):
+			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: passwordPolicyMessage(err)})
 		case errors.Is(err, user.ErrInvitationRequired):
 			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "注册需要邀请码"})
 		case errors.Is(err, user.ErrInvitationInvalid):
 			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "邀请码无效或已被使用"})
 		case errors.Is(err, user.ErrUsernameUnavailable):
 			writeJSON(w, http.StatusConflict, apiStatusResponse{Status: "error", Msg: "账号已存在"})
-		case errors.Is(err, user.ErrRegistrationInput):
-			writeJSON(w, http.StatusBadRequest, apiStatusResponse{Status: "error", Msg: "账号至少 3 个字符，密码至少 8 个字符"})
 		case err != nil:
 			log.Printf("注册用户失败：%v", err)
 			writeJSON(w, http.StatusInternalServerError, apiStatusResponse{Status: "error", Msg: "注册失败"})
@@ -360,7 +366,7 @@ func logoutHandler(deps Deps) http.HandlerFunc {
 				return
 			}
 		}
-		http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
+		http.SetCookie(w, expiredSessionCookie(deps.HTTPS))
 		writeJSON(w, 200, apiStatusResponse{Status: "ok"})
 	}
 }
@@ -414,7 +420,7 @@ func userInfoHandler(deps Deps) http.HandlerFunc {
 
 		u, err := deps.UserRepo.GetByID(r.Context(), userID)
 		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, user.ErrUserDisabled) {
-			http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
+			http.SetCookie(w, expiredSessionCookie(deps.HTTPS))
 			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "未登录"})
 			return
 		}
@@ -424,7 +430,7 @@ func userInfoHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if !u.HasPermission(permission.Login) {
-			http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
+			http.SetCookie(w, expiredSessionCookie(deps.HTTPS))
 			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "未登录"})
 			return
 		}

@@ -34,6 +34,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/inbox"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/loginseal"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/server"
@@ -49,6 +50,11 @@ func main() {
 		password, err := io.ReadAll(io.LimitReader(os.Stdin, 4097))
 		if err != nil || len(password) == 0 || len(password) > 4096 {
 			log.Fatal("invalid password input")
+		}
+		// 管理员密码与站内新设密码适用同一套规则（8 至 18 位、至少两类字符），
+		// 校验失败时安装脚本会提示重新输入。
+		if err := user.ValidateNewPassword(string(password)); err != nil {
+			log.Fatal(err)
 		}
 		hash, err := user.HashPassword(string(password))
 		if err != nil {
@@ -125,6 +131,14 @@ func main() {
 	uploadRecoveryCancel()
 	staticPath := cfg.StaticDir
 
+	// 登录载荷加密：密钥对只在内存中生成，进程重启即轮换，不落盘、不入库；
+	// 允许的填充方式由 HTTPS_ENABLED 固定，HTTPS 部署不接受弱填充。
+	passwordSeal, err := loginseal.New(cfg.HTTPSEnabled)
+	if err != nil {
+		log.Fatalf("初始化登录加密密钥失败：%v", err)
+	}
+	log.Printf("登录载荷加密已启用：keyId=%s，算法=%s（内存密钥，重启自动轮换）", passwordSeal.KeyID(), passwordSeal.Algorithm())
+
 	// 注入可信反向代理网段（未配置时保持“优先采信 X-Real-IP”的历史行为）。
 	server.SetTrustedProxies(cfg.TrustedProxyCIDRs)
 
@@ -140,7 +154,9 @@ func main() {
 		AdminRepo:      adminRepo,
 		InboxRepo:      inboxRepo,
 		UploadRepo:     uploadRepo,
-		CookieSecure:   cfg.SessionCookieSecure,
+		HTTPS:          cfg.HTTPSEnabled,
+		PasswordSeal:   passwordSeal,
+		HSTSEnabled:    cfg.HSTSEnabled,
 	})
 	if err != nil {
 		log.Fatalf("初始化 HTTP 路由失败：%v", err)

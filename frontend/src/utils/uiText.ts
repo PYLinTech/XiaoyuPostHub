@@ -657,6 +657,43 @@ const copy: Record<string, CopyEntry> = {
     '密码至少需要 8 个字符',
     'Password must contain at least 8 characters',
   ],
+  '请勿超过 18 位': ['请勿超过 18 位', 'Please do not exceed 18 characters'],
+  '密码至少 8 位': ['密码至少 8 位', 'Password must be at least 8 characters'],
+  '密码太简单，请混合使用字母、数字或符号': [
+    '密码太简单，请混合使用字母、数字或符号',
+    'Password is too easy to guess. Mix letters, numbers, or symbols',
+  ],
+  '输入新密码（8-18 位，建议混合字母与数字）': [
+    '输入新密码（8-18 位，建议混合字母与数字）',
+    'Enter a new password (8-18 characters)',
+  ],
+  '安全通道已更新，请重试': [
+    '安全通道已更新，请重试',
+    'Secure channel refreshed. Please try again',
+  ],
+  '安全通道不可用': ['安全通道不可用', 'Secure channel unavailable'],
+  '安全校验已过期，请重试': [
+    '安全校验已过期，请重试',
+    'Security check expired. Please try again',
+  ],
+  '账号需为 3 至 18 位': ['账号需为 3 至 18 位', 'Username must be 3-18 characters'],
+  '账号不能包含空白或控制字符': [
+    '账号不能包含空白或控制字符',
+    'Username cannot contain spaces or control characters',
+  ],
+  '密码需为 8 至 18 位': ['密码需为 8 至 18 位', 'Password must be 8-18 characters'],
+  '账号或密码不符合要求': [
+    '账号或密码不符合要求',
+    'Username or password does not meet the requirements',
+  ],
+  '账号与密码均不能超过 18 位': [
+    '账号与密码均不能超过 18 位',
+    'Username and password must not exceed 18 characters',
+  ],
+  '当前站点要求使用 HTTPS 登录，请改用 HTTPS 地址访问': [
+    '当前站点要求使用 HTTPS 登录，请改用 HTTPS 地址访问',
+    'This site requires HTTPS for sign-in. Please open the HTTPS address',
+  ],
   已关闭邀请码注册要求: [
     '注册不再需要邀请码',
     'Invitation codes are no longer required',

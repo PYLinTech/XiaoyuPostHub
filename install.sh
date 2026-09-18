@@ -254,6 +254,20 @@ prompt_secret_required() {
     printf '%s' "${value}"
 }
 
+# password_meets_strength 判断密码是否至少包含小写字母、大写字母、数字、
+# 其他字符（符号、中文等）四类中的两类，与后端 user.ValidateNewPassword 一致。
+# 固定按 C locale 判定，保证字符范围就是 ASCII，不受运行环境 locale 影响。
+password_meets_strength() {
+    local password="$1" classes=0 stripped=""
+    local LC_ALL=C
+    [[ "${password}" =~ [a-z] ]] && classes=$((classes + 1))
+    [[ "${password}" =~ [A-Z] ]] && classes=$((classes + 1))
+    [[ "${password}" =~ [0-9] ]] && classes=$((classes + 1))
+    stripped="$(printf '%s' "${password}" | tr -d 'a-zA-Z0-9')"
+    [[ -n "${stripped}" ]] && classes=$((classes + 1))
+    [[ ${classes} -ge 2 ]]
+}
+
 # ensure_env_file 创建空配置骨架；随后由配置检查逐项补全。
 ensure_env_file() {
     [[ -f "${ENV_FILE}" ]] && return 0
@@ -278,8 +292,13 @@ XIAOYUPOSTHUB_NETWORK_EXTERNAL=
 # 前端
 STATIC_DIR=/app/web
 
-# HTTPS 使用 true，直接 HTTP 使用 false
-SESSION_COOKIE_SECURE=true
+# 站点是否通过 HTTPS 对外提供服务，默认 true（会话 Cookie 带 Secure 属性、
+# 登录加密使用 RSA-OAEP）；纯 HTTP 部署必须设为 false（Cookie 不带 Secure
+# 属性、登录加密改用兼容填充 RSA1_5）。
+HTTPS_ENABLED=true
+
+# HSTS：默认启用；纯 HTTP 部署下浏览器会忽略该响应头，如需完全静默可设为 false。
+# HSTS_ENABLED=true
 
 # 可信反向代理网段（可选，逗号分隔的 CIDR）。
 # 配置后只有来自这些网段的请求才采信 X-Real-IP，防止直连客户端伪造该头
@@ -379,19 +398,19 @@ ensure_fixed_defaults() {
     value="$(read_env_value STATIC_DIR)"
     [[ -n "${value}" ]] || write_env_value STATIC_DIR /app/web
 
-    value="$(read_env_value SESSION_COOKIE_SECURE)"
+    value="$(read_env_value HTTPS_ENABLED)"
     normalized="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
     case "${normalized}" in
         true|false) ;;
-        "") write_env_value SESSION_COOKIE_SECURE true ;;
+        "") write_env_value HTTPS_ENABLED true ;;
         *)
-            warn "SESSION_COOKIE_SECURE 只能是 true 或 false"
-            require_interactive_fix SESSION_COOKIE_SECURE
+            warn "HTTPS_ENABLED 只能是 true 或 false"
+            require_interactive_fix HTTPS_ENABLED
             while true; do
-                value="$(prompt_default "是否仅允许 HTTPS Cookie（true/false）" "true")"
+                value="$(prompt_default "站点是否通过 HTTPS 提供服务（true/false）" "true")"
                 normalized="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]')"
                 case "${normalized}" in
-                    true|false) write_env_value SESSION_COOKIE_SECURE "${normalized}"; break ;;
+                    true|false) write_env_value HTTPS_ENABLED "${normalized}"; break ;;
                     *) warn "请输入 true 或 false" ;;
                 esac
             done
@@ -623,8 +642,18 @@ configure_super_admin() {
         warn "管理员账号不能为空且不能包含单引号" >&2
     done
     while true; do
-        printf "站点管理员密码: " >&2; IFS= read -r -s first; printf "\n" >&2
+        printf "站点管理员密码（8-18 位，需混合字母、数字或符号中的至少两类）: " >&2
+        IFS= read -r -s first; printf "\n" >&2
         [[ -n "${first}" ]] || { warn "密码不能为空" >&2; continue; }
+        # ${#first} 按当前 locale 的字符数计；UTF-8 环境下中文按一位计算，
+        # 与后端 rune 计数一致。极端 C locale 下会按字节计，届时只是提示
+        # 用户改用更短的密码，后端仍会做权威校验。
+        if [[ "${#first}" -lt 8 || "${#first}" -gt 18 ]]; then
+            warn "密码需为 8 至 18 位（中文等字符按一位计算）" >&2; continue
+        fi
+        if ! password_meets_strength "${first}"; then
+            warn "密码太简单，请混合使用字母、数字或符号" >&2; continue
+        fi
         printf "确认管理员密码: " >&2; IFS= read -r -s second; printf "\n" >&2
         [[ "${first}" == "${second}" ]] || { warn "两次密码不一致" >&2; continue; }
         hash="$(printf %s "${first}" | docker run --rm -i \

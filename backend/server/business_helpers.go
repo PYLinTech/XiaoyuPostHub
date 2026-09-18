@@ -43,7 +43,7 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any, maxBytes in
 func requireUser(w http.ResponseWriter, r *http.Request, deps Deps) (user.User, bool) {
 	u, err := authenticatedUser(deps, r)
 	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, user.ErrUserDisabled) {
-		http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
+		http.SetCookie(w, expiredSessionCookie(deps.HTTPS))
 		writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "未登录"})
 		return user.User{}, false
 	}
@@ -52,7 +52,7 @@ func requireUser(w http.ResponseWriter, r *http.Request, deps Deps) (user.User, 
 		return user.User{}, false
 	}
 	if !u.HasPermission(permission.Login) {
-		http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
+		http.SetCookie(w, expiredSessionCookie(deps.HTTPS))
 		writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "未登录"})
 		return user.User{}, false
 	}

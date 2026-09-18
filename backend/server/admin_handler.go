@@ -75,6 +75,7 @@ type adminUserGroupsRequest struct {
 	GroupIDs []int64 `json:"groupIds"`
 }
 
+// adminResetPasswordRequest 是解密后的重设密码载荷（外层是加密信封）。
 type adminResetPasswordRequest struct {
 	Password string `json:"password"`
 }
@@ -502,8 +503,11 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user.groups.update", "user", username, map[string]any{"groupIds": req.GroupIDs}, net.ParseIP(clientIP(r)))
 	case "password":
 		var req adminResetPasswordRequest
-		if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Password) < 8 || len(req.Password) > 1024 {
-			writeBusinessError(w, http.StatusBadRequest, "密码长度应为 8 至 1024 个字符")
+		if !openSealedPayload(w, r, deps, &req) {
+			return
+		}
+		if err := user.ValidateNewPassword(req.Password); err != nil {
+			writeBusinessError(w, http.StatusBadRequest, passwordPolicyMessage(err))
 			return
 		}
 		hash, err := user.HashPassword(req.Password)

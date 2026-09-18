@@ -32,7 +32,6 @@ var (
 	ErrInvitationRequired  = errors.New("user: 注册需要邀请码")
 	ErrInvitationInvalid   = errors.New("user: 邀请码无效或已被使用")
 	ErrUsernameUnavailable = errors.New("user: 用户名已存在")
-	ErrRegistrationInput   = errors.New("user: 用户名或密码格式不符合要求")
 )
 
 // Repo 业务层访问 users 表的入口。
@@ -204,8 +203,16 @@ func (r *Repo) RegistrationPolicy(ctx context.Context) (RegistrationPolicy, erro
 func (r *Repo) Register(ctx context.Context, name, password, invitationCode string) (User, error) {
 	name = strings.TrimSpace(name)
 	invitationCode = strings.TrimSpace(invitationCode)
-	if len(name) < 3 || len(name) > 64 || len(password) < 8 || len(password) > 1024 || name == config.EnvSuperAdmin {
-		return User{}, ErrRegistrationInput
+	if name == config.EnvSuperAdmin {
+		return User{}, ErrUsernameUnavailable
+	}
+	// 账号与密码的规则（长度、字符集、强度）在 password.go 中定义，
+	// 注册、管理员重设密码与内部哈希模式共用同一套判断。
+	if err := ValidateUsername(name); err != nil {
+		return User{}, err
+	}
+	if err := ValidateNewPassword(password); err != nil {
+		return User{}, err
 	}
 	hash, err := HashPassword(password)
 	if err != nil {

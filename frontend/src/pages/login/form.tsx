@@ -1,8 +1,23 @@
 import { login, loginWithTotp, register, fetchRegistrationSettings } from '@/api/endpoints';
 import { apiErrorMessage } from '@/api/client';
+import {
+  SealEnvironmentError,
+  detectSealAvailability,
+  isSealStale,
+  securePageUrl,
+  submitSealed,
+} from '@/utils/loginSeal';
+import {
+  PASSWORD_MAX_CHARS,
+  PASSWORD_MIN_CHARS,
+  USERNAME_MAX_CHARS,
+  USERNAME_MIN_CHARS,
+  charCount,
+  passwordMeetsStrength,
+} from '@/utils/credentialPolicy';
 import { Form, Input, Button, Space, Message } from '@arco-design/web-react';
 import { FormInstance } from '@arco-design/web-react/es/Form';
-import { IconLock, IconUser } from '@arco-design/web-react/icon';
+import { IconLock, IconSafe, IconUser } from '@arco-design/web-react/icon';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import useLocale from '@/utils/useLocale';
 import locale from './locale';
@@ -12,6 +27,7 @@ export default function LoginForm() {
   const formRef = useRef<FormInstance>();
   const [errorMessage, setErrorMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [sealRequiresHTTPS, setSealRequiresHTTPS] = useState(false);
   const [challengeToken, setChallengeToken] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [registerMode, setRegisterMode] = useState(false);
@@ -24,10 +40,38 @@ export default function LoginForm() {
     includeNumbers: true,
   });
   const t = useLocale(locale);
+  // 预检服务端加密配置：站点要求 RSA-OAEP 而当前不是安全上下文（例如用
+  // http 地址打开）时，直接显示引导卡片，避免用户填完表单才发现提交不了。
+  useEffect(() => {
+    let cancelled = false;
+    detectSealAvailability().then((availability) => {
+      if (!cancelled && availability === 'needs-https') {
+        setSealRequiresHTTPS(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // 安全通道类失败单独成句：公钥随服务重启轮换，重试即可；站点要求 HTTPS
+  // 但当前不是安全上下文时给出明确指引；连公钥都取不到（网络异常）才提示
+  // 刷新页面。
+  function sealAwareMessage(error, fallback: string) {
+    if (isSealStale(error)) return t['login.form.seal.errMsg'];
+    if (error instanceof SealEnvironmentError) {
+      return t['login.form.seal.httpsRequiredErrMsg'];
+    }
+    const msg = error?.response?.data?.msg;
+    if (msg) return msg;
+    return error?.response ? fallback : t['login.form.seal.unavailableErrMsg'];
+  }
   function submitLogin(params) {
     setErrorMessage('');
     setLoading(true);
-    login(params)
+    submitSealed(
+      { userName: params.userName, password: params.password },
+      (envelope) => login(envelope)
+    )
       .then((res) => {
         const { status, msg } = res.data;
         if (status === 'totp_required') {
@@ -40,8 +84,7 @@ export default function LoginForm() {
         }
       })
       .catch((error) => {
-        const msg = error?.response?.data?.msg;
-        setErrorMessage(msg || t['login.form.login.errMsg']);
+        setErrorMessage(sealAwareMessage(error, t['login.form.login.errMsg']));
       })
       .finally(() => {
         setLoading(false);
@@ -76,11 +119,14 @@ export default function LoginForm() {
       }
       setErrorMessage('');
       setLoading(true);
-      register({
+      submitSealed(
+        {
           userName: values.userName,
           password: values.password,
           invitationCode: values.invitationCode || '',
-        })
+        },
+        (envelope) => register(envelope)
+      )
         .then(() => {
           Message.success(t['login.form.register.success']);
           setRegisterMode(false);
@@ -92,7 +138,7 @@ export default function LoginForm() {
         })
         .catch((error) => {
           setErrorMessage(
-            error?.response?.data?.msg || t['login.form.register.errMsg']
+            sealAwareMessage(error, t['login.form.register.errMsg'])
           );
           refreshRegistrationSettings();
         })
@@ -132,7 +178,25 @@ export default function LoginForm() {
   };
   return (
     <div className={styles['login-form-wrapper']}>
-      {challengeToken ? <>
+      {sealRequiresHTTPS ? (
+        <div className={styles['secure-guide']}>
+          <div className={styles['secure-guide-icon']}>
+            <IconSafe />
+          </div>
+          <div className={styles['secure-guide-title']}>
+            {t['login.form.seal.guideTitle']}
+          </div>
+          <div className={styles['secure-guide-desc']}>
+            {t['login.form.seal.guideDesc']}
+          </div>
+          <Button type="primary" long href={securePageUrl()}>
+            {t['login.form.seal.guideAction']}
+          </Button>
+          <div className={styles['secure-guide-hint']}>
+            {t['login.form.seal.guideHint']}
+          </div>
+        </div>
+      ) : challengeToken ? <>
         <div className={styles['login-form-title']}>{uiText('验证登录动态令牌')}</div>
         <div className={styles['login-form-sub-title']}>{uiText('打开验证器应用，输入当前显示的 6 位动态令牌。')}</div>
         <div className={styles['login-form-error-msg']}>{errorMessage}</div>
@@ -160,10 +224,25 @@ export default function LoginForm() {
       <Form className={styles['login-form']} layout="vertical" ref={formRef}>
         <Form.Item
           field="userName"
+          validateTrigger="onChange"
           rules={[
             {
               required: true,
               message: t['login.form.userName.errMsg'],
+            },
+            {
+              validator: (value: string, callback) => {
+                if (!value) return;
+                const count = charCount(value);
+                if (count > USERNAME_MAX_CHARS) {
+                  callback(t['login.form.userName.maxErrMsg']);
+                  return;
+                }
+                // 最小长度只约束新注册的账号，登录只校验 18 位上限。
+                if (registerMode && count < USERNAME_MIN_CHARS) {
+                  callback(t['login.form.userName.minErrMsg']);
+                }
+              },
             },
           ]}
         >
@@ -175,16 +254,41 @@ export default function LoginForm() {
         </Form.Item>
         <Form.Item
           field="password"
+          validateTrigger="onChange"
           rules={[
             {
               required: true,
               message: t['login.form.password.errMsg'],
             },
+            {
+              validator: (value: string, callback) => {
+                if (!value) return;
+                const count = charCount(value);
+                if (count > PASSWORD_MAX_CHARS) {
+                  callback(t['login.form.password.maxErrMsg']);
+                  return;
+                }
+                // 最小长度与强度只约束新设置的密码（注册与重设一致），
+                // 登录只校验 18 位上限。
+                if (!registerMode) return;
+                if (count < PASSWORD_MIN_CHARS) {
+                  callback(t['login.form.password.minErrMsg']);
+                  return;
+                }
+                if (!passwordMeetsStrength(value)) {
+                  callback(t['login.form.password.strengthErrMsg']);
+                }
+              },
+            },
           ]}
         >
           <Input.Password
             prefix={<IconLock />}
-            placeholder={t['login.form.password.placeholder']}
+            placeholder={
+              registerMode
+                ? t['login.form.password.registerPlaceholder']
+                : t['login.form.password.placeholder']
+            }
             onPressEnter={onSubmitClick}
           />
         </Form.Item>

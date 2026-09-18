@@ -11,7 +11,7 @@ import (
 //   - 名称固定为 xph_session
 //   - HttpOnly：JS 无法读取，避免被 XSS 偷
 //   - SameSite=Lax：跨站 GET 允许（普通导航），跨站 POST 拦截
-//   - Secure：由 SESSION_COOKIE_SECURE 控制，默认启用
+//   - Secure：由 HTTPS_ENABLED 控制，默认启用
 //   - 不设置 Domain：默认当前 host，避免跨子站携带
 //   - 不设置 Expires（MaxAge 已足够浏览器持久化）
 //

@@ -10,6 +10,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/inbox"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/loginseal"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/session"
@@ -19,7 +20,8 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
 
-// Deps 业务层依赖集合，由 main.go 构造后注入 NewRouter。
+//	Deps 业务层依赖集合，由 main.go 构造后注入 NewRouter。
+//
 // 后续 handler 通过 deps 使用用户、用户组和配额等仓库。
 type Deps struct {
 	UserRepo       *user.Repo
@@ -33,7 +35,14 @@ type Deps struct {
 	AdminRepo      *admin.Repo
 	InboxRepo      *inbox.Repo
 	UploadRepo     *upload.Repo
-	CookieSecure   bool
+	// HTTPS 声明站点是否通过 HTTPS 提供服务：为 false 时会话 Cookie 不带
+	// Secure 属性（否则浏览器不会在 HTTP 下回传）。
+	HTTPS bool
+	// PasswordSeal 提供账号密码类请求的公钥与解密能力。生产路径必须注入，
+	// 为空时相关接口返回"安全通道不可用"，不会退化为接受明文。
+	PasswordSeal *loginseal.Seal
+	// HSTSEnabled 控制是否下发 Strict-Transport-Security 响应头。
+	HSTSEnabled bool
 }
 
 // NewRouter 构造应用路由：/api/* 由 APIHandler 处理，其余路径由静态文件服务处理。
@@ -59,14 +68,31 @@ func NewRouter(staticDir string, deps Deps) (http.Handler, error) {
 	}
 	// API 必须保留结构化 JSON 错误；浏览器静态页面继续使用内置 HTML 错误页。
 	mux.Handle("/", WithErrorPage(homePageHandler(deps, staticH)))
+	// HSTS 覆盖全部响应（页面、API、直链），只在显式启用时下发。
+	if deps.HSTSEnabled {
+		return withHSTS(mux), nil
+	}
 	return mux, nil
+}
+
+// withHSTS 给所有响应补充 Strict-Transport-Security。
+//
+// 响应头只在 HTTPS 上被浏览器采纳（HTTP 响应会被忽略），因此默认启用对
+// 明文部署没有副作用；一旦站点以 HTTPS 提供服务，浏览器会记住并在一年内
+// 强制后续访问走 HTTPS，避免首次访问被降级劫持。
+func withHSTS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // APIHandler 注册后端 API。
 //
 // 路由清单：
 //   - GET  /api/health              存活探测
-//   - POST /api/user/login          登录（写 cookie）
+//   - GET  /api/user/login/seal     签发登录加密公钥与一次性 nonce
+//   - POST /api/user/login          登录（写 cookie，接收加密信封）
 //   - GET  /api/user/userInfo       当前会话用户信息（读 cookie）
 //   - POST /api/user/logout         登出（删除会话并清除 cookie）
 func APIHandler(deps Deps) http.Handler {
@@ -81,6 +107,8 @@ func APIHandler(deps Deps) http.Handler {
 		mux.HandleFunc("/api/site-icon", siteIconHandler(deps))
 	}
 
+	// 公钥与一次性 nonce 的签发入口：登录、注册与重设密码提交前都要先取回。
+	mux.HandleFunc("/api/user/login/seal", loginSealHandler(deps))
 	mux.HandleFunc("/api/user/login", loginHandler(deps))
 	mux.HandleFunc("/api/user/login/totp", totpLoginHandler(deps))
 	mux.HandleFunc("/api/user/totp", totpSettingsHandler(deps))

@@ -354,3 +354,87 @@ func TestLoadTrustedProxyCIDRs(t *testing.T) {
 		t.Fatalf("应解析出 2 个可信网段，得到 %d", len(cfg.TrustedProxyCIDRs))
 	}
 }
+
+// HTTPS_ENABLED 默认开启；纯 HTTP 部署显式设为 false；非法值必须让启动
+// 失败而不是静默降级。
+func TestLoad_HTTPSEnabled(t *testing.T) {
+	base := []string{
+		"DATABASE_URL=postgresql://user:pass@localhost:5432/db",
+		"SUPER_ADMIN_USERNAME=admin",
+		"SUPER_ADMIN_PASSWORD_HASH=" + bcryptCost12Hash,
+	}
+	dir := t.TempDir()
+
+	pathDefault := filepath.Join(dir, ".env")
+	if err := os.WriteFile(pathDefault, []byte(strings.Join(base, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(pathDefault)
+	if err != nil {
+		t.Fatalf("加载配置失败：%v", err)
+	}
+	if !cfg.HTTPSEnabled {
+		t.Fatal("HTTPS 应默认启用")
+	}
+
+	pathOff := filepath.Join(dir, ".env.off")
+	if err := os.WriteFile(pathOff, []byte(strings.Join(append(base, "HTTPS_ENABLED=false"), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgOff, err := Load(pathOff)
+	if err != nil {
+		t.Fatalf("加载配置失败：%v", err)
+	}
+	if cfgOff.HTTPSEnabled {
+		t.Fatal("HTTPS_ENABLED=false 应关闭 HTTPS")
+	}
+
+	pathBad := filepath.Join(dir, ".env.bad")
+	if err := os.WriteFile(pathBad, []byte(strings.Join(append(base, "HTTPS_ENABLED=yes"), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(pathBad); err == nil {
+		t.Fatal("非法 HTTPS_ENABLED 应返回错误")
+	}
+}
+
+// HSTS 默认启用，可显式关闭；非法值必须让启动失败而不是静默降级。
+func TestLoad_HSTSEnabled(t *testing.T) {
+	base := []string{
+		"DATABASE_URL=postgresql://user:pass@localhost:5432/db",
+		"SUPER_ADMIN_USERNAME=admin",
+		"SUPER_ADMIN_PASSWORD_HASH=" + bcryptCost12Hash,
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte(strings.Join(base, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败：%v", err)
+	}
+	if !cfg.HSTSEnabled {
+		t.Fatal("HSTS 应默认启用")
+	}
+
+	pathOff := filepath.Join(dir, ".env.off")
+	if err := os.WriteFile(pathOff, []byte(strings.Join(append(base, "HSTS_ENABLED=false"), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgOff, err := Load(pathOff)
+	if err != nil {
+		t.Fatalf("加载配置失败：%v", err)
+	}
+	if cfgOff.HSTSEnabled {
+		t.Fatal("HSTS_ENABLED=false 应关闭 HSTS")
+	}
+
+	pathBad := filepath.Join(dir, ".env.bad")
+	if err := os.WriteFile(pathBad, []byte(strings.Join(append(base, "HSTS_ENABLED=yes"), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(pathBad); err == nil {
+		t.Fatal("非法 HSTS_ENABLED 应返回错误")
+	}
+}

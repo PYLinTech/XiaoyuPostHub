@@ -14,6 +14,9 @@ export const fetchSiteConfig = () => axios.get('/api/site-config');
 
 /* -------------------------------- 账户 -------------------------------- */
 
+/** 登录加密信封：签发公钥与一次性 nonce（免登录，且响应不缓存）。 */
+export const fetchLoginSeal = () => axios.get('/api/user/login/seal');
+
 export const login = (payload: Record<string, unknown>) =>
   axios.post('/api/user/login', payload);
 

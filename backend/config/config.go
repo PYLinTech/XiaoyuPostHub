@@ -43,8 +43,22 @@ type Config struct {
 	SuperAdminPasswordHash string
 	StaticDir              string
 
-	// SessionCookieSecure 默认为 true；仅在明确使用 HTTP 时配置为 false。
-	SessionCookieSecure bool
+	// HTTPSEnabled 声明站点是否通过 HTTPS 对外提供服务，默认为 true。
+	//
+	// 它同时决定两件事：
+	//   - 会话 Cookie 是否带 Secure 属性（纯 HTTP 部署必须为 false，否则
+	//     浏览器不会回传 Cookie，登录状态无法保持）；
+	//   - 登录加密使用的填充方式（HTTPS → RSA-OAEP，纯 HTTP → RSA1_5）。
+	//
+	// 算法由服务端固定下发，前端不按浏览器环境自动回退，避免攻击者把加密
+	// 强度拉低到较弱的填充。
+	HTTPSEnabled bool
+
+	// HSTSEnabled 控制是否下发 Strict-Transport-Security 响应头，默认为 true。
+	//
+	// 响应头只在 HTTPS 上被浏览器采纳（HTTP 响应会被忽略），因此默认启用对
+	// 明文部署没有副作用；纯 HTTP 部署如需完全静默可显式配置 false。
+	HSTSEnabled bool
 
 	// TrustedProxyCIDRs 是可选的可信反向代理网段（逗号分隔 CIDR，如
 	// "172.17.0.0/16,127.0.0.1/32"）。
@@ -77,20 +91,31 @@ func Load(envFile string) (*Config, error) {
 		SuperAdminUsername:     pickValue("SUPER_ADMIN_USERNAME", fileKeys),
 		SuperAdminPasswordHash: pickValue("SUPER_ADMIN_PASSWORD_HASH", fileKeys),
 		StaticDir:              pickValue("STATIC_DIR", fileKeys),
-		SessionCookieSecure:    true,
+		HTTPSEnabled:           true,
+		HSTSEnabled:            true,
 		EnvFile:                envFile,
 	}
 	if strings.TrimSpace(c.StaticDir) == "" {
 		c.StaticDir = "/app/web"
 	}
-	if raw, ok := pickOptionalValue("SESSION_COOKIE_SECURE", fileKeys); ok {
+	if raw, ok := pickOptionalValue("HTTPS_ENABLED", fileKeys); ok {
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case "true":
-			c.SessionCookieSecure = true
+			c.HTTPSEnabled = true
 		case "false":
-			c.SessionCookieSecure = false
+			c.HTTPSEnabled = false
 		default:
-			return nil, fmt.Errorf("SESSION_COOKIE_SECURE 只能是 true 或 false")
+			return nil, fmt.Errorf("HTTPS_ENABLED 只能是 true 或 false")
+		}
+	}
+	if raw, ok := pickOptionalValue("HSTS_ENABLED", fileKeys); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "true":
+			c.HSTSEnabled = true
+		case "false":
+			c.HSTSEnabled = false
+		default:
+			return nil, fmt.Errorf("HSTS_ENABLED 只能是 true 或 false")
 		}
 	}
 	if raw, ok := pickOptionalValue("TRUSTED_PROXY_CIDRS", fileKeys); ok {

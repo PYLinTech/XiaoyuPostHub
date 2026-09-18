@@ -26,6 +26,7 @@
     "axios": "1.18.1",
     "classnames": "2.5.1",
     "dompurify": "3.4.12",
+    "jsencrypt": "3.5.4",
     "jszip": "3.10.1",
     "marked": "15.0.12",
     "react": "17.0.2",
