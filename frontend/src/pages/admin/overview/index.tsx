@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
+import { fetchAdminOverview } from '@/api/endpoints';
 import {
   Button,
   Card,
@@ -42,8 +42,7 @@ function Overview() {
   const [updatedAt, setUpdatedAt] = useState('');
   const load = () => {
     setLoading(true);
-    axios
-      .get('/api/admin/overview')
+    fetchAdminOverview()
       .then((res) => {
         setData(res.data.data);
         setUpdatedAt(

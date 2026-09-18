@@ -1,5 +1,6 @@
+import { fetchTrash, restoreTrashItem, deleteTrashItem, emptyTrash } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useCallback, useContext, useEffect, useState } from 'react';
-import axios from 'axios';
 import {
   Button,
   Card,
@@ -39,14 +40,13 @@ export default function TrashPage() {
 
   const load = useCallback(() => {
     setLoading(true);
-    return axios
-      .get('/api/trash')
+    return fetchTrash()
       .then((response) => {
         setItems(response.data.items || []);
         setRetentionDays(response.data.retentionDays || 30);
       })
       .catch((error) =>
-        Message.error(error?.response?.data?.msg || uiText('回收站加载失败'))
+        Message.error(apiErrorMessage(error, uiText('回收站加载失败')))
       )
       .finally(() => setLoading(false));
   }, []);
@@ -57,11 +57,11 @@ export default function TrashPage() {
 
   const restore = async (item: ResourceItem) => {
     try {
-      await axios.post(`/api/trash/${item.id}/restore`);
+      await restoreTrashItem(item.id);
       Message.success(uiText('恢复完成'));
       await load();
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('恢复失败'));
+      Message.error(apiErrorMessage(error, uiText('恢复失败')));
     }
   };
 
@@ -72,28 +72,28 @@ export default function TrashPage() {
       okButtonProps: { status: 'danger' },
       onOk: async () => {
         try {
-          await axios.delete(`/api/trash/${item.id}`);
+          await deleteTrashItem(item.id);
           Message.success(uiText('永久删除完成'));
           await load();
         } catch (error) {
-          Message.error(error?.response?.data?.msg || uiText('永久删除失败'));
+          Message.error(apiErrorMessage(error, uiText('永久删除失败')));
         }
       },
     });
   };
 
-  const emptyTrash = () => {
+  const confirmEmptyTrash = () => {
     Modal.confirm({
       title: uiText('清空回收站'),
       content: uiText('回收站中的全部内容将被永久删除且无法恢复。'),
       okButtonProps: { status: 'danger' },
       onOk: async () => {
         try {
-          await axios.delete('/api/trash');
+          await emptyTrash();
           Message.success(uiText('回收站已清空'));
           await load();
         } catch (error) {
-          Message.error(error?.response?.data?.msg || uiText('清空回收站失败'));
+          Message.error(apiErrorMessage(error, uiText('清空回收站失败')));
         }
       },
     });
@@ -196,7 +196,7 @@ export default function TrashPage() {
               status="danger"
               icon={<IconDelete />}
               disabled={!canDelete || !items.length}
-              onClick={emptyTrash}
+              onClick={confirmEmptyTrash}
             >
               {uiText('清空回收站')}
             </Button>

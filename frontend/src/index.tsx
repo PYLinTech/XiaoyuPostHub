@@ -1,3 +1,5 @@
+import { fetchSiteConfig, fetchUserInfo } from '@/api/endpoints';
+import '@/api/client';
 import './style/global.less';
 import '@arco-design/web-react/dist/css/arco.css';
 import React, { Suspense, useEffect, useState } from 'react';
@@ -6,30 +8,14 @@ import { ConfigProvider } from '@arco-design/web-react';
 import zhCN from '@arco-design/web-react/es/locale/zh-CN';
 import enUS from '@arco-design/web-react/es/locale/en-US';
 import { BrowserRouter, Switch, Route } from 'react-router-dom';
-import axios from 'axios';
 import PageLayout from './layout';
 import { GlobalContext, UserInfo } from './context';
-import Login from './pages/login';
 import changeTheme from './utils/changeTheme';
 import useStorage from './utils/useStorage';
 import projectSettings from './settings.json';
-import { uiServerText } from './utils/uiText';
 
-axios.interceptors.response.use(undefined, (error) => {
-  if (typeof error?.response?.data?.msg === 'string') {
-    error.response.data.msg = uiServerText(error.response.data.msg);
-  }
-  const path = window.location.pathname;
-  if (
-    error?.response?.status === 401 &&
-    path !== '/login' &&
-    path !== '/m' &&
-    !path.startsWith('/s/')
-  ) {
-    window.location.replace('/login');
-  }
-  return Promise.reject(error);
-});
+// 登录页与公开页面独立分包：已登录用户不必加载登录页的轮播等专属组件。
+const Login = React.lazy(() => import('./pages/login'));
 const PublicSharePage = React.lazy(() => import('./pages/share'));
 const PickupPage = React.lazy(() => import('./pages/pickup'));
 
@@ -58,10 +44,9 @@ function Index() {
     }
   }
 
-  function fetchUserInfo() {
+  function loadUserInfo() {
     setUserLoading(true);
-    axios
-      .get('/api/user/userInfo')
+    fetchUserInfo()
       .then((res) => {
         setUserInfo(res.data);
         setUserLoading(false);
@@ -79,7 +64,7 @@ function Index() {
 
   useEffect(() => {
     if (privatePage) {
-      fetchUserInfo();
+      loadUserInfo();
     }
   }, [privatePage]);
 
@@ -88,7 +73,7 @@ function Index() {
   }, []);
 
   useEffect(() => {
-    axios.get('/api/site-config').then((res) => {
+    fetchSiteConfig().then((res) => {
       const next = {
         siteName: res.data.siteName || 'XiaoyuPostHub',
         siteIconUrl: res.data.siteIconUrl || '',
@@ -137,7 +122,11 @@ function Index() {
       >
         <GlobalContext.Provider value={contextValue}>
           <Switch>
-            <Route path="/login" component={Login} />
+            <Route path="/login">
+              <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
+                <Login />
+              </Suspense>
+            </Route>
             <Route path="/s/:token">
               <Suspense fallback={<div style={{ minHeight: '100vh' }} />}>
                 <PublicSharePage />

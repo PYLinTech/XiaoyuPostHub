@@ -1,5 +1,6 @@
+import { fetchAdminSystemConfig, updateAdminSystemConfig, testAdminUpload, uploadSiteIcon, deleteSiteIcon, fetchCustomHomepage, saveCustomHomepage, deleteCustomHomepage } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useContext, useEffect, useRef, useState } from 'react';
-import axios from 'axios';
 import {
   Alert,
   Button,
@@ -37,8 +38,7 @@ function SystemConfig() {
   const [customHomepageEnabled, setCustomHomepageEnabled] = useState(false);
   const [customHomepageHTML, setCustomHomepageHTML] = useState('');
   useEffect(() => {
-    axios
-      .get('/api/admin/system-config')
+    fetchAdminSystemConfig()
       .then((res) => {
         form.setFieldsValue({
           ...res.data,
@@ -53,7 +53,7 @@ function SystemConfig() {
         setCustomHomepageConfigured(Boolean(res.data.customHomepageConfigured));
         setCustomHomepageEnabled(Boolean(res.data.customHomepageConfigured));
         if (res.data.customHomepageConfigured) {
-          axios.get('/api/admin/homepage').then((homepageRes) => {
+          fetchCustomHomepage().then((homepageRes) => {
             setCustomHomepageHTML(homepageRes.data.html || '');
           }).catch(() => Message.error(uiText('自定义首页内容加载失败')));
         }
@@ -73,7 +73,7 @@ function SystemConfig() {
       throw new Error('invalid random code charset');
     }
     const { uploadChunkSizeMB, pickupLifetimeHours, ...payload } = values;
-    const res = await axios.put('/api/admin/system-config', {
+    const res = await updateAdminSystemConfig({
       ...payload,
       pickupMaxLifetimeSeconds:
         pickupLifetimeHours == null || pickupLifetimeHours === ''
@@ -123,7 +123,7 @@ function SystemConfig() {
       await persistConfig(false);
       const body = new FormData();
       body.append('icon', file);
-      const res = await axios.post('/api/admin/site-icon', body);
+      const res = await uploadSiteIcon(body);
       setIconUrl(res.data.siteIconUrl || '');
       setSiteConfig?.({
         siteIconUrl: res.data.siteIconUrl || '',
@@ -141,14 +141,14 @@ function SystemConfig() {
   const removeIcon = async () => {
     try {
       setIconUploading(true);
-      const res = await axios.delete('/api/admin/site-icon');
+      const res = await deleteSiteIcon();
       setIconUrl('');
       setSiteConfig?.({
         siteIconUrl: res.data.siteIconUrl || '',
       });
       Message.success(uiText('已恢复默认站点图标'));
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('恢复默认图标失败'));
+      Message.error(apiErrorMessage(error, uiText('恢复默认图标失败')));
     } finally {
       setIconUploading(false);
     }
@@ -172,14 +172,14 @@ function SystemConfig() {
     try {
       setHomepageUploading(true);
       await persistConfig(false);
-      const res = await axios.post('/api/admin/homepage', {
+      const res = await saveCustomHomepage({
         html: customHomepageHTML,
       });
       setCustomHomepageConfigured(Boolean(res.data.customHomepageConfigured));
       setCustomHomepageEnabled(true);
       Message.success(uiText('自定义首页已保存并实时生效'));
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('首页保存失败'));
+      Message.error(apiErrorMessage(error, uiText('首页保存失败')));
     } finally {
       setHomepageUploading(false);
     }
@@ -187,13 +187,13 @@ function SystemConfig() {
   const removeHomepage = async () => {
     try {
       setHomepageUploading(true);
-      await axios.delete('/api/admin/homepage');
+      await deleteCustomHomepage();
       setCustomHomepageConfigured(false);
       setCustomHomepageEnabled(false);
       setCustomHomepageHTML('');
       Message.success(uiText('已恢复默认首页行为'));
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('恢复默认首页失败'));
+      Message.error(apiErrorMessage(error, uiText('恢复默认首页失败')));
     } finally {
       setHomepageUploading(false);
     }
@@ -203,9 +203,7 @@ function SystemConfig() {
       const values = await form.validate(['uploadChunkSizeMB']);
       const sizeBytes = values.uploadChunkSizeMB * 1024 * 1024;
       setChunkTesting(true);
-      await axios.post(
-        `/api/admin/system-config/upload-test?sizeBytes=${sizeBytes}`,
-        new Blob([new Uint8Array(sizeBytes)]),
+      await testAdminUpload(sizeBytes, new Blob([new Uint8Array(sizeBytes)]),
         { headers: { 'Content-Type': 'application/octet-stream' } }
       );
       Message.success(uiText('分片大小验证通过'));

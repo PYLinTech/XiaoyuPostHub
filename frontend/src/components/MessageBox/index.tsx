@@ -1,5 +1,5 @@
+import { fetchMessages, markMessagesRead, deleteMessages } from '@/api/endpoints';
 import React, { useCallback, useEffect, useState } from 'react';
-import axios from 'axios';
 import DOMPurify from 'dompurify';
 import {
   Trigger,
@@ -84,8 +84,7 @@ export function MessageCenter({
   const fetchSourceData = useCallback(
     (showLoading = true) => {
       showLoading && setLoading(true);
-      axios
-        .get('/api/messages', {
+      fetchMessages({
           params: {
             page: currentPage,
             pageSize,
@@ -122,7 +121,7 @@ export function MessageCenter({
   async function readMessage(data: MessageListType) {
     const ids = data.map((item) => item.id);
     try {
-      await axios.post('/api/messages/read', {
+      await markMessagesRead({
         ids: ids.map(Number),
       });
       setActiveMessage((current) =>
@@ -140,7 +139,7 @@ export function MessageCenter({
   }
   async function readAllMessages() {
     try {
-      await axios.post('/api/messages/read', {
+      await markMessagesRead({
         all: true,
       });
       setActiveMessage((current) =>
@@ -158,8 +157,7 @@ export function MessageCenter({
   }
   function clearMessages() {
     if (!total) return;
-    axios
-      .post('/api/messages/delete', {
+    deleteMessages({
         all: true,
       })
       .then(() => {
@@ -174,8 +172,7 @@ export function MessageCenter({
   }
   function deleteActiveMessage() {
     if (!activeMessage) return;
-    axios
-      .post('/api/messages/delete', {
+    deleteMessages({
         ids: [Number(activeMessage.id)],
       })
       .then(() => {
@@ -362,8 +359,7 @@ function MessageBox({
   const history = useHistory();
   const [unreadCount, setUnreadCount] = useState(0);
   useEffect(() => {
-    axios
-      .get('/api/messages?page=1&pageSize=1')
+    fetchMessages({ params: { page: 1, pageSize: 1 } })
       .then((res) => setUnreadCount(res.data.unreadCount || 0))
       .catch(() => setUnreadCount(0));
     const handleUnreadChange = (event: Event) =>

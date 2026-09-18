@@ -1,3 +1,5 @@
+import { fetchAdminUsers, setUserGroups, resetUserPassword, setUserDisabled, deleteUser, createUserGroup, updateUserGroup, deleteUserGroup, setUserGroupMembers } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, {
   useCallback,
   useContext,
@@ -5,7 +7,6 @@ import React, {
   useMemo,
   useState,
 } from 'react';
-import axios from 'axios';
 import {
   Button,
   Card,
@@ -49,11 +50,6 @@ interface UserGroupItem {
   isSystem: boolean;
   createdAt?: string;
 }
-function errorMessage(error: unknown, fallback: string) {
-  return axios.isAxiosError(error) && error.response?.data?.msg
-    ? error.response.data.msg
-    : fallback;
-}
 function Users() {
   const { userInfo } = useContext(GlobalContext);
   const adminPermissions = userInfo?.adminPermissions || [];
@@ -85,12 +81,12 @@ function Users() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await axios.get('/api/admin/users');
+      const res = await fetchAdminUsers();
       setItems(res.data.items || []);
       setGroups(res.data.groups || []);
       setSuperAdmin(res.data.superAdminUsername || '');
     } catch (error) {
-      Message.error(errorMessage(error, uiText('用户列表加载失败')));
+      Message.error(apiErrorMessage(error, uiText('用户列表加载失败')));
     } finally {
       setLoading(false);
     }
@@ -115,7 +111,7 @@ function Users() {
     }
     setSaving(true);
     try {
-      await axios.post('/api/admin/user-groups', {
+      await createUserGroup({
         name,
         description: newGroupDescription.trim(),
       });
@@ -125,7 +121,7 @@ function Users() {
       setNewGroupDescription('');
       await load();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('新增用户组失败')));
+      Message.error(apiErrorMessage(error, uiText('新增用户组失败')));
     } finally {
       setSaving(false);
     }
@@ -141,7 +137,7 @@ function Users() {
     }
     setSaving(true);
     try {
-      await axios.put(`/api/admin/user-groups/${editingGroup.id}`, {
+      await updateUserGroup(editingGroup.id, {
         name,
         description: editGroupDescription.trim(),
       });
@@ -149,7 +145,7 @@ function Users() {
       setEditingGroup(undefined);
       await load();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('更新用户组失败')));
+      Message.error(apiErrorMessage(error, uiText('更新用户组失败')));
     } finally {
       setSaving(false);
     }
@@ -168,11 +164,11 @@ function Users() {
       okButtonProps: { status: 'danger' },
       onOk: async () => {
         try {
-          await axios.delete(`/api/admin/user-groups/${group.id}`);
+          await deleteUserGroup(group.id);
           Message.success(uiText('用户组已删除'));
           await load();
         } catch (error) {
-          Message.error(errorMessage(error, uiText('删除用户组失败')));
+          Message.error(apiErrorMessage(error, uiText('删除用户组失败')));
           throw error;
         }
       },
@@ -182,7 +178,7 @@ function Users() {
     if (!membersGroup) return;
     setSaving(true);
     try {
-      await axios.put(`/api/admin/user-groups/${membersGroup.id}/members`, {
+      await setUserGroupMembers(membersGroup.id, {
         userIds: selectedMemberIds.filter(
           (id) => items.find((item) => item.id === id)?.username !== superAdmin
         ),
@@ -191,7 +187,7 @@ function Users() {
       setMembersGroup(undefined);
       await load();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('配置用户组成员失败')));
+      Message.error(apiErrorMessage(error, uiText('配置用户组成员失败')));
     } finally {
       setSaving(false);
     }
@@ -200,14 +196,14 @@ function Users() {
     if (!groupTarget) return;
     setSaving(true);
     try {
-      await axios.put(`/api/admin/users/${groupTarget.id}/groups`, {
+      await setUserGroups(groupTarget.id, {
         groupIds: selectedGroupIds,
       });
       Message.success(uiText('用户组归属已更新'));
       setGroupTarget(undefined);
       await load();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('更新用户组失败')));
+      Message.error(apiErrorMessage(error, uiText('更新用户组失败')));
     } finally {
       setSaving(false);
     }
@@ -224,7 +220,7 @@ function Users() {
     }
     setSaving(true);
     try {
-      await axios.put(`/api/admin/users/${passwordTarget.id}/password`, {
+      await resetUserPassword(passwordTarget.id, {
         password,
       });
       Message.success(uiText('密码已重设，该用户的现有登录已失效'));
@@ -232,7 +228,7 @@ function Users() {
       setPassword('');
       setPasswordAgain('');
     } catch (error) {
-      Message.error(errorMessage(error, uiText('重设密码失败')));
+      Message.error(apiErrorMessage(error, uiText('重设密码失败')));
     } finally {
       setSaving(false);
     }
@@ -251,7 +247,7 @@ function Users() {
         : undefined,
       onOk: async () => {
         try {
-          await axios.put(`/api/admin/users/${item.id}/disabled`, {
+          await setUserDisabled(item.id, {
             disabled,
           });
           Message.success(
@@ -259,13 +255,13 @@ function Users() {
           );
           await load();
         } catch (error) {
-          Message.error(errorMessage(error, uiText('更新用户状态失败')));
+          Message.error(apiErrorMessage(error, uiText('更新用户状态失败')));
           throw error;
         }
       },
     });
   };
-  const deleteUser = (item: UserItem) => {
+  const confirmDeleteUser = (item: UserItem) => {
     Modal.confirm({
       title: `${uiText('删除用户')} ${item.username}`,
       content: uiText(
@@ -276,11 +272,11 @@ function Users() {
       },
       onOk: async () => {
         try {
-          await axios.delete(`/api/admin/users/${item.id}`);
+          await deleteUser(item.id);
           Message.success(uiText('用户已删除'));
           await load();
         } catch (error) {
-          Message.error(errorMessage(error, uiText('删除用户失败')));
+          Message.error(apiErrorMessage(error, uiText('删除用户失败')));
           throw error;
         }
       },
@@ -331,7 +327,7 @@ function Users() {
               status="danger"
               icon={<IconDelete />}
               disabled={protectedUser}
-              onClick={() => deleteUser(record)}
+              onClick={() => confirmDeleteUser(record)}
             >
               {uiText('删除')}
             </Button>

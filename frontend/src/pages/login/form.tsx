@@ -1,8 +1,9 @@
+import { login, loginWithTotp, register, fetchRegistrationSettings } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import { Form, Input, Button, Space, Message } from '@arco-design/web-react';
 import { FormInstance } from '@arco-design/web-react/es/Form';
 import { IconLock, IconUser } from '@arco-design/web-react/icon';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import axios from 'axios';
 import useLocale from '@/utils/useLocale';
 import locale from './locale';
 import styles from './style/index.module.less';
@@ -23,11 +24,10 @@ export default function LoginForm() {
     includeNumbers: true,
   });
   const t = useLocale(locale);
-  function login(params) {
+  function submitLogin(params) {
     setErrorMessage('');
     setLoading(true);
-    axios
-      .post('/api/user/login', params)
+    login(params)
       .then((res) => {
         const { status, msg } = res.data;
         if (status === 'totp_required') {
@@ -54,9 +54,9 @@ export default function LoginForm() {
     }
     setLoading(true);
     setErrorMessage('');
-    axios.post('/api/user/login/totp', { challengeToken, code: totpCode })
+    loginWithTotp({ challengeToken, code: totpCode })
       .then(() => window.location.replace('/files'))
-      .catch((error) => setErrorMessage(error?.response?.data?.msg || uiText('动态令牌验证失败')))
+      .catch((error) => setErrorMessage(apiErrorMessage(error, uiText('动态令牌验证失败'))))
       .finally(() => setLoading(false));
   }
   useEffect(() => {
@@ -67,7 +67,7 @@ export default function LoginForm() {
   function onSubmitClick() {
     formRef.current.validate().then((values) => {
       if (!registerMode) {
-        login(values);
+        submitLogin(values);
         return;
       }
       if (values.password !== values.confirmPassword) {
@@ -76,8 +76,7 @@ export default function LoginForm() {
       }
       setErrorMessage('');
       setLoading(true);
-      axios
-        .post('/api/user/register', {
+      register({
           userName: values.userName,
           password: values.password,
           invitationCode: values.invitationCode || '',
@@ -101,8 +100,7 @@ export default function LoginForm() {
     });
   }
   const refreshRegistrationSettings = useCallback(() => {
-    return axios
-      .get('/api/user/registration-settings')
+    return fetchRegistrationSettings()
       .then((res) => {
         setRegistrationRequiresInvitation(
           !!res.data.registrationRequiresInvitation

@@ -1,21 +1,15 @@
+import { fetchUploadConfig, checkUploadConflicts, fetchUploadTasks, createUploadTask, fetchUploadTask, updateUploadTask, deleteUploadTask, uploadChunk, completeUploadTask } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, {
   createContext,
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from 'react';
 import axios from 'axios';
-import {
-  Button,
-  Message,
-  Modal,
-  Progress,
-  Space,
-  Typography,
-} from '@arco-design/web-react';
+import { Message } from '@arco-design/web-react';
 import { GlobalContext } from '@/context';
 import { blobSHA256, fileSHA256 } from '@/utils/sha256';
 import {
@@ -23,31 +17,27 @@ import {
   removeUploadFile,
   saveUploadFile,
 } from '@/utils/uploadFiles';
-import uiText, { uiServerText } from '@/utils/uiText';
-import styles from './index.module.less';
-import LiquidCapsuleProgress from './LiquidCapsuleProgress';
+import uiText from '@/utils/uiText';
+import {
+  canQueue,
+  DEFAULT_CONFIG,
+  MAX_PERSISTED_FILE_SIZE,
+  normalizeTask,
+} from './shared';
+import type {
+  ConflictAction,
+  UploadConfig,
+  UploadConflict,
+  UploadTask,
+} from './shared';
 
-interface UploadTask {
-  id: string;
-  filename: string;
-  parentId?: string;
-  totalSize: number;
-  chunkSize: number;
-  totalChunks: number;
-  receivedChunks: number[];
-  sha256: string;
-  status: string;
-  errorMessage?: string;
-  queuePosition?: number;
-  progress?: number;
-  local?: boolean;
-  needsFile?: boolean;
-}
-
-interface UploadConfig {
-  taskChunkConcurrency: number;
-  userTaskConcurrency: number;
-}
+// 上传面板（冲突弹窗、折叠胶囊与任务列表）独立分包：没有任务或冲突时
+// 不加载任何面板代码与样式。面板加载失败时静默降级，上传逻辑仍在主包。
+const UploadOverlay = React.lazy(() =>
+  import(/* webpackPrefetch: true */ './UploadOverlay').catch(() => ({
+    default: () => null,
+  }))
+);
 
 interface UploadContextValue {
   addFiles: (files: File[], parentId?: string, targetPath?: string) => Promise<void>;
@@ -57,75 +47,8 @@ const UploadContext = createContext<UploadContextValue>({
   addFiles: async () => undefined,
 });
 
-const DEFAULT_CONFIG: UploadConfig = {
-  taskChunkConcurrency: 3,
-  userTaskConcurrency: 2,
-};
-const MAX_PERSISTED_FILE_SIZE = 512 * 1024 * 1024;
-type ConflictAction = 'overwrite' | 'skip' | 'auto_rename';
-interface UploadConflict {
-  index: number;
-  filename: string;
-  action: ConflictAction;
-}
-
 export function useUploadManager() {
   return useContext(UploadContext);
-}
-
-function taskPercent(task: UploadTask) {
-  if (task.status === 'completed') return 100;
-  if (task.progress != null) return Math.max(0, Math.min(99, task.progress));
-  if (!task.totalChunks) return 0;
-  const receivedCount = Array.isArray(task.receivedChunks)
-    ? task.receivedChunks.length
-    : 0;
-  return Math.round((receivedCount * 100) / task.totalChunks);
-}
-
-function normalizeTask(task: UploadTask): UploadTask {
-  return {
-    ...task,
-    receivedChunks: Array.isArray(task.receivedChunks)
-      ? task.receivedChunks
-      : [],
-  };
-}
-
-function overallPercent(tasks: UploadTask[]) {
-  if (!tasks.length) return 0;
-  const totalWeight = tasks.reduce(
-    (sum, task) => sum + Math.max(1, task.totalSize),
-    0
-  );
-  const uploadedWeight = tasks.reduce(
-    (sum, task) =>
-      sum + (Math.max(1, task.totalSize) * taskPercent(task)) / 100,
-    0
-  );
-  return Math.round((uploadedWeight * 100) / totalWeight);
-}
-
-function taskStatus(task: UploadTask) {
-  if (task.needsFile) return uiText('等待重新选择文件');
-  const labels = {
-    hashing: uiText('正在校验文件'),
-    queued: uiText('等待上传'),
-    uploading: uiText('正在上传'),
-    paused: uiText('已暂停'),
-    completing: uiText('正在合并分片'),
-    completed: uiText('上传完成'),
-    failed: uiText('上传失败'),
-    canceled: uiText('已取消'),
-  };
-  return labels[task.status] || task.status;
-}
-
-function canQueue(task: UploadTask) {
-  return (
-    !task.local &&
-    !['completed', 'canceled', 'completing'].includes(task.status)
-  );
 }
 
 export function UploadProvider({ children }: { children: React.ReactNode }) {
@@ -168,7 +91,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         Message.warning(uiText('请先处理当前的同名文件'));
         return undefined;
       }
-      const response = await axios.post('/api/uploads/conflicts', {
+      const response = await checkUploadConflicts({
         parentId: parentId || null,
         files: files.map((file) => file.name),
       });
@@ -241,7 +164,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             const end = Math.min(file.size, start + task.chunkSize);
             const chunk = file.slice(start, end);
             const checksum = await blobSHA256(chunk);
-            await axios.put(`/api/uploads/${task.id}/chunks/${index}`, chunk, {
+            await uploadChunk(task.id, index, chunk, {
               signal: controller.signal,
               headers: {
                 'Content-Type': 'application/octet-stream',
@@ -275,7 +198,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         }
         if (blocked.current.has(task.id) || controller.signal.aborted) return;
         updateTask(task.id, { status: 'completing', progress: 99 });
-        const response = await axios.post(`/api/uploads/${task.id}/complete`);
+        const response = await completeUploadTask(task.id);
         const completed: UploadTask = {
           ...task,
           ...response.data.task,
@@ -291,7 +214,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') return;
         updateTask(task.id, {
           status: 'failed',
-          errorMessage: error?.response?.data?.msg || uiText('上传失败'),
+          errorMessage: apiErrorMessage(error, uiText('上传失败')),
         });
       } finally {
         running.current.delete(task.id);
@@ -306,8 +229,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     if (!ownerId) return;
     try {
       const [configResponse, taskResponse] = await Promise.all([
-        axios.get('/api/uploads/config'),
-        axios.get('/api/uploads'),
+        fetchUploadConfig(),
+        fetchUploadTasks(),
       ]);
       if (activeOwner.current !== ownerId) return;
       setConfig({
@@ -396,7 +319,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
       polling.current.add(task.id);
       window.setTimeout(async () => {
         try {
-          const response = await axios.get(`/api/uploads/${task.id}`);
+          const response = await fetchUploadTask(task.id);
           const latest: UploadTask = response.data.task;
           updateTask(task.id, latest);
           if (latest.status === 'completed') {
@@ -429,7 +352,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         decisions = await resolveUploadConflicts(files, parentId, targetPath);
       } catch (error) {
         Message.error(
-          error?.response?.data?.msg || uiText('检查同名文件失败')
+          apiErrorMessage(error, uiText('检查同名文件失败'))
         );
         return;
       }
@@ -465,7 +388,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
             fileCache.current.delete(localId);
             continue;
           }
-          const response = await axios.post('/api/uploads', {
+          const response = await createUploadTask({
             batchId,
             filename: file.name,
             parentId: parentId || null,
@@ -506,7 +429,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
         } catch (error) {
           updateTask(localId, {
             status: 'failed',
-            errorMessage: error?.response?.data?.msg || uiText('上传失败'),
+            errorMessage: apiErrorMessage(error, uiText('上传失败')),
           });
         }
       }
@@ -519,8 +442,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     controllers.current.get(task.id)?.abort();
     updateTask(task.id, { status: 'paused' });
     if (task.local) return;
-    await axios
-      .patch(`/api/uploads/${task.id}`, { action: 'pause' })
+    await updateUploadTask(task.id, { action: 'pause' })
       .catch(() => {
         updateTask(task.id, {
           status: 'failed',
@@ -542,15 +464,15 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     }
     blocked.current.delete(task.id);
     try {
-      await axios.patch(`/api/uploads/${task.id}`, { action: 'resume' });
-      const response = await axios.get(`/api/uploads/${task.id}`);
+      await updateUploadTask(task.id, { action: 'resume' });
+      const response = await fetchUploadTask(task.id);
       fileCache.current.set(task.id, file);
       updateTask(task.id, { ...response.data.task, needsFile: false });
       setSchedulerTick((value) => value + 1);
     } catch (error) {
       updateTask(task.id, {
         status: 'failed',
-        errorMessage: error?.response?.data?.msg || uiText('继续上传失败'),
+        errorMessage: apiErrorMessage(error, uiText('继续上传失败')),
       });
     }
   };
@@ -560,11 +482,11 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     controllers.current.get(task.id)?.abort();
     if (!task.local) {
       try {
-        await axios.delete(`/api/uploads/${task.id}`);
+        await deleteUploadTask(task.id);
       } catch (error) {
         updateTask(task.id, {
           errorMessage:
-            error?.response?.data?.msg || uiText('删除上传任务失败'),
+            apiErrorMessage(error, uiText('删除上传任务失败')),
         });
         return;
       }
@@ -601,7 +523,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     });
     if (task.local) return;
     try {
-      await axios.patch(`/api/uploads/${task.id}`, {
+      await updateUploadTask(task.id, {
         action: direction < 0 ? 'move_up' : 'move_down',
       });
     } catch {
@@ -633,14 +555,11 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     await resumeTask(task);
   };
 
-  const progress = useMemo(() => overallPercent(tasks), [tasks]);
-  const activeIndexes = useMemo(
-    () =>
-      tasks
-        .map((task, index) => (canQueue(task) ? index : -1))
-        .filter((index) => index >= 0),
-    [tasks]
-  );
+  const settleConflicts = (decisions?: Map<number, ConflictAction>) => {
+    setConflictVisible(false);
+    conflictResolver.current?.(decisions);
+    conflictResolver.current = undefined;
+  };
 
   return (
     <UploadContext.Provider value={{ addFiles }}>
@@ -654,174 +573,34 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           event.target.value = '';
         }}
       />
-      <Modal
-        title={uiText('处理同名文件')}
-        visible={conflictVisible}
-        style={{ width: 760, maxWidth: 'calc(100vw - 32px)' }}
-        okText={uiText('继续上传')}
-        cancelText={uiText('取消本次上传')}
-        autoFocus={false}
-        onCancel={() => {
-          setConflictVisible(false);
-          conflictResolver.current?.(undefined);
-          conflictResolver.current = undefined;
-        }}
-        onOk={() => {
-          setConflictVisible(false);
-          conflictResolver.current?.(
-            new Map(conflicts.map((item) => [item.index, item.action]))
-          );
-          conflictResolver.current = undefined;
-        }}
-        unmountOnExit
-      >
-        <Typography.Paragraph type="secondary">
-          {uiText('以下文件与待上传目录中的现有文件同名，请分别选择处理方式。')}
-        </Typography.Paragraph>
-        <div className={styles['conflict-list']}>
-          <div className={styles['conflict-list-header']}>
-            <span>{uiText('冲突文件名')}</span>
-            <span>{uiText('待上传路径')}</span>
-            <span>{uiText('处理方式')}</span>
-          </div>
-          {conflicts.map((item) => (
-            <div className={styles['conflict-row']} key={`${item.index}-${item.filename}`}>
-              <span className={styles['conflict-name']} title={item.filename}>
-                {item.filename}
-              </span>
-              <span className={styles['conflict-path']} title={conflictPath || '/'}>
-                <span className={styles['conflict-path-label']}>
-                  {uiText('待上传路径')}：
-                </span>
-                {conflictPath || '/'}
-              </span>
-              <Space size={4} className={styles['conflict-actions']}>
-                {(['overwrite', 'skip', 'auto_rename'] as ConflictAction[]).map((action) => (
-                  <Button
-                    key={action}
-                    size="small"
-                    type={item.action === action ? 'primary' : 'secondary'}
-                    onClick={() => setConflicts((current) => current.map((conflict) =>
-                      conflict.index === item.index ? { ...conflict, action } : conflict
-                    ))}
-                  >
-                    {uiText(action === 'overwrite' ? '覆盖' : action === 'skip' ? '跳过' : '自动重命名')}
-                  </Button>
-                ))}
-              </Space>
-            </div>
-          ))}
-        </div>
-      </Modal>
-      {tasks.length > 0 && collapsed && (
-        <LiquidCapsuleProgress
-          progress={progress}
-          ariaLabel={`${uiText('展开上传任务')} ${progress}%`}
-          onClick={() => setCollapsed(false)}
-        />
-      )}
-      {tasks.length > 0 && !collapsed && (
-        <aside className={styles.panel} aria-label={uiText('上传任务')}>
-          <div className={styles.header}>
-            <div>
-              <strong>{uiText('上传任务')}</strong>
-              <span>
-                {tasks.filter((task) => task.status === 'completed').length}/
-                {tasks.length} · {progress}%
-              </span>
-            </div>
-            <Button size="mini" type="text" onClick={() => setCollapsed(true)}>
-              {uiText('折叠')}
-            </Button>
-          </div>
-          <div className={styles.list}>
-            {tasks.map((task, index) => {
-              const queueIndex = activeIndexes.indexOf(index);
-              return (
-                <div className={styles.task} key={task.id}>
-                  <div className={styles['task-heading']}>
-                    <Typography.Text ellipsis>{task.filename}</Typography.Text>
-                    <span>{taskPercent(task)}%</span>
-                  </div>
-                  <Progress
-                    percent={taskPercent(task)}
-                    showText={false}
-                    status={task.status === 'failed' ? 'error' : 'normal'}
-                    size="small"
-                  />
-                  <div className={styles['task-footer']}>
-                    <Typography.Text
-                      type={task.status === 'failed' ? 'error' : 'secondary'}
-                      ellipsis
-                    >
-                      {task.errorMessage
-                        ? uiServerText(task.errorMessage)
-                        : taskStatus(task)}
-                    </Typography.Text>
-                    <Space size={2} className={styles.actions}>
-                      {canQueue(task) && (
-                        <>
-                          <Button
-                            size="mini"
-                            type="text"
-                            disabled={queueIndex <= 0}
-                            aria-label={uiText('上移')}
-                            onClick={() => moveTask(task, -1)}
-                          >
-                            ↑
-                          </Button>
-                          <Button
-                            size="mini"
-                            type="text"
-                            disabled={
-                              queueIndex < 0 ||
-                              queueIndex >= activeIndexes.length - 1
-                            }
-                            aria-label={uiText('下移')}
-                            onClick={() => moveTask(task, 1)}
-                          >
-                            ↓
-                          </Button>
-                        </>
-                      )}
-                      {['queued', 'uploading'].includes(task.status) && (
-                        <Button
-                          size="mini"
-                          type="text"
-                          onClick={() => pauseTask(task)}
-                        >
-                          {uiText('暂停')}
-                        </Button>
-                      )}
-                      {['paused', 'failed'].includes(task.status) &&
-                        !task.local && (
-                          <Button
-                            size="mini"
-                            type="text"
-                            onClick={() => resumeTask(task)}
-                          >
-                            {task.needsFile
-                              ? uiText('选择文件')
-                              : uiText('继续')}
-                          </Button>
-                        )}
-                      {task.status !== 'completing' && (
-                        <Button
-                          size="mini"
-                          type="text"
-                          status="danger"
-                          onClick={() => deleteTask(task)}
-                        >
-                          {uiText('删除')}
-                        </Button>
-                      )}
-                    </Space>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </aside>
+      {(tasks.length > 0 || conflictVisible) && (
+        <React.Suspense fallback={null}>
+          <UploadOverlay
+            tasks={tasks}
+            collapsed={collapsed}
+            conflicts={conflicts}
+            conflictPath={conflictPath}
+            conflictVisible={conflictVisible}
+            onCollapsedChange={setCollapsed}
+            onPause={pauseTask}
+            onResume={resumeTask}
+            onDelete={deleteTask}
+            onMove={moveTask}
+            onConflictActionChange={(index, action) =>
+              setConflicts((current) =>
+                current.map((conflict) =>
+                  conflict.index === index ? { ...conflict, action } : conflict
+                )
+              )
+            }
+            onConflictCancel={() => settleConflicts(undefined)}
+            onConflictConfirm={() =>
+              settleConflicts(
+                new Map(conflicts.map((item) => [item.index, item.action]))
+              )
+            }
+          />
+        </React.Suspense>
       )}
     </UploadContext.Provider>
   );

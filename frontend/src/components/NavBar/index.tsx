@@ -1,5 +1,5 @@
+import { logout } from '@/api/endpoints';
 import React, { useContext } from 'react';
-import axios from 'axios';
 import {
   Dropdown,
   Menu,
@@ -37,9 +37,9 @@ function NavActions({
   const t = useLocale();
   const { setLang, lang, userInfo, userLoading } = useContext(GlobalContext);
   const history = useHistory();
-  async function logout() {
+  async function handleLogout() {
     try {
-      await axios.post('/api/user/logout');
+      await logout();
       window.location.replace('/login');
     } catch (error) {
       Message.error(t['navbar.logout.failed']);
@@ -48,7 +48,7 @@ function NavActions({
   function onMenuItemClick(key) {
     onNavigate?.();
     if (key === 'logout') {
-      logout();
+      handleLogout();
     } else if (key === 'identity-admin') {
       const [, defaultAdminRoute] = getRoutesForUser(userInfo, true);
       history.push(`/${defaultAdminRoute}`);

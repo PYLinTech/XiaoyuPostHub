@@ -1,5 +1,5 @@
+import { createShare, createDirectLink } from '@/api/endpoints';
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
 import {
   Button,
   Checkbox,
@@ -107,7 +107,7 @@ export default function LinkModal({
       };
       const response =
         mode === 'share'
-          ? await axios.post('/api/shares', {
+          ? await createShare({
               ...common,
               shareType,
               resourceIds: resources.map((item) => item.id),
@@ -121,7 +121,7 @@ export default function LinkModal({
               description,
               descriptionFormat,
             })
-          : await axios.post('/api/direct-links', {
+          : await createDirectLink({
               ...common,
               resourceId: resource.id,
             });

@@ -1,3 +1,5 @@
+import { fetchResourceList, createFolder, renameResource, deleteResource, downloadResources } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, {
   useCallback,
   useContext,
@@ -111,8 +113,7 @@ export default function FilesPage() {
   const uploadPath = `/${path.slice(1).map((item) => item.name).join('/')}`;
   const load = useCallback(() => {
     setLoading(true);
-    return axios
-      .get('/api/resources', {
+    return fetchResourceList({
         params: parentId
           ? {
               parentId,
@@ -121,7 +122,7 @@ export default function FilesPage() {
       })
       .then((response) => setItems(response.data.items || []))
       .catch((error) =>
-        Message.error(error?.response?.data?.msg || uiText('文件列表加载失败'))
+        Message.error(apiErrorMessage(error, uiText('文件列表加载失败')))
       )
       .finally(() => setLoading(false));
   }, [parentId]);
@@ -175,15 +176,14 @@ export default function FilesPage() {
     setLinkMode(mode);
     setLinkVisible(true);
   };
-  const downloadResources = async (resources: ResourceItem[]) => {
+  const handleDownloadResources = async (resources: ResourceItem[]) => {
     if (!resources.length) {
       Message.warning(uiText('请至少选择一项内容'));
       return;
     }
     setDownloading(true);
     try {
-      const response = await axios.post(
-        '/api/resources',
+      const response = await downloadResources(
         {
           resourceIds: resources.map((item) => item.id),
         },
@@ -206,15 +206,15 @@ export default function FilesPage() {
     }
   };
   const downloadResource = (item?: ResourceItem) =>
-    downloadResources(item ? [item] : []);
-  const createFolder = async () => {
+    handleDownloadResources(item ? [item] : []);
+  const submitCreateFolder = async () => {
     if (!folderName.trim()) {
       Message.warning(uiText('请输入文件夹名称'));
       return;
     }
     setCreatingFolder(true);
     try {
-      await axios.post('/api/resources/folders', {
+      await createFolder({
         name: folderName.trim(),
         parentId: parentId || null,
       });
@@ -223,7 +223,7 @@ export default function FilesPage() {
       Message.success(uiText('文件夹已创建'));
       load();
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('创建文件夹失败'));
+      Message.error(apiErrorMessage(error, uiText('创建文件夹失败')));
     } finally {
       setCreatingFolder(false);
     }
@@ -258,14 +258,14 @@ export default function FilesPage() {
       window.removeEventListener('drop', handleDrop);
     };
   }, [canUpload, upload]);
-  const renameResource = async () => {
+  const submitRename = async () => {
     if (!renameTarget || !renameName.trim()) {
       Message.warning(uiText('请输入新名称'));
       return;
     }
     setRenaming(true);
     try {
-      await axios.put(`/api/resources/${renameTarget.id}`, {
+      await renameResource(renameTarget.id, {
         name: renameName.trim(),
       });
       setRenameTarget(undefined);
@@ -274,7 +274,7 @@ export default function FilesPage() {
       Message.success(uiText('重命名完成'));
       await load();
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('重命名失败'));
+      Message.error(apiErrorMessage(error, uiText('重命名失败')));
     } finally {
       setRenaming(false);
     }
@@ -294,14 +294,14 @@ export default function FilesPage() {
         try {
           await Promise.all(
             selectedItems.map((item) =>
-              axios.delete(`/api/resources/${item.id}`)
+              deleteResource(item.id)
             )
           );
           Message.success(uiText('已移入回收站'));
           setSelectedKeys([]);
           await load();
         } catch (error) {
-          Message.error(error?.response?.data?.msg || uiText('删除失败'));
+          Message.error(apiErrorMessage(error, uiText('删除失败')));
           await load();
         }
       },
@@ -442,7 +442,7 @@ export default function FilesPage() {
               icon={<IconDownload />}
               loading={downloading}
               disabled={!can('download') || !selectedItems.length}
-              onClick={() => downloadResources(selectedItems)}
+              onClick={() => handleDownloadResources(selectedItems)}
             >
               {uiText('下载')}
             </Button>
@@ -530,7 +530,7 @@ export default function FilesPage() {
           setFolderVisible(false);
           setFolderName('');
         }}
-        onOk={createFolder}
+        onOk={submitCreateFolder}
         confirmLoading={creatingFolder}
         okText={uiText('创建')}
         unmountOnExit
@@ -550,7 +550,7 @@ export default function FilesPage() {
             value={folderName}
             onChange={setFolderName}
             placeholder={uiText('请输入文件夹名称')}
-            onPressEnter={createFolder}
+            onPressEnter={submitCreateFolder}
           />
         </Space>
       </Modal>
@@ -570,7 +570,7 @@ export default function FilesPage() {
           setRenameTarget(undefined);
           setRenameName('');
         }}
-        onOk={renameResource}
+        onOk={submitRename}
         confirmLoading={renaming}
         okText={uiText('保存')}
         unmountOnExit
@@ -584,12 +584,13 @@ export default function FilesPage() {
           value={renameName}
           onChange={setRenameName}
           placeholder={uiText('请输入新名称')}
-          onPressEnter={renameResource}
+          onPressEnter={submitRename}
         />
       </Modal>
       <PreviewModal
         resource={previewResource}
         visible={Boolean(previewResource)}
+        canDownload={can('download')}
         onDownload={can('download') ? downloadResource : undefined}
         onClose={() => setPreviewResource(undefined)}
       />

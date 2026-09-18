@@ -1,5 +1,5 @@
 import React, { CSSProperties, useMemo } from 'react';
-import styles from './index.module.less';
+import styles from './overlay.module.less';
 
 export interface LiquidCapsuleProgressProps {
   progress: number;

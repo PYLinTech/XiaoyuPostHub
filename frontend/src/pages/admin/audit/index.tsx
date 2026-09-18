@@ -1,5 +1,6 @@
+import { fetchAdminAudit, fetchFileReviews, fetchShareReviews, reviewResources, downloadReviewedFiles, fetchReviewedTrash, deleteReviewedTrashItem, emptyReviewedTrash } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useContext, useEffect, useMemo, useState } from 'react';
-import axios from 'axios';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import {
@@ -204,7 +205,7 @@ function Audit() {
   const loadFiles = async (page = filePage) => {
     setLoading(true);
     try {
-      const response = await axios.get('/api/admin/reviews/files', {
+      const response = await fetchFileReviews({
         params: {
           page,
           pageSize: 20,
@@ -230,7 +231,7 @@ function Audit() {
       setFilePage(page);
       setFileSelection([]);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('文件审核加载失败'));
+      Message.error(apiErrorMessage(error, uiText('文件审核加载失败')));
     } finally {
       setLoading(false);
     }
@@ -239,7 +240,7 @@ function Audit() {
   const loadShares = async (page = sharePage) => {
     setLoading(true);
     try {
-      const response = await axios.get('/api/admin/reviews/shares', {
+      const response = await fetchShareReviews({
         params: {
           page,
           pageSize: 20,
@@ -252,7 +253,7 @@ function Audit() {
       setSharePage(page);
       setShareSelection([]);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('分享审核加载失败'));
+      Message.error(apiErrorMessage(error, uiText('分享审核加载失败')));
     } finally {
       setLoading(false);
     }
@@ -261,10 +262,10 @@ function Audit() {
   const loadAudit = async () => {
     setLoading(true);
     try {
-      const response = await axios.get('/api/admin/audit?limit=100');
+      const response = await fetchAdminAudit();
       setAuditItems(response.data.items || []);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('审计日志加载失败'));
+      Message.error(apiErrorMessage(error, uiText('审计日志加载失败')));
     } finally {
       setLoading(false);
     }
@@ -328,7 +329,7 @@ function Audit() {
     }
     setSubmitting(true);
     try {
-      const response = await axios.put(`/api/admin/reviews/${reviewKind}`, {
+      const response = await reviewResources(reviewKind, {
         resourceIds:
           reviewKind === 'files'
             ? selectedFiles.map((item) => item.resourceId)
@@ -350,7 +351,7 @@ function Audit() {
       if (reviewKind === 'files') await loadFiles();
       else await loadShares();
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('审核操作失败'));
+      Message.error(apiErrorMessage(error, uiText('审核操作失败')));
     } finally {
       setSubmitting(false);
     }
@@ -365,9 +366,7 @@ function Audit() {
       return;
     }
     try {
-      const response = await axios.post(
-        '/api/admin/reviews/files/download',
-        { resourceIds: ids },
+      const response = await downloadReviewedFiles({ resourceIds: ids },
         { responseType: 'blob' }
       );
       const disposition = response.headers['content-disposition'] || '';
@@ -384,24 +383,22 @@ function Audit() {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('下载失败'));
+      Message.error(apiErrorMessage(error, uiText('下载失败')));
     }
   };
 
   const loadTrash = async () => {
     try {
-      const response = await axios.get('/api/admin/reviews/files/trash');
+      const response = await fetchReviewedTrash();
       setTrashItems(response.data.items || []);
       setTrashVisible(true);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('审核回收站加载失败'));
+      Message.error(apiErrorMessage(error, uiText('审核回收站加载失败')));
     }
   };
 
-  const deleteTrashItem = async (id: string) => {
-    await axios.delete(
-      `/api/admin/reviews/files/trash/${encodeURIComponent(id)}`
-    );
+  const removeReviewedTrash = async (id: string) => {
+    await deleteReviewedTrashItem(id);
     setTrashItems((current) =>
       current.filter((item) => item.resourceId !== id)
     );
@@ -882,7 +879,7 @@ function Audit() {
             status="danger"
             disabled={!trashItems.length}
             onClick={async () => {
-              await axios.delete('/api/admin/reviews/files/trash');
+              await emptyReviewedTrash();
               setTrashItems([]);
               loadFiles();
             }}
@@ -909,7 +906,7 @@ function Audit() {
                 <Button
                   size="small"
                   status="danger"
-                  onClick={() => deleteTrashItem(item.resourceId)}
+                  onClick={() => removeReviewedTrash(item.resourceId)}
                 >
                   {uiText('永久删除')}
                 </Button>

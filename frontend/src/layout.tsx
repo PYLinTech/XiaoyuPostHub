@@ -28,12 +28,20 @@ import uiText from '@/utils/uiText';
 import { UploadProvider } from '@/components/UploadManager';
 const Sider = Layout.Sider;
 const Content = Layout.Content;
+// 用户高频访问的页面在主 chunk 加载后由浏览器空闲预取，提升导航体验；
+// 管理后台页面不预取，避免占用带宽。
 const routePages = {
-  files: React.lazy(() => import('./pages/files')),
-  shares: React.lazy(() => import('./pages/shares')),
-  'direct-links': React.lazy(() => import('./pages/direct-links')),
-  trash: React.lazy(() => import('./pages/trash')),
-  messages: React.lazy(() => import('./pages/messages')),
+  files: React.lazy(() => import(/* webpackPrefetch: true */ './pages/files')),
+  shares: React.lazy(
+    () => import(/* webpackPrefetch: true */ './pages/shares')
+  ),
+  'direct-links': React.lazy(
+    () => import(/* webpackPrefetch: true */ './pages/direct-links')
+  ),
+  trash: React.lazy(() => import(/* webpackPrefetch: true */ './pages/trash')),
+  messages: React.lazy(
+    () => import(/* webpackPrefetch: true */ './pages/messages')
+  ),
   'admin/overview': React.lazy(() => import('./pages/admin/overview')),
   'admin/users': React.lazy(() => import('./pages/admin/users')),
   'admin/access': React.lazy(() => import('./pages/admin/access')),

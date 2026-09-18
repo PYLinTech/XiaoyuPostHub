@@ -1,5 +1,6 @@
+import { updateDirectLink, updateShare } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
 import {
   Button,
   Checkbox,
@@ -106,10 +107,10 @@ export default function LinkConfigModal({
         trafficLimitBytes:
           trafficGB == null ? null : Math.round(trafficGB * 1024 ** 3),
       };
-      const response = await axios.put(
-        `/api/${mode === 'share' ? 'shares' : 'direct-links'}/manage/${
-          item.id
-        }`,
+      const saveLink =
+        mode === 'share' ? updateShare : updateDirectLink;
+      const response = await saveLink(
+        item.id,
         mode === 'share'
           ? {
               ...common,
@@ -133,7 +134,7 @@ export default function LinkConfigModal({
         onClose();
       }
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('保存配置失败'));
+      Message.error(apiErrorMessage(error, uiText('保存配置失败')));
     } finally {
       setLoading(false);
     }

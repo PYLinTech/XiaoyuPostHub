@@ -1,3 +1,5 @@
+import { fetchAdminAccess, createQuotaProfile, updateQuotaProfile, deleteQuotaProfile, setGroupQuota, setGroupPermissions, fetchInvitations, issueInvitations, updateInvitationSettings, revokeInvitation } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, {
   useCallback,
   useContext,
@@ -5,7 +7,6 @@ import React, {
   useMemo,
   useState,
 } from 'react';
-import axios from 'axios';
 import {
   Button,
   Card,
@@ -104,11 +105,6 @@ const invitationStatus = {
     color: 'gray',
   },
 };
-function errorMessage(error: unknown, fallback: string) {
-  return axios.isAxiosError(error) && error.response?.data?.msg
-    ? error.response.data.msg
-    : fallback;
-}
 function toDraft(item: QuotaItem): QuotaDraft {
   return {
     name: item.name,
@@ -192,7 +188,7 @@ function Access() {
   const loadAccess = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await axios.get('/api/admin/access');
+      const res = await fetchAdminAccess();
       const nextGroups: GroupItem[] = res.data.groups || [];
       setPermissions(res.data.availablePermissions || []);
       setQuotas(res.data.quotas || []);
@@ -209,7 +205,7 @@ function Access() {
         )
       );
     } catch (error) {
-      Message.error(errorMessage(error, uiText('权限与配额加载失败')));
+      Message.error(apiErrorMessage(error, uiText('权限与配额加载失败')));
     } finally {
       setLoading(false);
     }
@@ -217,10 +213,10 @@ function Access() {
   const loadInvitations = useCallback(async () => {
     setInvitationLoading(true);
     try {
-      const res = await axios.get('/api/admin/invitations');
+      const res = await fetchInvitations();
       setInvitationData(res.data.data || invitationData);
     } catch (error) {
-      Message.error(errorMessage(error, uiText('邀请码配置加载失败')));
+      Message.error(apiErrorMessage(error, uiText('邀请码配置加载失败')));
     } finally {
       setInvitationLoading(false);
     }
@@ -244,12 +240,10 @@ function Access() {
     setSaving(true);
     try {
       if (quotaEditing) {
-        await axios.put(
-          `/api/admin/access/quotas/${quotaEditing.id}`,
-          quotaPayload(quotaDraft)
+        await updateQuotaProfile(quotaEditing.id, quotaPayload(quotaDraft)
         );
       } else {
-        await axios.post('/api/admin/access/quotas', quotaPayload(quotaDraft));
+        await createQuotaProfile(quotaPayload(quotaDraft));
       }
       Message.success(
         quotaEditing ? uiText('配额方案已更新') : uiText('配额方案已新增')
@@ -258,7 +252,7 @@ function Access() {
       setQuotaDraft(emptyQuota);
       await loadAccess();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('保存配额方案失败')));
+      Message.error(apiErrorMessage(error, uiText('保存配额方案失败')));
     } finally {
       setSaving(false);
     }
@@ -272,11 +266,11 @@ function Access() {
       },
       onOk: async () => {
         try {
-          await axios.delete(`/api/admin/access/quotas/${item.id}`);
+          await deleteQuotaProfile(item.id);
           Message.success(uiText('配额方案已删除'));
           await loadAccess();
         } catch (error) {
-          Message.error(errorMessage(error, uiText('删除配额方案失败')));
+          Message.error(apiErrorMessage(error, uiText('删除配额方案失败')));
           throw error;
         }
       },
@@ -289,20 +283,18 @@ function Access() {
       return;
     }
     try {
-      await axios.put(`/api/admin/access/groups/${group.id}/quota`, draft);
+      await setGroupQuota(group.id, draft);
       Message.success(`${uiText('配额配置已保存')}：${group.name}`);
       await loadAccess();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('保存用户组配额失败')));
+      Message.error(apiErrorMessage(error, uiText('保存用户组配额失败')));
     }
   };
   const savePermissions = async () => {
     if (!permissionGroup) return;
     setSaving(true);
     try {
-      await axios.put(
-        `/api/admin/access/groups/${permissionGroup.id}/permissions`,
-        {
+      await setGroupPermissions(permissionGroup.id, {
           permissions: selectedPermissions,
         }
       );
@@ -310,7 +302,7 @@ function Access() {
       setPermissionGroup(undefined);
       await loadAccess();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('保存用户组权限失败')));
+      Message.error(apiErrorMessage(error, uiText('保存用户组权限失败')));
     } finally {
       setSaving(false);
     }
@@ -327,7 +319,7 @@ function Access() {
   );
   const updateRequirement = async (checked: boolean) => {
     try {
-      await axios.put('/api/admin/invitations/settings', {
+      await updateInvitationSettings({
         registrationRequiresInvitation: checked,
       });
       setInvitationData((current) => ({
@@ -338,7 +330,7 @@ function Access() {
         checked ? uiText('已开启邀请码注册') : uiText('已关闭邀请码注册要求')
       );
     } catch (error) {
-      Message.error(errorMessage(error, uiText('注册策略更新失败')));
+      Message.error(apiErrorMessage(error, uiText('注册策略更新失败')));
     }
   };
   const issueCodes = async () => {
@@ -348,7 +340,7 @@ function Access() {
     }
     setIssuing(true);
     try {
-      const res = await axios.post('/api/admin/invitations', {
+      const res = await issueInvitations({
         targetType,
         targetId,
         quantity,
@@ -358,7 +350,7 @@ function Access() {
       );
       await loadInvitations();
     } catch (error) {
-      Message.error(errorMessage(error, uiText('邀请码生成失败')));
+      Message.error(apiErrorMessage(error, uiText('邀请码生成失败')));
     } finally {
       setIssuing(false);
     }
@@ -605,11 +597,11 @@ function Access() {
             size="small"
             onClick={async () => {
               try {
-                await axios.delete(`/api/admin/invitations/${record.id}`);
+                await revokeInvitation(record.id);
                 Message.success(uiText('邀请码已作废'));
                 await loadInvitations();
               } catch (error) {
-                Message.error(errorMessage(error, uiText('作废失败')));
+                Message.error(apiErrorMessage(error, uiText('作废失败')));
               }
             }}
           >

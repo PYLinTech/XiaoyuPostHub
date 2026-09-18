@@ -9,12 +9,15 @@ import uiText from '@/utils/uiText';
 interface Props {
   resource?: ResourceItem;
   visible: boolean;
+  /** 无下载权限时隐藏预览器工具栏的下载按钮。 */
+  canDownload?: boolean;
   onDownload?: (resource?: ResourceItem) => void | Promise<void>;
   onClose: () => void;
 }
 export default function PreviewModal({
   resource,
   visible,
+  canDownload = true,
   onDownload,
   onClose,
 }: Props) {
@@ -72,6 +75,7 @@ export default function PreviewModal({
             name={resource.name}
             size={resource.sizeBytes}
             className={styles.viewer}
+            canDownload={canDownload}
             onDownload={onDownload ? download : undefined}
             onStateChange={(state) => {
               if (state.error) setPreviewState('unsupported');

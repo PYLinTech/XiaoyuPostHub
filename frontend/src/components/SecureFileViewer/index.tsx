@@ -1,13 +1,16 @@
-import React, { Suspense, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Spin } from '@arco-design/web-react';
-import uiText from '@/utils/uiText';
-import { loadFileViewer } from '@/utils/filePreview';
-const FileViewer = React.lazy(loadFileViewer);
+import { FileViewerBundle, loadFileViewer } from '@/utils/filePreview';
 interface Props {
   url: string;
   name: string;
   size?: number;
   className?: string;
+  /**
+   * 是否允许下载。为 false 时预览器工具栏不显示下载按钮，且不会触发
+   * onDownload——避免出现点了没有反应的“死按钮”。
+   */
+  canDownload?: boolean;
   onDownload?: () => void;
   onStateChange?: (state: { error?: unknown }) => void;
 }
@@ -67,25 +70,6 @@ function hardenElement(element: Element) {
     if (element.getAttribute('sandbox') !== safeSandbox) {
       element.setAttribute('sandbox', safeSandbox);
     }
-    // 邮件 HTML 正文使用空 sandbox 的 srcdoc frame，无法从父页面可靠访问其
-    // DOM；关闭该 frame 的指针事件，避免链接在子 frame 内发起导航。
-    if (
-      element.classList.contains('email-html') &&
-      element.style.pointerEvents !== 'none'
-    ) {
-      element.style.setProperty('pointer-events', 'none', 'important');
-    }
-  }
-  // 邮件附件会再次调用完整渲染器；当前组件没有按附件扩展名设置安全
-  // 白名单的能力，因此禁用附件预览和其内置下载，避免绕过顶层格式检查。
-  if (
-    element instanceof HTMLButtonElement &&
-    (element.classList.contains('attachment-item') ||
-      element.closest('.attachment-preview-head'))
-  ) {
-    element.disabled = true;
-    element.setAttribute('aria-disabled', 'true');
-    element.title = uiText('邮件附件请下载原文件后查看');
   }
 }
 function hardenRoot(root: ViewerRoot, listenedTargets: WeakSet<EventTarget>) {
@@ -114,10 +98,28 @@ export default function SecureFileViewer({
   name,
   size,
   className,
+  canDownload = true,
   onDownload,
   onStateChange,
 }: Props) {
   const boundaryRef = useRef<HTMLDivElement>(null);
+  const [bundle, setBundle] = useState<FileViewerBundle | null>(null);
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+  useEffect(() => {
+    let active = true;
+    loadFileViewer()
+      .then((loaded) => {
+        if (active) setBundle(loaded);
+      })
+      .catch((error) => {
+        // 预览组件本身加载失败时沿用调用方的错误状态：父级会退回下载引导。
+        if (active) onStateChangeRef.current?.({ error });
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     const boundary = boundaryRef.current;
     if (!boundary) return undefined;
@@ -130,7 +132,7 @@ export default function SecureFileViewer({
       subtree: true,
     });
     // ShadowRoot 不在外层 MutationObserver 的 subtree 中，周期性发现异步创建
-    // 的 ShadowRoot 和 EPUB iframe，并立即挂入同一套限制。
+    // 的 ShadowRoot 和 iframe，并立即挂入同一套限制。
     const interval = window.setInterval(harden, 250);
     return () => {
       observer.disconnect();
@@ -139,17 +141,8 @@ export default function SecureFileViewer({
   }, [url]);
   return (
     <div ref={boundaryRef} className={className}>
-      <Suspense
-        fallback={
-          <Spin
-            style={{
-              display: 'block',
-              margin: 40,
-            }}
-          />
-        }
-      >
-        <FileViewer
+      {bundle ? (
+        <bundle.FileViewer
           key={url}
           url={url}
           name={name}
@@ -158,36 +151,39 @@ export default function SecureFileViewer({
             width: '100%',
             height: '100%',
           }}
-          onStateChange={onStateChange}
+          onStateChange={(state) => onStateChange?.({ error: state.error })}
           options={{
+            ...bundle.viewerOptions,
             theme: 'light',
             styleIsolation: 'shadow',
-            archive: {
-              entryActions: {
-                download: false,
-              },
-              // 压缩包条目同样会进入嵌套渲染器。限制为 1 字节等同于关闭
-              // 实际文件的内嵌预览，同时保留安全的目录浏览能力。
-              maxEntryPreviewSize: 1,
-            },
             toolbar: {
               position: 'bottom-right',
               print: false,
               exportHtml: false,
               permissions: {
+                download: canDownload,
                 print: false,
                 'export-html': false,
               },
             },
             beforeOperation: (context) => {
-              if (context.operation === 'download') onDownload?.();
-              return !['download', 'print', 'export-html'].includes(
-                context.operation
-              );
+              if (context.operation === 'download') {
+                if (canDownload) onDownload?.();
+                // 任何情况下都阻止预览器自带的下载，下载统一走我们的接口。
+                return false;
+              }
+              return !['print', 'export-html'].includes(context.operation);
             },
           }}
         />
-      </Suspense>
+      ) : (
+        <Spin
+          style={{
+            display: 'block',
+            margin: 40,
+          }}
+        />
+      )}
     </div>
   );
 }

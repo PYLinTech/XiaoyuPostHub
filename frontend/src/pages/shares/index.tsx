@@ -1,5 +1,6 @@
+import { fetchShares, batchManageShares } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useCallback, useEffect, useState } from 'react';
-import axios from 'axios';
 import {
   Button,
   Card,
@@ -57,11 +58,10 @@ export default function SharesPage() {
   const [operating, setOperating] = useState(false);
   const load = useCallback(() => {
     setLoading(true);
-    return axios
-      .get('/api/shares')
+    return fetchShares()
       .then((response) => setItems(response.data.items || []))
       .catch((error) =>
-        Message.error(error?.response?.data?.msg || uiText('分享列表加载失败'))
+        Message.error(apiErrorMessage(error, uiText('分享列表加载失败')))
       )
       .finally(() => setLoading(false));
   }, []);
@@ -72,7 +72,7 @@ export default function SharesPage() {
     if (!selectedKeys.length) return;
     setOperating(true);
     try {
-      await axios.post('/api/shares/manage', {
+      await batchManageShares({
         ids: selectedKeys,
         action,
       });
@@ -86,7 +86,7 @@ export default function SharesPage() {
       );
       await load();
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('批量操作失败'));
+      Message.error(apiErrorMessage(error, uiText('批量操作失败')));
     } finally {
       setOperating(false);
     }

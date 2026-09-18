@@ -1,5 +1,9 @@
+import { apiErrorMessage } from '@/api/client';
 import React, { useContext, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
+
+// 公开分享页的地址由运行时的分享/取件标识与后端下发的下载策略拼装，
+// 无法固化为接口函数，因此这里保留 axios 直接请求；错误处理仍走统一工具。
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { useParams } from 'react-router-dom';
@@ -283,7 +287,7 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       loadMetadata(activePassword);
     } catch (requestError) {
       Message.error(
-        requestError?.response?.data?.msg || uiText('下载失败，请稍后重试')
+        apiErrorMessage(requestError, uiText('下载失败，请稍后重试'))
       );
     } finally {
       setDownloading(false);

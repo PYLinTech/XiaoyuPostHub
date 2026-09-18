@@ -1,5 +1,6 @@
+import { fetchTotpStatus, beginTotpSetup, confirmTotpSetup } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useCallback, useEffect, useState } from 'react';
-import axios from 'axios';
 import { Button, Input, Message, Modal, Space, Tag, Typography } from '@arco-design/web-react';
 import { IconArrowLeft, IconCopy, IconSafe } from '@arco-design/web-react/icon';
 import uiText from '@/utils/uiText';
@@ -13,25 +14,25 @@ export default function UserSettingsModal() {
   const [setup, setSetup] = useState<Setup>();
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
-  const load = useCallback(() => axios.get('/api/user/totp').then((res) => setStatus(res.data)), []);
+  const load = useCallback(() => fetchTotpStatus().then((res) => setStatus(res.data)), []);
   useEffect(() => {
     const open = () => { setVisible(true); setSetup(undefined); setCode(''); load().catch(() => Message.error(uiText('安全配置加载失败'))); };
     window.addEventListener('xph-open-user-settings', open);
     return () => window.removeEventListener('xph-open-user-settings', open);
   }, [load]);
   const begin = async () => {
-    try { setLoading(true); const res = await axios.post('/api/user/totp/begin'); setSetup(res.data.setup); }
-    catch (error) { Message.error(error?.response?.data?.msg || uiText('生成动态令牌失败')); }
+    try { setLoading(true); const res = await beginTotpSetup(); setSetup(res.data.setup); }
+    catch (error) { Message.error(apiErrorMessage(error, uiText('生成动态令牌失败'))); }
     finally { setLoading(false); }
   };
   const confirm = async () => {
     if (!setup || code.length !== 6) return Message.warning(uiText('请输入 6 位动态令牌'));
     try {
       setLoading(true);
-      await axios.post('/api/user/totp/confirm', { secret: setup.secret, code });
+      await confirmTotpSetup({ secret: setup.secret, code });
       Message.success(uiText('动态令牌配置成功'));
       setSetup(undefined); await load(); window.location.reload();
-    } catch (error) { Message.error(error?.response?.data?.msg || uiText('动态令牌校验失败')); }
+    } catch (error) { Message.error(apiErrorMessage(error, uiText('动态令牌校验失败'))); }
     finally { setLoading(false); }
   };
   return <Modal title={setup ? uiText('配置动态令牌') : uiText('用户配置')} visible={visible}

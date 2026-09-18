@@ -1,5 +1,6 @@
+import { fetchDirectLinks, batchManageDirectLinks } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useCallback, useEffect, useState } from 'react';
-import axios from 'axios';
 import {
   Button,
   Card,
@@ -48,11 +49,10 @@ export default function DirectLinksPage() {
   const [operating, setOperating] = useState(false);
   const load = useCallback(() => {
     setLoading(true);
-    return axios
-      .get('/api/direct-links')
+    return fetchDirectLinks()
       .then((response) => setItems(response.data.items || []))
       .catch((error) =>
-        Message.error(error?.response?.data?.msg || uiText('直链列表加载失败'))
+        Message.error(apiErrorMessage(error, uiText('直链列表加载失败')))
       )
       .finally(() => setLoading(false));
   }, []);
@@ -63,7 +63,7 @@ export default function DirectLinksPage() {
     if (!selectedKeys.length) return;
     setOperating(true);
     try {
-      await axios.post('/api/direct-links/manage', {
+      await batchManageDirectLinks({
         ids: selectedKeys,
         action,
       });
@@ -77,7 +77,7 @@ export default function DirectLinksPage() {
       );
       await load();
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('批量操作失败'));
+      Message.error(apiErrorMessage(error, uiText('批量操作失败')));
     } finally {
       setOperating(false);
     }

@@ -1,5 +1,6 @@
+import { fetchSiteConfig, fetchPickup } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useContext, useEffect, useRef, useState } from 'react';
-import axios from 'axios';
 import { Button, Card, Message, Typography } from '@arco-design/web-react';
 import { IconDownload } from '@arco-design/web-react/icon';
 import { GlobalContext } from '@/context';
@@ -34,7 +35,7 @@ export default function PickupPage() {
     document.title = `${siteName || 'XiaoyuPostHub'}-${uiText('取件码')}`;
   }, [siteName]);
   useEffect(() => {
-    axios.get('/api/site-config').then((response) => {
+    fetchSiteConfig().then((response) => {
       const nextLength = Math.max(1, Math.min(64, Number(response.data.pickupCodeLength) || 6));
       setLength(nextLength);
       setLifetimeSeconds(response.data.pickupMaxLifetimeSeconds ?? null);
@@ -60,10 +61,10 @@ export default function PickupPage() {
     if (normalized.length !== length) return;
     setChecking(true);
     try {
-      await axios.get(`/api/pickups/${encodeURIComponent(normalized)}`);
+      await fetchPickup(normalized);
       setCode(normalized);
     } catch (error) {
-      Message.error(error?.response?.data?.msg || uiText('取件码无效或已过期'));
+      Message.error(apiErrorMessage(error, uiText('取件码无效或已过期')));
     } finally {
       setChecking(false);
     }
