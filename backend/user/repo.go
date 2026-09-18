@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/config"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ErrInvalidCredentials 登录失败（账号不存在 / 密码错误 / 没有登录权限 / 入参为空）。
@@ -130,6 +132,30 @@ func (r *Repo) hydrate(ctx context.Context, dbU sqlcgen.User) (User, error) {
 // 任一步失败统一返回 ErrInvalidCredentials，**不**区分具体原因——
 // 调用方（loginHandler）一律回复"账号或者密码错误"，
 // 避免泄露"账号是否存在 / 是否缺权限"等敏感信息。
+// dummyPasswordHash 用于“账号不存在 / 已禁用”分支的等时补偿。
+//
+// bcrypt cost=12 的比对开销（约 250ms）是登录路径的主要耗时。如果用户不存在
+// 时直接返回，攻击者可以依据响应时间差（存在账号 → 慢，不存在 → 快）枚举
+// 有效用户名。这里准备一个固定的合法 hash，让两条路径付出同样的计算成本。
+var dummyPasswordHash = sync.OnceValue(func() string {
+	hash, err := HashPassword("xiaoyuposthub-login-timing-equalizer")
+	if err != nil {
+		// 退化处理：无法生成时跳过多余计算，保持可用性优先。
+		return ""
+	}
+	return hash
+})
+
+// equalizePasswordVerifyTime 执行一次与真实密码校验等价的 bcrypt 比对，
+// 结果被丢弃，仅用于拉平不同失败分支的响应耗时。
+func equalizePasswordVerifyTime(password string) {
+	hash := dummyPasswordHash()
+	if hash == "" {
+		return
+	}
+	_ = bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
 func (r *Repo) Authenticate(ctx context.Context, username, password string) (User, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
@@ -137,10 +163,8 @@ func (r *Repo) Authenticate(ctx context.Context, username, password string) (Use
 	}
 
 	u, err := r.GetByUsername(ctx, username)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return User{}, ErrInvalidCredentials
-	}
-	if errors.Is(err, ErrUserDisabled) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, ErrUserDisabled) {
+		equalizePasswordVerifyTime(password)
 		return User{}, ErrInvalidCredentials
 	}
 	if err != nil {

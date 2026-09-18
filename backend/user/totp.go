@@ -64,21 +64,52 @@ func (r *Repo) CreateTOTPChallenge(ctx context.Context, userID int64) (string, e
 	return token, err
 }
 
+// MaxTOTPChallengeAttempts 是单个登录挑战允许的验证码失败次数。
+// 达到上限后挑战立即作废，用户需要重新用密码换取新挑战，避免在 5 分钟
+// 有效期内对 6 位验证码做无限次暴力尝试。
+const MaxTOTPChallengeAttempts = 5
+
 func (r *Repo) ConsumeTOTPChallenge(ctx context.Context, token, code string) (int64, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	tokenHash := randomtoken.Hash(token)
 	var userID int64
 	var secret *string
-	err = tx.QueryRow(ctx, `DELETE FROM login_totp_challenges c USING users u
-		WHERE c.token_hash=$1 AND c.expires_at>NOW() AND u.id=c.user_id
-		RETURNING c.user_id,u.totp_secret`, randomtoken.Hash(token)).Scan(&userID, &secret)
-	if errors.Is(err, pgx.ErrNoRows) || secret == nil || !ValidateTOTP(*secret, code) {
+	var failedAttempts int
+	// FOR UPDATE 锁定挑战行让并发校验串行化，否则多个并发请求可能同时
+	// 读到旧计数，绕过尝试次数上限。
+	err = tx.QueryRow(ctx, `SELECT c.user_id,u.totp_secret,c.failed_attempts
+		FROM login_totp_challenges c
+		JOIN users u ON u.id=c.user_id
+		WHERE c.token_hash=$1 AND c.expires_at>NOW()
+		FOR UPDATE OF c`, tokenHash).Scan(&userID, &secret, &failedAttempts)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrTOTPInvalid
 	}
 	if err != nil {
+		return 0, fmt.Errorf("load challenge: %w", err)
+	}
+
+	if secret == nil || !ValidateTOTP(*secret, code) {
+		failedAttempts++
+		if failedAttempts >= MaxTOTPChallengeAttempts {
+			if _, err := tx.Exec(ctx, `DELETE FROM login_totp_challenges WHERE token_hash=$1`, tokenHash); err != nil {
+				return 0, fmt.Errorf("drop exhausted challenge: %w", err)
+			}
+		} else if _, err := tx.Exec(ctx, `UPDATE login_totp_challenges SET failed_attempts=$2 WHERE token_hash=$1`, tokenHash, failedAttempts); err != nil {
+			return 0, fmt.Errorf("record challenge attempt: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
+		return 0, ErrTOTPInvalid
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM login_totp_challenges WHERE token_hash=$1`, tokenHash); err != nil {
 		return 0, fmt.Errorf("consume challenge: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

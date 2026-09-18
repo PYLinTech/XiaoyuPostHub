@@ -4,16 +4,21 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
+
+// lockedFailureDelay 是账号/IP 处于登录锁定期时，错误尝试附加的固定延迟。
+// 合法用户凭正确密码仍可立即登录（不受影响），攻击者的失败尝试则要额外
+// 等待，与 bcrypt 的计算开销一起维持对爆破尝试的成本压力。
+const lockedFailureDelay = 1500 * time.Millisecond
 
 // ---------- 协议结构 ----------
 
@@ -112,26 +117,33 @@ func loginHandler(deps Deps) http.HandlerFunc {
 
 		accountKey := strings.ToLower(strings.TrimSpace(req.UserName))
 		requestIP := clientIP(r)
-		if retry, err := deps.SessionRepo.RetryAfter(r.Context(), accountKey, requestIP); err != nil {
+		retry, err := deps.SessionRepo.RetryAfter(r.Context(), accountKey, requestIP)
+		if err != nil {
 			log.Printf("检查登录限制失败：%v", err)
 			writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
 			return
-		} else if retry > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
-			writeJSON(w, http.StatusTooManyRequests, apiStatusResponse{Status: "error", Msg: "失败次数过多，请稍后再试"})
-			return
 		}
+		// 处于锁定期时不提前拒绝：仍然执行完整校验，让密码正确的合法用户
+		// 能够登录（消除"用错误密码把他人账号锁死"的账号锁定 DoS）。失败
+		// 尝试依旧返回 429，并附加固定延迟维持对爆破的成本压力。
+		locked := retry > 0
 
 		u, err := deps.UserRepo.Authenticate(r.Context(), req.UserName, req.Password)
 		if errors.Is(err, user.ErrInvalidCredentials) {
-			retry, recordErr := deps.SessionRepo.RecordFailure(r.Context(), accountKey, requestIP)
+			nextRetry, recordErr := deps.SessionRepo.RecordFailure(r.Context(), accountKey, requestIP)
 			if recordErr != nil {
 				log.Printf("记录登录失败次数失败：%v", recordErr)
 				writeJSON(w, 500, apiStatusResponse{Status: "error", Msg: "登录失败"})
 				return
 			}
-			if retry > 0 {
-				w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
+			if locked || nextRetry > 0 {
+				if nextRetry > retry {
+					retry = nextRetry
+				}
+				time.Sleep(lockedFailureDelay)
+				w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+				writeJSON(w, http.StatusTooManyRequests, apiStatusResponse{Status: "error", Msg: "失败次数过多，请稍后再试"})
+				return
 			}
 			writeJSON(w, http.StatusOK, apiStatusResponse{
 				Status: "error",
@@ -351,19 +363,6 @@ func logoutHandler(deps Deps) http.HandlerFunc {
 		http.SetCookie(w, expiredSessionCookie(deps.CookieSecure))
 		writeJSON(w, 200, apiStatusResponse{Status: "ok"})
 	}
-}
-
-func clientIP(r *http.Request) string {
-	// 反向代理通过 X-Real-IP 传递客户端地址。
-	if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
-		return ip.String()
-	}
-
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {

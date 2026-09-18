@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -297,4 +298,59 @@ func sameStringSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// 测试场景：TRUSTED_PROXY_CIDRS 解析
+
+func TestParseCIDRList(t *testing.T) {
+	nets, err := parseCIDRList(" 172.17.0.0/16 , ,127.0.0.1/32 ")
+	if err != nil {
+		t.Fatalf("合法输入不应报错：%v", err)
+	}
+	if len(nets) != 2 {
+		t.Fatalf("应解析出 2 个网段，得到 %d", len(nets))
+	}
+	if !nets[0].Contains(net.ParseIP("172.17.5.4")) {
+		t.Fatalf("172.17.0.0/16 应包含 172.17.5.4")
+	}
+	if !nets[1].Contains(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("127.0.0.1/32 应包含 127.0.0.1")
+	}
+}
+
+func TestParseCIDRListEmpty(t *testing.T) {
+	nets, err := parseCIDRList("   ")
+	if err != nil {
+		t.Fatalf("空输入不应报错：%v", err)
+	}
+	if len(nets) != 0 {
+		t.Fatalf("空输入应返回空列表，得到 %d 项", len(nets))
+	}
+}
+
+func TestParseCIDRListInvalid(t *testing.T) {
+	if _, err := parseCIDRList("172.17.0.0/16,not-a-cidr"); err == nil {
+		t.Fatal("非法网段应返回错误")
+	}
+}
+
+func TestLoadTrustedProxyCIDRs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := strings.Join([]string{
+		"DATABASE_URL=postgresql://user:pass@localhost:5432/db",
+		"SUPER_ADMIN_USERNAME=admin",
+		"SUPER_ADMIN_PASSWORD_HASH=$2a$12$0123456789012345678901234567890123456789012345678901",
+		"TRUSTED_PROXY_CIDRS=172.17.0.0/16,127.0.0.1/32",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("加载配置失败：%v", err)
+	}
+	if len(cfg.TrustedProxyCIDRs) != 2 {
+		t.Fatalf("应解析出 2 个可信网段，得到 %d", len(cfg.TrustedProxyCIDRs))
+	}
 }

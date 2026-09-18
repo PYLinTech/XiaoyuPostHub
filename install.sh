@@ -280,6 +280,12 @@ STATIC_DIR=/app/web
 
 # HTTPS 使用 true，直接 HTTP 使用 false
 SESSION_COOKIE_SECURE=true
+
+# 可信反向代理网段（可选，逗号分隔的 CIDR）。
+# 配置后只有来自这些网段的请求才采信 X-Real-IP，防止直连客户端伪造该头
+# 绕过基于 IP 的登录限流；留空表示始终采信 X-Real-IP。
+# 示例：TRUSTED_PROXY_CIDRS=172.17.0.0/16,127.0.0.1/32
+# TRUSTED_PROXY_CIDRS=
 EOF_ENV
     chmod 600 "${ENV_FILE}" || true
 }

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 )
@@ -44,6 +45,14 @@ type Config struct {
 
 	// SessionCookieSecure 默认为 true；仅在明确使用 HTTP 时配置为 false。
 	SessionCookieSecure bool
+
+	// TrustedProxyCIDRs 是可选的可信反向代理网段（逗号分隔 CIDR，如
+	// "172.17.0.0/16,127.0.0.1/32"）。
+	//
+	// 设置后，只有直连来源落在这些网段内才采信 X-Real-IP；留空时保持历史
+	// 行为（始终优先采信 X-Real-IP）。当服务可能被直接访问（无代理）时，
+	// 建议显式配置，避免客户端伪造 X-Real-IP 绕过基于 IP 的登录限流。
+	TrustedProxyCIDRs []*net.IPNet
 
 	// EnvFile 是实际加载的 .env 路径，可能为空（表示完全依赖环境变量）。
 	EnvFile string
@@ -84,6 +93,13 @@ func Load(envFile string) (*Config, error) {
 			return nil, fmt.Errorf("SESSION_COOKIE_SECURE 只能是 true 或 false")
 		}
 	}
+	if raw, ok := pickOptionalValue("TRUSTED_PROXY_CIDRS", fileKeys); ok {
+		nets, err := parseCIDRList(raw)
+		if err != nil {
+			return nil, err
+		}
+		c.TrustedProxyCIDRs = nets
+	}
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -116,6 +132,24 @@ type ValidationError struct {
 
 func (e *ValidationError) Error() string {
 	return "配置缺少必填字段：" + strings.Join(e.Missing, ", ")
+}
+
+// parseCIDRList 解析逗号分隔的 CIDR 列表（同时支持 IPv4 与 IPv6 网段）。
+// 空白项会被忽略；任一项非法立即返回错误，避免静默降级为“不信任任何代理”。
+func parseCIDRList(raw string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, block, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS 含无效网段 %q：%w", part, err)
+		}
+		out = append(out, block)
+	}
+	return out, nil
 }
 
 // pickValue 先看环境变量，再退回 .env。空字符串才算未设置。

@@ -125,6 +125,9 @@ func main() {
 	uploadRecoveryCancel()
 	staticPath := cfg.StaticDir
 
+	// 注入可信反向代理网段（未配置时保持“优先采信 X-Real-IP”的历史行为）。
+	server.SetTrustedProxies(cfg.TrustedProxyCIDRs)
+
 	handler, err := server.NewRouter(staticPath, server.Deps{
 		UserRepo:       userRepo,
 		SessionRepo:    sessionRepo,
