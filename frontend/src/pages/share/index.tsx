@@ -1,5 +1,5 @@
 import { apiErrorMessage } from '@/api/client';
-import React, { useContext, useEffect, useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 
 // 公开分享页的地址由运行时的分享/取件标识与后端下发的下载策略拼装，
@@ -32,8 +32,14 @@ import {
 import { GlobalContext } from '@/context';
 import SecureFileViewer from '@/components/SecureFileViewer';
 import logoUrl from '@/assets/logo.svg';
+import {
+  EncryptionMeta,
+  clientKeyHeaders,
+  decodeDelivery,
+} from '@/utils/fileCrypto';
 import { supportsFilePreview } from '@/utils/filePreview';
 import { formatBytes, formatTime } from '@/utils/format';
+import { downloadBlob } from '@/utils/download';
 import styles from './style/index.module.less';
 import uiText from '@/utils/uiText';
 interface ShareTreeItem {
@@ -44,12 +50,16 @@ interface ShareTreeItem {
   relativePath: string;
   sizeBytes: number;
   mimeType?: string;
+  /** 逐文件打包时用于前端接收校验的明文哈希。 */
+  sha256?: string;
 }
 interface ShareMetadata {
   name: string;
   kind: 'file' | 'folder';
   sizeBytes: number;
   mimeType?: string;
+  /** 单文件分享：文件是否以加密形式存储（分享页展示标识）。 */
+  encrypted?: boolean;
   passwordRequired: boolean;
   locked: boolean;
   expiresAt?: string;
@@ -67,29 +77,29 @@ interface ShareMetadata {
   downloadPolicy: {
     folderPackMode: 'frontend' | 'backend';
     shareDeliveryMode: 'blob' | 'temporary_link';
+    shareRetrievalMode?: 'proxy' | 'redirect';
+    proxyRealtimeDecrypt?: boolean;
     prepareUrl: string;
   };
 }
 interface PreparedDownload {
   packMode: 'frontend' | 'backend';
-  deliveryMode: 'blob' | 'temporary_link';
+  /** redirect = 302 直跳第三方存储（加密对象由浏览器端解密）。 */
+  deliveryMode: 'blob' | 'temporary_link' | 'redirect';
   url?: string;
   fileName?: string;
   archiveName?: string;
+  /** redirect 模式下的解密元数据（含用临时公钥包裹的密钥信封）。 */
+  encryption?: EncryptionMeta | null;
+  /** 内容的明文 SHA-256：下载/解密完成后由前端自行校验。 */
+  sha256?: string;
   items?: Array<
     ShareTreeItem & {
       url?: string;
     }
   >;
 }
-function saveBlob(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = name;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+
 export default function PublicSharePage({ pickupCode }: { pickupCode?: string }) {
   const { token } = useParams<{
     token: string;
@@ -110,6 +120,9 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
   const [previewUrl, setPreviewUrl] = useState('');
   const [error, setError] = useState('');
   const [folderPath, setFolderPath] = useState<ShareTreeItem[]>([]);
+  // 预览请求序号：只有最后一次请求可以落地（防止竞态产生游离的 objectURL）。
+  const previewSequence = useRef(0);
+  const metadataSequence = useRef(0);
   const descriptionHTML = useMemo(() => {
     if (!metadata?.description) return '';
     const source =
@@ -124,8 +137,17 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       },
     });
   }, [metadata?.description, metadata?.descriptionFormat]);
-  const loadMetadata = async (sharePassword = '', unlock = false) => {
-    unlock ? setUnlocking(true) : setLoading(true);
+  // silent：下载完成后的统计刷新，不进入 loading、不重置目录位置。
+  const loadMetadata = async (
+    sharePassword = '',
+    unlock = false,
+    silent = false
+  ) => {
+    // 竞态守卫：令牌快速变化（或解锁重试）时只允许最后一次请求落地。
+    const sequence = (metadataSequence.current += 1);
+    if (!silent) {
+      unlock ? setUnlocking(true) : setLoading(true);
+    }
     setError('');
     try {
       const response = await axios.get<ShareMetadata>(
@@ -138,11 +160,13 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
             : undefined,
         }
       );
+      if (metadataSequence.current !== sequence) return;
       if (response.data.locked && sharePassword) {
         setError(uiText('分享密码错误'));
         return;
       }
       setMetadata(response.data);
+      if (silent) return;
       if (!response.data.locked) {
         setActivePassword(sharePassword);
         const root =
@@ -154,16 +178,27 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
         setFolderPath([]);
       }
     } catch (requestError) {
-      const status = requestError?.response?.status;
+      if (metadataSequence.current !== sequence) return;
+      // 按状态码分类：403=封禁/审核未通过，410=已失效，404=不存在。
+      const status = (requestError as { response?: { status?: number } })?.response
+        ?.status;
+      const serverMessage = (
+        requestError as { response?: { data?: { msg?: string } } }
+      )?.response?.data?.msg;
       setError(
-        requestError?.response?.data?.msg ||
-          (status === 410
+        serverMessage ||
+          (status === 403
+            ? uiText('分享文件被封禁或正在审核')
+            : status === 410
             ? uiText('分享已失效')
             : uiText('分享不存在或暂时无法访问'))
       );
     } finally {
-      setLoading(false);
-      setUnlocking(false);
+      // 陈旧请求不应关闭最新请求的 loading。
+      if (metadataSequence.current === sequence && !silent) {
+        setLoading(false);
+        setUnlocking(false);
+      }
     }
   };
   useEffect(() => {
@@ -186,37 +221,54 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       });
       return;
     }
+    // 竞态守卫：快速重复点击时只允许最后一次请求落地（避免多余的 objectURL）。
+    const sequence = (previewSequence.current += 1);
     setPreviewing(true);
     try {
       const supported = await supportsFilePreview(metadata.name);
+      if (previewSequence.current !== sequence) return;
       if (!supported) {
         setPreviewUnsupported(true);
         setPreviewVisible(true);
         return;
       }
+      // 加密文件在"服务器实时解密关"时以密文下发，此处现场协商临时密钥并解密。
+      const { pair, headers: keyHeaders } = await clientKeyHeaders();
       const response = await axios.get(
         `${apiBase}/${encodeURIComponent(identifier)}/preview`,
         {
-          responseType: 'blob',
-          headers: activePassword
-            ? {
-                'X-Share-Password': activePassword,
-              }
-            : undefined,
+          responseType: 'arraybuffer',
+          headers: {
+            ...(activePassword ? { 'X-Share-Password': activePassword } : {}),
+            ...keyHeaders,
+          },
         }
       );
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-      setPreviewUrl(URL.createObjectURL(response.data));
+      const blob = await decodeDelivery(pair, response.headers, response.data);
+      if (previewSequence.current !== sequence) return;
+      // 旧 URL 由依赖 previewUrl 的清理 effect 回收，这里不重复 revoke。
+      setPreviewUrl(URL.createObjectURL(blob));
       setPreviewUnsupported(false);
       setPreviewVisible(true);
-    } catch {
+    } catch (error) {
+      if (previewSequence.current !== sequence) return;
+      // 加载失败与"格式不支持"要区分提示：403/412 等应告知真实原因（审核中、
+      // 需要刷新页面），静默降级会误导用户以为文件格式有问题。
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status === 403 || status === 412 || status === 404 || status === 422) {
+        Message.error(apiErrorMessage(error, uiText('预览加载失败')));
+      }
       setPreviewUnsupported(true);
       setPreviewVisible(true);
     } finally {
-      setPreviewing(false);
+      // 只让最后一次请求关闭 loading：陈旧请求结束不应打断最新请求的进度提示。
+      if (previewSequence.current === sequence) setPreviewing(false);
     }
   };
-  const downloadPreparedArtifact = async (prepared: PreparedDownload) => {
+  const downloadPreparedArtifact = async (
+    prepared: PreparedDownload,
+    pair: CryptoKeyPair | null
+  ) => {
     if (!prepared.url) throw new Error(uiText('下载任务未返回有效地址'));
     const url = new URL(prepared.url, window.location.origin).toString();
     if (prepared.deliveryMode === 'temporary_link') {
@@ -225,17 +277,57 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       anchor.click();
       return;
     }
+    if (prepared.deliveryMode === 'redirect') {
+      // 302 直跳第三方存储：明文对象的直链内容就是最终文件，浏览器一次跳转即
+      // 完成下载；加密对象不能直跳（跳转后拿不到密钥信封），改由前端 fetch 密文
+      // 并用准备响应下发的密钥信封解密。两种方式流量都不经过本服务器。
+      if (!prepared.encryption) {
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.click();
+        return;
+      }
+      const cipherResponse = await axios.get(url, {
+        responseType: 'arraybuffer',
+        onDownloadProgress: (event) => {
+          if (event.total) {
+            setDownloadProgress(Math.round((event.loaded * 100) / event.total));
+          }
+        },
+      });
+      // 密文来自第三方、响应头由第三方控制：密钥信封与校验值取自准备响应。
+      const plain = await decodeDelivery(
+        pair,
+        cipherResponse.headers,
+        cipherResponse.data,
+        {
+          meta: prepared.encryption,
+          expectedSHA256: prepared.sha256,
+          verifySHA256: true,
+        }
+      );
+      downloadBlob(plain, prepared.fileName || metadata?.name || 'download');
+      return;
+    }
     const response = await axios.get(url, {
-      responseType: 'blob',
+      responseType: 'arraybuffer',
       onDownloadProgress: (event) => {
         if (event.total) {
           setDownloadProgress(Math.round((event.loaded * 100) / event.total));
         }
       },
     });
-    saveBlob(response.data, prepared.fileName || metadata?.name || 'download');
+    const blob = await decodeDelivery(pair, response.headers, response.data, {
+      expectedSHA256: prepared.sha256,
+      verifySHA256: true,
+    });
+    downloadBlob(blob, prepared.fileName || metadata?.name || 'download');
   };
-  const downloadFrontendArchive = async (prepared: PreparedDownload) => {
+  const downloadFrontendArchive = async (
+    prepared: PreparedDownload,
+    pair: CryptoKeyPair | null,
+    keyHeaders: Record<string, string> = {}
+  ) => {
     const { default: JSZip } = await import('jszip');
     const zip = new JSZip();
     const items = prepared.items || [];
@@ -245,10 +337,19 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       .forEach((item) => zip.folder(item.relativePath));
     for (let index = 0; index < files.length; index += 1) {
       const item = files[index];
+      // 逐文件请求同样需要携带临时公钥：服务端在"浏览器端解密"路径下用它
+      // 封装该文件的密钥信封（否则返回 412）。
       const response = await axios.get(item.url as string, {
-        responseType: 'blob',
+        responseType: 'arraybuffer',
+        headers: keyHeaders,
       });
-      zip.file(item.relativePath, response.data);
+      // 前端打包：加密文件逐文件解密后写入压缩包；每个文件按声明的
+      // 明文哈希做接收端校验。
+      const fileBlob = await decodeDelivery(pair, response.headers, response.data, {
+        expectedSHA256: item.sha256,
+        verifySHA256: true,
+      });
+      zip.file(item.relativePath, fileBlob);
       setDownloadProgress(Math.round(((index + 1) * 80) / files.length));
     }
     const archive = await zip.generateAsync(
@@ -257,7 +358,7 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       },
       ({ percent }) => setDownloadProgress(80 + Math.round(percent * 0.2))
     );
-    saveBlob(
+    downloadBlob(
       archive,
       prepared.archiveName || `${metadata?.name || uiText('分享')}.zip`
     );
@@ -267,27 +368,29 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
     setDownloading(true);
     setDownloadProgress(0);
     try {
+      // 现场生成临时密钥对：服务端用它下发 DEK 信封（加密文件由浏览器解密）。
+      const { pair, headers: keyHeaders } = await clientKeyHeaders();
       const response = await axios.post<PreparedDownload>(
         metadata.downloadPolicy.prepareUrl,
         {},
         {
-          headers: activePassword
-            ? {
-                'X-Share-Password': activePassword,
-              }
-            : undefined,
+          headers: {
+            ...(activePassword ? { 'X-Share-Password': activePassword } : {}),
+            ...keyHeaders,
+          },
         }
       );
       if (response.data.packMode === 'frontend') {
-        await downloadFrontendArchive(response.data);
+        await downloadFrontendArchive(response.data, pair, keyHeaders);
       } else {
-        await downloadPreparedArtifact(response.data);
+        await downloadPreparedArtifact(response.data, pair);
       }
       Message.success(uiText('下载已开始'));
-      loadMetadata(activePassword);
+      // 静默刷新用量统计：不整页 loading、不把用户拉回根目录。
+      loadMetadata(activePassword, false, true);
     } catch (requestError) {
       Message.error(
-        apiErrorMessage(requestError, uiText('下载失败，请稍后重试'))
+        apiErrorMessage(requestError, uiText('下载失败'))
       );
     } finally {
       setDownloading(false);
@@ -323,12 +426,10 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
           <Card className={`${styles['status-card']} ${styles.danger}`}>
             <IconCloseCircle className={styles['status-icon']} />
             <Typography.Title heading={4}>
-              {error.includes(uiText('封禁'))
-                ? uiText('分享已被封禁')
-                : error.includes(uiText('失效')) ||
-                  error.includes(uiText('过期'))
-                ? uiText('分享已过期')
-                : uiText('无法打开分享')}
+              {/* 标题保持中性：具体原因（封禁 / 失效 / 不存在）已按状态码分类并
+                  本地化，直接显示在下方——不对已翻译文案做子串匹配（英文界面
+                  下 includes 永远匹配不到）。 */}
+              {uiText('无法打开分享')}
             </Typography.Title>
             <Typography.Text type="secondary">{error}</Typography.Text>
           </Card>
@@ -373,6 +474,11 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
                         ? ''
                         : ` / ${formatBytes(metadata.trafficLimitBytes)}`}
                     </span>
+                    {metadata.kind === 'file' && metadata.encrypted && (
+                      <span>
+                        <IconLock /> {uiText('该文件已加密存储')}
+                      </span>
+                    )}
                   </div>
                   {metadata.owner && unlocked && (
                     <div className={styles.owner}>

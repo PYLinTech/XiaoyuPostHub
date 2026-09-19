@@ -1,8 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Button, Modal, Spin } from '@arco-design/web-react';
+import { apiErrorMessage } from '@/api/client';
+import { resourcePreviewUrl } from '@/api/endpoints';
+import axios from 'axios';
+import { Button, Message, Modal, Spin } from '@arco-design/web-react';
 import { IconDownload, IconFile } from '@arco-design/web-react/icon';
 import SecureFileViewer from '@/components/SecureFileViewer';
 import { supportsFilePreview } from '@/utils/filePreview';
+import { clientKeyHeaders, decodeDelivery } from '@/utils/fileCrypto';
 import { ResourceItem } from '../storage/shared';
 import styles from '../storage/style/index.module.less';
 import uiText from '@/utils/uiText';
@@ -24,18 +28,48 @@ export default function PreviewModal({
   const [previewState, setPreviewState] = useState<
     'checking' | 'supported' | 'unsupported'
   >('checking');
+  const [previewBlobUrl, setPreviewBlobUrl] = useState<string>();
   useEffect(() => {
     let active = true;
+    let objectUrl: string | undefined;
     setPreviewState('checking');
+    setPreviewBlobUrl(undefined);
     if (visible && resource) {
-      supportsFilePreview(resource.name)
-        .then((supported) => {
-          if (active) setPreviewState(supported ? 'supported' : 'unsupported');
-        })
-        .catch(() => active && setPreviewState('unsupported'));
+      (async () => {
+        try {
+          const supported = await supportsFilePreview(resource.name);
+          if (!active) return;
+          if (!supported) {
+            setPreviewState('unsupported');
+            return;
+          }
+          // 与下载共用交付链路：加密文件在"服务器实时解密关"时以密文下发，
+          // 此处现场协商临时密钥并解密为 Blob URL 供预览器读取。
+          const { pair, headers } = await clientKeyHeaders();
+          const response = await axios.get(resourcePreviewUrl(resource.id), {
+            responseType: 'arraybuffer',
+            headers,
+          });
+          const blob = await decodeDelivery(pair, response.headers, response.data);
+          if (!active) return;
+          objectUrl = URL.createObjectURL(blob);
+          setPreviewBlobUrl(objectUrl);
+          setPreviewState('supported');
+        } catch (error) {
+          if (!active) return;
+          // 区分"格式不支持"与加载失败：403（审核中/无权限）、412（需浏览器
+          // 解密）等应告知真实原因，静默降级会让用户误以为文件格式有问题。
+          const status = (error as { response?: { status?: number } })?.response?.status;
+          if (status === 403 || status === 412 || status === 404 || status === 422) {
+            Message.error(apiErrorMessage(error, uiText('预览加载失败')));
+          }
+          setPreviewState('unsupported');
+        }
+      })();
     }
     return () => {
       active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [resource, visible]);
   const download = () => {
@@ -68,10 +102,10 @@ export default function PreviewModal({
             )}
           </div>
         )}
-        {resource && previewState === 'supported' && (
+        {resource && previewState === 'supported' && previewBlobUrl && (
           <SecureFileViewer
-            key={resource.id}
-            url={`/api/resources/${encodeURIComponent(resource.id)}/preview`}
+            key={`${resource.id}-${previewBlobUrl}`}
+            url={previewBlobUrl}
             name={resource.name}
             size={resource.sizeBytes}
             className={styles.viewer}

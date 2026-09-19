@@ -35,12 +35,6 @@ func New(byteLength int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// NewAlphaNumeric 生成指定长度的大写字母数字随机串。调用方可在校验时统一
-// 转成大写，从而提供不区分大小写的输入体验。
-func NewAlphaNumeric(length int) (string, error) {
-	return NewCode(CodeOptions{Length: length, IncludeLetters: true, IncludeNumbers: true})
-}
-
 // NewCode 按给定字符集生成密码学安全的随机码。不区分大小写时仅生成大写
 // 字母，校验方可通过 NormalizeCode 提供大小写无关的输入体验。
 func NewCode(options CodeOptions) (string, error) {

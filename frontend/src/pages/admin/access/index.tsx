@@ -1,4 +1,4 @@
-import { fetchAdminAccess, createQuotaProfile, updateQuotaProfile, deleteQuotaProfile, setGroupQuota, setGroupPermissions, fetchInvitations, issueInvitations, updateInvitationSettings, revokeInvitation } from '@/api/endpoints';
+import { fetchAdminAccess, createQuotaProfile, updateQuotaProfile, deleteQuotaProfile, setGroupQuota, setGroupStorage, setGroupPermissions, fetchInvitations, issueInvitations, updateInvitationSettings, revokeInvitation, fetchAdminStorageBackends } from '@/api/endpoints';
 import { apiErrorMessage } from '@/api/client';
 import React, {
   useCallback,
@@ -55,6 +55,14 @@ interface GroupItem {
   quotaProfileId?: number;
   priority: number;
   permissions: string[];
+  storageBackendId?: number;
+}
+interface StorageBackendItem {
+  id: number;
+  name: string;
+  kind: string;
+  isEnabled: boolean;
+  isDefault: boolean;
 }
 interface QuotaDraft {
   name: string;
@@ -104,6 +112,10 @@ const invitationStatus = {
     label: uiText('已作废'),
     color: 'gray',
   },
+  expired: {
+    label: uiText('已过期'),
+    color: 'orange',
+  },
 };
 function toDraft(item: QuotaItem): QuotaDraft {
   return {
@@ -150,9 +162,16 @@ function Access() {
   const canManageInvitations = Boolean(
     userInfo?.isSuperAdmin || adminPermissions.includes('manage_invitations')
   );
+  // 用户组存储绑定属于系统管理权限：无此权限时隐藏整列并禁止提交，避免出现
+  // 能点但必然 403 的操作（后端同样以 ManageSystem 校验）。
+  const canManageSystem = Boolean(
+    userInfo?.isSuperAdmin || adminPermissions.includes('manage_system')
+  );
   const [permissions, setPermissions] = useState<PermissionDefinition[]>([]);
   const [quotas, setQuotas] = useState<QuotaItem[]>([]);
   const [groups, setGroups] = useState<GroupItem[]>([]);
+  const [storageBackends, setStorageBackends] = useState<StorageBackendItem[]>([]);
+  const [storageBackendsFailed, setStorageBackendsFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [quotaEditing, setQuotaEditing] = useState<QuotaItem | null>();
@@ -165,6 +184,7 @@ function Access() {
       {
         quotaProfileId?: number;
         priority: number;
+        storageBackendId?: number;
       }
     >
   >({});
@@ -188,11 +208,16 @@ function Access() {
   const loadAccess = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetchAdminAccess();
+      const [res, backendsRes] = await Promise.all([
+        fetchAdminAccess(),
+        fetchAdminStorageBackends().catch(() => null),
+      ]);
       const nextGroups: GroupItem[] = res.data.groups || [];
       setPermissions(res.data.availablePermissions || []);
       setQuotas(res.data.quotas || []);
       setGroups(nextGroups);
+      setStorageBackends(backendsRes?.data?.items || []);
+      setStorageBackendsFailed(backendsRes === null);
       setGroupQuotaDrafts(
         Object.fromEntries(
           nextGroups.map((group) => [
@@ -200,6 +225,7 @@ function Access() {
             {
               quotaProfileId: group.quotaProfileId,
               priority: group.priority || 0,
+              storageBackendId: group.storageBackendId ?? 0,
             },
           ])
         )
@@ -214,7 +240,7 @@ function Access() {
     setInvitationLoading(true);
     try {
       const res = await fetchInvitations();
-      setInvitationData(res.data.data || invitationData);
+      setInvitationData((current) => res.data.data || current);
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('邀请码配置加载失败')));
     } finally {
@@ -223,12 +249,15 @@ function Access() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (canManagePermissions || canManageQuotas) loadAccess();
+    // 系统管理员也需要进组列表：用户组存储绑定列在配额页签内（其权限为
+    // manage_system），不加载数据会出现空表格。
+    if (canManagePermissions || canManageQuotas || canManageSystem) loadAccess();
     if (canManageInvitations) loadInvitations();
   }, [
     canManageInvitations,
     canManagePermissions,
     canManageQuotas,
+    canManageSystem,
     loadAccess,
     loadInvitations,
   ]);
@@ -278,13 +307,69 @@ function Access() {
   };
   const saveGroupQuota = async (group: GroupItem) => {
     const draft = groupQuotaDrafts[group.id];
-    if (!draft?.quotaProfileId) {
+    if (canManageQuotas && !draft?.quotaProfileId) {
       Message.warning(uiText('请选择配额方案'));
       return;
     }
+    const nextBackendId = draft?.storageBackendId ?? 0;
+    const currentBackendId = group.storageBackendId ?? 0;
+    const storageChanged = canManageSystem && nextBackendId !== currentBackendId;
+    if (!canManageQuotas && !storageChanged) {
+      // 仅系统管理员只能改存储绑定：本次没有可提交的变更。
+      Message.warning(uiText('没有需要保存的变更'));
+      return;
+    }
     try {
-      await setGroupQuota(group.id, draft);
-      Message.success(`${uiText('配额配置已保存')}：${group.name}`);
+      // 配额与存储绑定是两项独立权限：仅系统管理员跳过配额提交（否则 403）。
+      if (canManageQuotas) {
+        await setGroupQuota(group.id, {
+          quotaProfileId: draft?.quotaProfileId,
+          priority: draft?.priority ?? 0,
+        });
+        Message.success(`${uiText('配额配置已保存')}：${group.name}`);
+      }
+      // 存储绑定变化时二次确认：切换会触发该组存量文件的迁移（后台任务）。
+      if (storageChanged) {
+        const targetLabel =
+          nextBackendId === 0
+            ? uiText('默认（跟随全局）')
+            : storageBackends.find((backend) => backend.id === nextBackendId)?.name ||
+              String(nextBackendId);
+        Modal.confirm({
+          title: uiText('切换用户组存储绑定'),
+          content: `${uiText('该组成员的新上传将写入')}「${targetLabel}」，${uiText('存量文件会自动创建迁移任务搬到新存储，可在存储任务页查看进度。')}`,
+          okText: uiText('确认切换'),
+          cancelText: uiText('取消'),
+          onOk: async () => {
+            try {
+              const storageRes = await setGroupStorage(
+                group.id,
+                nextBackendId === 0 ? null : nextBackendId
+              );
+              if (storageRes.data?.migrationError) {
+                // 绑定已保存但自动迁移未创建：明确告知，避免"看起来成功"。
+                Message.warning(storageRes.data.migrationError);
+              } else {
+                Message.success(
+                  storageRes.data?.migrationStarted
+                    ? uiText('存储绑定已切换，迁移任务已创建')
+                    : uiText('存储绑定已保存')
+                );
+              }
+              await loadAccess();
+            } catch (error) {
+              Message.error(
+                apiErrorMessage(error, uiText('保存用户组存储绑定失败'))
+              );
+            }
+          },
+          // 取消：配额已保存，仅刷新表格让绑定选择回到服务器状态。
+          onCancel: () => {
+            loadAccess();
+          },
+        });
+        return;
+      }
       await loadAccess();
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('保存用户组配额失败')));
@@ -444,6 +529,7 @@ function Access() {
         <Select
           value={groupQuotaDrafts[record.id]?.quotaProfileId}
           placeholder={uiText('选择方案')}
+          disabled={!canManageQuotas}
           style={{
             width: 210,
           }}
@@ -470,6 +556,7 @@ function Access() {
           value={groupQuotaDrafts[record.id]?.priority ?? 0}
           min={-10000}
           max={10000}
+          disabled={!canManageQuotas}
           style={{
             width: 130,
           }}
@@ -485,6 +572,46 @@ function Access() {
         />
       ),
     },
+    ...(canManageSystem
+      ? [
+          {
+            title: uiText('存储后端'),
+            render: (_: unknown, record: GroupItem) => (
+              <Select
+                value={groupQuotaDrafts[record.id]?.storageBackendId ?? 0}
+                disabled={storageBackendsFailed}
+                placeholder={
+                  storageBackendsFailed
+                    ? uiText('存储后端列表读取失败，请刷新重试')
+                    : undefined
+                }
+                style={{
+                  width: 190,
+                }}
+                onChange={(value) =>
+                  setGroupQuotaDrafts((current) => ({
+                    ...current,
+                    [record.id]: {
+                      ...current[record.id],
+                      storageBackendId: value,
+                    },
+                  }))
+                }
+                options={[
+                  { label: uiText('默认（跟随全局）'), value: 0 },
+                  ...storageBackends.map((backend) => ({
+                    label: backend.isEnabled
+                      ? backend.name
+                      : `${backend.name}（${uiText('已停用')}）`,
+                    value: backend.id,
+                    disabled: !backend.isEnabled,
+                  })),
+                ]}
+              />
+            ),
+          },
+        ]
+      : []),
     {
       title: uiText('操作'),
       width: 100,
@@ -622,18 +749,24 @@ function Access() {
       />
       <Card className={styles['table-card']}>
         <Tabs
-          defaultActiveTab={
-            new URLSearchParams(window.location.search).get('tab') === 'permissions' && canManagePermissions
-              ? 'permissions'
-              : canManageQuotas
-              ? 'quotas'
-              : canManagePermissions
-              ? 'permissions'
-              : 'invitations'
-          }
+          defaultActiveTab={(() => {
+            // 默认落在第一个可见页签：仅持 manage_system 的管理员只有"用户组配额"
+            // 页签（用于存储绑定），此前会落到不存在的页签得到空白页。
+            const requested = new URLSearchParams(window.location.search).get('tab');
+            const visible = [
+              canManagePermissions && 'permissions',
+              (canManageQuotas || canManageSystem) && 'quotas',
+              canManageInvitations && 'invitations',
+            ].filter(Boolean) as string[];
+            return requested && visible.includes(requested)
+              ? requested
+              : visible[0] || 'quotas';
+          })()}
         >
-          {canManageQuotas && (
+          {(canManageQuotas || canManageSystem) && (
             <TabPane key="quotas" title={uiText('配额方案')}>
+            {canManageQuotas && (
+              <>
             <div className={styles['access-section-header']}>
               <div>
                 <Typography.Title heading={6}>
@@ -664,13 +797,17 @@ function Access() {
                 x: 1020,
               }}
             />
+              </>
+            )}
             <div className={styles['access-section-header']}>
               <div>
                 <Typography.Title heading={6}>
                   {uiText('用户组配额')}
                 </Typography.Title>
                 <Typography.Text type="secondary">
-                  {uiText('用户属于多个用户组时，采用优先级最高的已绑定方案。')}
+                  {canManageQuotas
+                    ? uiText('用户属于多个用户组时，采用优先级最高的已绑定方案。')
+                    : uiText('存储绑定决定该组成员新上传的落盘位置，切换会触发迁移任务。')}
                 </Typography.Text>
               </div>
             </div>
@@ -861,6 +998,14 @@ function Access() {
             </div>
           ))}
         </div>
+        <Typography.Text
+          type="secondary"
+          className={styles['config-description']}
+        >
+          {uiText(
+            '存储空间包含回收站中的文件（彻底删除或保留期到期后释放）；每日上传流量/次数按自然日（服务器本地时区）统计。'
+          )}
+        </Typography.Text>
       </Modal>
 
       <Modal

@@ -48,7 +48,7 @@
   padding: 0 2px !important;
 
   > svg {
-    color: #f59f00;
+    color: rgb(var(--orange-6));
     font-size: 14px;
   }
 }
@@ -68,8 +68,10 @@
 }
 
 .folder {
-  color: #f59f00;
-  background: #fff7e8;
+  // 用主题的橙色令牌：暗色主题下 arco 会重定义 --orange-*，硬编码的 #f59f00/#fff7e8
+  // 会在深色界面上留一块亮黄（与下方 .file 用 --primary-* 的写法保持一致）。
+  color: rgb(var(--orange-6));
+  background: rgb(var(--orange-1));
 }
 
 .file {

@@ -2,7 +2,6 @@ package server
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
@@ -34,12 +33,12 @@ func trashHandler(deps Deps) http.HandlerFunc {
 				writeBusinessError(w, http.StatusForbidden, "没有清空回收站权限")
 				return
 			}
-			keys, err := deps.ResourceRepo.EmptyTrashOwned(r.Context(), u.ID)
-			if err != nil {
+			// 清空回收站只标记"彻底删除"：用户不可见、不可恢复，物理文件保留
+			// 供管理员审查与清理。
+			if err := deps.ResourceRepo.PurgeAllTrashOwned(r.Context(), u.ID); err != nil {
 				writeBusinessError(w, http.StatusInternalServerError, "清空回收站失败")
 				return
 			}
-			removeStorageKeys(r, deps, keys)
 			writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 		default:
 			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -59,7 +58,8 @@ func trashItemHandler(deps Deps) http.HandlerFunc {
 		}
 		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/trash/"), "/"), "/")
 		if len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost {
-			if err := deps.ResourceRepo.RestoreOwned(r.Context(), u.ID, parts[0]); err != nil {
+			restoredName, err := deps.ResourceRepo.RestoreOwned(r.Context(), u.ID, parts[0])
+			if err != nil {
 				if errors.Is(err, resource.ErrNotFound) {
 					writeBusinessError(w, http.StatusNotFound, "回收站项目不存在")
 					return
@@ -67,14 +67,16 @@ func trashItemHandler(deps Deps) http.HandlerFunc {
 				writeResourceMutationError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+			// 目标位置已有同名条目时会自动改名，把最终名字回给前端提示用户。
+			writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "name": restoredName})
 			return
 		}
 		if len(parts) != 1 || parts[0] == "" || r.Method != http.MethodDelete {
 			writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		tree, err := deps.ResourceRepo.DeleteTrashedOwned(r.Context(), u.ID, parts[0])
+		// "永久删除"对用户只意味着不可见、不可恢复；资源行与物理文件保留。
+		err := deps.ResourceRepo.PurgeTrashedOwned(r.Context(), u.ID, parts[0])
 		if errors.Is(err, resource.ErrNotFound) {
 			writeBusinessError(w, http.StatusNotFound, "回收站项目不存在")
 			return
@@ -83,21 +85,6 @@ func trashItemHandler(deps Deps) http.HandlerFunc {
 			writeBusinessError(w, http.StatusInternalServerError, "永久删除失败")
 			return
 		}
-		keys := make([]string, 0)
-		for _, item := range tree {
-			if item.Kind == resource.KindFile && item.StorageKey != nil {
-				keys = append(keys, *item.StorageKey)
-			}
-		}
-		removeStorageKeys(r, deps, keys)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-	}
-}
-
-func removeStorageKeys(r *http.Request, deps Deps, keys []string) {
-	for _, key := range keys {
-		if err := deps.FileStore.Remove(r.Context(), key); err != nil {
-			log.Printf("清理回收站文件失败 key=%s: %v", key, err)
-		}
 	}
 }

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -42,6 +44,19 @@ type adminSystemConfigRequest struct {
 	UploadTaskChunkConcurrency   int16  `json:"uploadTaskChunkConcurrency"`
 	UploadUserTaskConcurrency    int16  `json:"uploadUserTaskConcurrency"`
 	TrashRetentionDays           int16  `json:"trashRetentionDays"`
+	EncryptNewFiles              bool   `json:"encryptNewFiles"`
+	ProxyRealtimeDecrypt         bool   `json:"proxyRealtimeDecrypt"`
+	ShareRetrievalMode           string `json:"shareRetrievalMode"`
+	StorageChunkSizeBytes        int32  `json:"storageChunkSizeBytes"`
+	// 允许创建/修改"永久有效"的取件码分享（管理端开关）。
+	PickupAllowPermanent bool `json:"pickupAllowPermanent"`
+	// 邀请码有效期（天，0 = 永久）。
+	InvitationValidDays int32 `json:"invitationValidDays"`
+	// 单文件系统硬上限（字节）。
+	UploadMaxFileBytes int64 `json:"uploadMaxFileBytes"`
+	// CrossUserDedupe 秒传是否允许跨用户复用物理对象。缺省（未传）= false，即
+	// 收紧为"仅复用本人对象"——对隐私是更安全的方向，不会因漏传字段而放宽。
+	CrossUserDedupe bool `json:"crossUserDedupe"`
 }
 
 func nullableInt64(value pgtype.Int8) *int64 {
@@ -136,10 +151,29 @@ func adminHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if path == "access" || strings.HasPrefix(path, "access/") {
-			if !requireAnyAdminPermission(w, u, permission.ManagePermissions, permission.ManageQuotas) {
+			// 系统管理员也要能进入 access 页面（用户组存储绑定属于 ManageSystem）；
+			// 各子分支内部仍各自校验所需权限，这里只做门禁放行。
+			if !requireAnyAdminPermission(w, u, permission.ManagePermissions, permission.ManageQuotas, permission.ManageSystem) {
 				return
 			}
 			handleAdminAccess(w, r, deps, u, path)
+			return
+		}
+		if path == "shares" || strings.HasPrefix(path, "shares/") {
+			// 分享与取件码管理：可随时改期（含永久）、启停、删除，并一键释放失效
+			// 取件码腾出码空间。
+			if !requireAdminPermission(w, u, permission.ReviewShares) {
+				return
+			}
+			handleAdminShares(w, r, deps, u, path)
+			return
+		}
+		if path == "uploads" || strings.HasPrefix(path, "uploads/") {
+			// 在途上传任务：占用临时盘，管理员可查看并直接取消（无需等过期）。
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
+				return
+			}
+			handleAdminUploads(w, r, deps, u, path)
 			return
 		}
 		if path == "invitations" || strings.HasPrefix(path, "invitations/") {
@@ -163,6 +197,14 @@ func adminHandler(deps Deps) http.HandlerFunc {
 			handleAdminReviews(w, r, deps, u, path)
 			return
 		}
+		// 存储维护任务：任务列表 / 扫描 / 执行 / 结果清单（storage-tasks/{id}/items）。
+		if path == "storage-tasks" || strings.HasPrefix(path, "storage-tasks/") {
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
+				return
+			}
+			handleAdminStorageTasks(w, r, deps, u, path)
+			return
+		}
 		switch path {
 		case "overview":
 			if !requireAdminPermission(w, u, permission.ViewAdminOverview) {
@@ -172,19 +214,15 @@ func adminHandler(deps Deps) http.HandlerFunc {
 				writeBusinessError(w, 405, "method not allowed")
 				return
 			}
-			if deps.FileStore == nil {
-				writeBusinessError(w, 503, "文件存储尚未初始化")
-				return
-			}
-			storagePath, err := deps.FileStore.Root(r.Context())
-			if err != nil {
-				writeBusinessError(w, 500, "读取存储目录失败")
-				return
-			}
-			data, err := deps.AdminRepo.GetOverview(r.Context(), storagePath)
+			// 磁盘统计用部署级配置的宿主路径（默认 "/"），不依赖可改的存储路径，
+			// 也不会因为本地存储目录异常而让整个概览接口失败。
+			data, err := deps.AdminRepo.GetOverview(r.Context(), deps.HostDiskPath)
 			if err != nil {
 				writeBusinessError(w, 500, "读取实时概览失败")
 				return
+			}
+			if !data.StorageDiskAvailable {
+				log.Printf("实时概览：读取宿主磁盘信息失败 path=%s", deps.HostDiskPath)
 			}
 			writeJSON(w, 200, map[string]any{"status": "ok", "data": data})
 		case "audit":
@@ -212,6 +250,11 @@ func adminHandler(deps Deps) http.HandlerFunc {
 				return
 			}
 			handleAdminUploadTest(w, r)
+		case "storage-backends":
+			if !requireAdminPermission(w, u, permission.ManageSystem) {
+				return
+			}
+			handleAdminStorageBackends(w, r, deps, u)
 		case "site-icon":
 			if !requireAdminPermission(w, u, permission.ManageSystem) {
 				return
@@ -230,10 +273,16 @@ func adminHandler(deps Deps) http.HandlerFunc {
 
 func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User, path string) {
 	if path == "access" && r.Method == http.MethodGet {
-		quotas, err := deps.AdminRepo.ListQuotaProfiles(r.Context())
-		if err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "读取配额方案失败")
-			return
+		// 配额方案只返回给有权管理配额/系统的管理员：其余角色（如仅管理权限的
+		// 管理员）不需要看到限额明细。
+		var quotas []admin.QuotaItem
+		if actor.IsSuperAdmin() || actor.HasPermission(permission.ManageQuotas) || actor.HasPermission(permission.ManageSystem) {
+			listed, listErr := deps.AdminRepo.ListQuotaProfiles(r.Context())
+			if listErr != nil {
+				writeBusinessError(w, http.StatusInternalServerError, "读取配额方案失败")
+				return
+			}
+			quotas = listed
 		}
 		groups, err := deps.AdminRepo.ListAccessGroups(r.Context())
 		if err != nil {
@@ -331,10 +380,25 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 					writeBusinessError(w, http.StatusBadRequest, "包含未知权限")
 					return
 				}
+				// 不能授予操作者自身不具备的能力：否则持有 ManagePermissions
+				// 的管理员可以给自己所在组加上 manage_system 等更高权限（提权）。
+				if !actor.IsSuperAdmin() && !actor.HasPermission(code) {
+					writeBusinessError(w, http.StatusForbidden, "不能授予超出自身权限范围的能力")
+					return
+				}
 				if _, exists := unique[code]; !exists {
 					unique[code] = struct{}{}
 					codes = append(codes, code)
 				}
+			}
+			// 系统用户组必须保留登录权限：default_user 是全站兜底组，移除 login
+			// 会让仅依赖该组的用户（可能包括操作者本人）立即无法登录。
+			if info, infoErr := deps.GroupRepo.GetByID(r.Context(), groupID); infoErr != nil {
+				writeBusinessError(w, http.StatusBadRequest, "用户组不存在")
+				return
+			} else if info.IsSystem && !containsCode(codes, permission.Login) {
+				writeBusinessError(w, http.StatusBadRequest, "系统用户组必须保留登录权限")
+				return
 			}
 			if err := deps.AdminRepo.SetGroupPermissions(r.Context(), groupID, codes); err != nil {
 				writeBusinessError(w, http.StatusBadRequest, "保存用户组权限失败")
@@ -363,6 +427,88 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 				return
 			}
 			_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "group.quota.update", "user_group", strconv.FormatInt(groupID, 10), map[string]any{"quotaProfileId": req.QuotaProfileID, "priority": req.Priority}, net.ParseIP(clientIP(r)))
+		case "storage":
+			if !requireAdminPermission(w, actor, permission.ManageSystem) {
+				return
+			}
+			var req struct {
+				StorageBackendID *int64 `json:"storageBackendId"`
+			}
+			if err := decodeSmallJSON(w, r, &req); err != nil {
+				writeBusinessError(w, http.StatusBadRequest, "存储绑定参数无效")
+				return
+			}
+			backends, err := deps.AdminRepo.ListStorageBackends(r.Context())
+			if err != nil {
+				writeBusinessError(w, http.StatusInternalServerError, "读取存储后端失败")
+				return
+			}
+			// 组必须存在；旧绑定用于判定是否需要迁移。
+			groupInfo, err := deps.GroupRepo.GetByID(r.Context(), groupID)
+			if err != nil {
+				writeBusinessError(w, http.StatusBadRequest, "用户组不存在")
+				return
+			}
+			oldBackendID := int64(0)
+			if groupInfo.StorageBackendID.Valid {
+				oldBackendID = groupInfo.StorageBackendID.Int64
+			} else {
+				// 未绑定不等于"没有存储位置"：此时对象写在全局默认后端上。旧位置
+				// 取默认后端，否则"解绑 → 绑定非默认后端"会漏掉迁移，对象的实际
+				// 位置与新绑定不一致。
+				oldBackendID = defaultStorageBackendID(backends)
+			}
+			targetBackendID := int64(0)
+			if req.StorageBackendID != nil {
+				// 绑定目标必须"已加载且启用"：DB 里启用但凭据缺失/未就绪的后端
+				// 会接住上传请求却在合并阶段失败，必须提前拒绝。
+				if _, ok := findStorageBackend(backends, *req.StorageBackendID); !ok {
+					writeBusinessError(w, http.StatusBadRequest, "存储后端不存在")
+					return
+				}
+				if !deps.Blobs.BackendEnabled(*req.StorageBackendID) {
+					writeBusinessError(w, http.StatusBadRequest, "存储后端当前不可用（未启用或未就绪）")
+					return
+				}
+				targetBackendID = *req.StorageBackendID
+			} else {
+				// 解绑：回退全局默认后端，迁移目标即它。
+				targetBackendID = defaultStorageBackendID(backends)
+			}
+			if err := deps.GroupRepo.UpdateGroupStorageBackend(r.Context(), groupID, req.StorageBackendID); err != nil {
+				writeBusinessError(w, http.StatusBadRequest, "保存用户组存储绑定失败")
+				return
+			}
+			// 绑定变化且有旧值时，把该组存量对象迁到新目标：先取消先前排队、
+			// 目标可能已过期的同类任务，避免对象被搬到不再对应该组的后端。
+			var migrationTaskID any // int64 或 nil（JSON null）
+			migrationError := ""
+			if oldBackendID != 0 && targetBackendID != 0 && targetBackendID != oldBackendID {
+				if _, cancelErr := deps.AdminRepo.CancelQueuedScopedMigrations(r.Context(), groupID); cancelErr != nil {
+					log.Printf("取消用户组 %d 的排队迁移任务失败：%v", groupID, cancelErr)
+				}
+				task, createErr := deps.AdminRepo.CreateStorageTask(r.Context(), "migrate", map[string]any{
+					"target_backend_id": targetBackendID,
+					"scope_group_id":    groupID,
+				}, actor.ID)
+				if createErr != nil {
+					// 绑定已保存但迁移未创建：明确回报给前端，由管理员手动发起。
+					log.Printf("用户组 %d 切换存储绑定后创建迁移任务失败：%v", groupID, createErr)
+					migrationError = "自动迁移任务创建失败，请在存储任务页手动发起迁移"
+				} else {
+					migrationTaskID = task.ID
+				}
+			}
+			_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "group.storage.update", "user_group", strconv.FormatInt(groupID, 10), map[string]any{
+				"oldBackendId": oldBackendID, "storageBackendId": targetBackendID, "migrationTaskId": migrationTaskID,
+			}, net.ParseIP(clientIP(r)))
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status":           "ok",
+				"migrationStarted": migrationTaskID != nil,
+				"migrationTaskId":  migrationTaskID,
+				"migrationError":   migrationError,
+			})
+			return
 		default:
 			writeBusinessError(w, http.StatusNotFound, "权限与配额接口不存在")
 			return
@@ -446,13 +592,32 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 		writeBusinessError(w, http.StatusConflict, "不能删除或禁用当前登录账户")
 		return
 	}
+	// 非超级管理员不得操作"权限超出自身范围"的账户：否则持有 ManageUsers 的管理员
+	// 可以重置更高权限管理员的密码（重设会连带清空其全部会话）后登录该账号，或直接
+	// 禁用/删除该管理员——与用户组、邀请码已有的越级防护保持一致。
+	if r.Method != http.MethodGet {
+		if status, msg := ensureActorCoversUser(r.Context(), deps, actor, userID); msg != "" {
+			writeBusinessError(w, status, msg)
+			return
+		}
+	}
 
 	if len(parts) == 1 && r.Method == http.MethodDelete {
 		uploadSessionIDs := []string{}
 		if deps.UploadRepo != nil {
-			uploadSessionIDs, _ = deps.UploadRepo.ListIDsOwned(r.Context(), userID)
+			ids, listErr := deps.UploadRepo.ListIDsOwned(r.Context(), userID)
+			if listErr != nil {
+				log.Printf("读取待删除用户 %d 的上传会话失败: %v", userID, listErr)
+			} else {
+				uploadSessionIDs = ids
+			}
 		}
-		username, storageKeys, err := deps.AdminRepo.DeleteUser(r.Context(), userID)
+		// 临时 ZIP 制品路径必须在删除前收集（任务行级联删除后无法再定位）。
+		artifactPaths, artifactErr := deps.AdminRepo.CollectUserArtifactPaths(r.Context(), userID)
+		if artifactErr != nil {
+			log.Printf("收集待删除用户 %d 的临时制品失败: %v", userID, artifactErr)
+		}
+		username, blobIDs, err := deps.AdminRepo.DeleteUser(r.Context(), userID, actor.Username)
 		if errors.Is(err, admin.ErrUserNotFound) {
 			writeBusinessError(w, http.StatusNotFound, err.Error())
 			return
@@ -461,10 +626,11 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 			writeBusinessError(w, http.StatusInternalServerError, "删除用户失败")
 			return
 		}
-		for _, storageKey := range storageKeys {
-			if deps.FileStore != nil {
-				if err := deps.FileStore.Remove(r.Context(), storageKey); err != nil {
-					log.Printf("清理已删除用户 %d 的文件 %q 失败: %v", userID, storageKey, err)
+		// 物理对象只降引用：归零后标记 orphaned，由管理员清理工具处理。
+		for _, blobID := range blobIDs {
+			if deps.Blobs != nil {
+				if err := deps.Blobs.Release(r.Context(), blobID); err != nil {
+					log.Printf("释放已删除用户 %d 的对象 %q 失败: %v", userID, blobID, err)
 				}
 			}
 		}
@@ -473,6 +639,11 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 				if err := deps.FileStore.RemoveUploadSession(r.Context(), sessionID); err != nil {
 					log.Printf("清理已删除用户 %d 的上传分片失败 id=%s: %v", userID, sessionID, err)
 				}
+			}
+		}
+		for _, artifactPath := range artifactPaths {
+			if err := os.Remove(artifactPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("清理已删除用户 %d 的临时制品失败 path=%s: %v", userID, artifactPath, err)
 			}
 		}
 		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user.delete", "user", username, map[string]any{}, net.ParseIP(clientIP(r)))
@@ -491,8 +662,15 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 			writeBusinessError(w, http.StatusBadRequest, "用户组参数无效")
 			return
 		}
+		// 成员归属与"下发组权限"受同一约束：非超级管理员只能把用户分配到
+		// 权限不超出自身的组，且不能修改自己的归属——否则持有 ManageUserGroups
+		// 的管理员可以把自己加入高权限组实现提权。
+		if status, msg := ensureGroupsWithinActor(r.Context(), deps, actor, userID, req.GroupIDs); msg != "" {
+			writeBusinessError(w, status, msg)
+			return
+		}
 		username, err := deps.AdminRepo.SetUserGroups(r.Context(), userID, req.GroupIDs)
-		if errors.Is(err, admin.ErrGroupNotFound) {
+		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserWithoutGroup) {
 			writeBusinessError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -581,8 +759,13 @@ func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, ac
 			writeBusinessError(w, http.StatusBadRequest, "用户组成员参数无效")
 			return
 		}
+		// 不能管理"权限超出自身"的组成员：否则可借高权限组提权。
+		if status, msg := ensureActorCoversGroup(r.Context(), deps, actor, groupID); msg != "" {
+			writeBusinessError(w, status, msg)
+			return
+		}
 		name, err := deps.AdminRepo.SetUserGroupMembers(r.Context(), groupID, req.UserIDs, user.EnvSuperAdminName())
-		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserNotFound) {
+		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserNotFound) || errors.Is(err, admin.ErrUserWithoutGroup) {
 			writeBusinessError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -634,6 +817,10 @@ func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, ac
 			writeBusinessError(w, http.StatusForbidden, err.Error())
 			return
 		}
+		if errors.Is(err, admin.ErrGroupSoleMembers) {
+			writeBusinessError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err != nil {
 			writeBusinessError(w, http.StatusInternalServerError, "删除用户组失败")
 			return
@@ -643,6 +830,127 @@ func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, ac
 	default:
 		writeBusinessError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// groupPermissionIndex 读取全部用户组及其权限码，供"权限子集"校验复用。
+func groupPermissionIndex(ctx context.Context, deps Deps) (map[int64][]string, error) {
+	groups, err := deps.AdminRepo.ListAccessGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	index := make(map[int64][]string, len(groups))
+	for _, group := range groups {
+		index[group.ID] = group.Permissions
+	}
+	return index, nil
+}
+
+// ensureGroupsWithinActor 校验操作者有权把目标用户分配到给定用户组。
+// 非超级管理员只能操作"权限不超出自身"的组，且不能修改自己的归属——否则
+// 持有 ManageUserGroups 的管理员可借成员关系自提权。返回 (HTTP 状态码, 文案)，
+// 无错误时文案为空。
+func ensureGroupsWithinActor(ctx context.Context, deps Deps, actor user.User, targetUserID int64, groupIDs []int64) (int, string) {
+	if len(groupIDs) == 0 {
+		return http.StatusBadRequest, "至少保留一个用户组"
+	}
+	if actor.IsSuperAdmin() {
+		return 0, ""
+	}
+	if targetUserID == actor.ID {
+		return http.StatusForbidden, "不能修改自己的用户组归属"
+	}
+	index, err := groupPermissionIndex(ctx, deps)
+	if err != nil {
+		return http.StatusInternalServerError, "读取用户组失败"
+	}
+	seen := make(map[int64]struct{}, len(groupIDs))
+	for _, groupID := range groupIDs {
+		if groupID < 1 {
+			return http.StatusBadRequest, "用户组参数无效"
+		}
+		if _, exists := seen[groupID]; exists {
+			continue
+		}
+		seen[groupID] = struct{}{}
+		perms, exists := index[groupID]
+		if !exists {
+			return http.StatusBadRequest, "用户组不存在"
+		}
+		for _, code := range perms {
+			if !actor.HasPermission(code) {
+				return http.StatusForbidden, "不能把用户分配到权限超出自身范围的用户组"
+			}
+		}
+	}
+	return 0, ""
+}
+
+// ensureActorCoversUser 校验操作者对目标账户的权限覆盖：非超级管理员只能改动
+// "权限不超出自身"的账户（按其当前用户组判定）。缺少该判定时，仅持 ManageUsers
+// 的管理员可重置/禁用/删除权限更高的管理员，实现从 ManageUsers 到完全管理权限的
+// 提权。返回 (HTTP 状态码, 文案)，无错误时文案为空。
+func ensureActorCoversUser(ctx context.Context, deps Deps, actor user.User, targetUserID int64) (int, string) {
+	if actor.IsSuperAdmin() || targetUserID == actor.ID {
+		return 0, ""
+	}
+	groupIDs, err := deps.AdminRepo.GetUserGroupIDs(ctx, targetUserID)
+	if err != nil {
+		return http.StatusInternalServerError, "读取目标账户用户组失败"
+	}
+	if len(groupIDs) == 0 {
+		// 无组账户没有管理权限，普通管理员可以处理。
+		return 0, ""
+	}
+	index, err := groupPermissionIndex(ctx, deps)
+	if err != nil {
+		return http.StatusInternalServerError, "读取用户组失败"
+	}
+	for _, groupID := range groupIDs {
+		for _, code := range index[groupID] {
+			// 只比较"管理类"权限：普通用户的业务权限（上传/分享/直链等）不构成
+			// 更高的管理权限，否则仅持 ManageUsers 的"用户支持"管理员将无法管理
+			// 任何普通用户（其业务权限必然不在自己名下）。
+			if !containsCode(permission.Admin, code) {
+				continue
+			}
+			if !actor.HasPermission(code) {
+				return http.StatusForbidden, "不能操作权限超出自身范围的账户"
+			}
+		}
+	}
+	return 0, ""
+}
+
+// ensureActorCoversGroup 校验操作者对目标用户组的权限覆盖：非超级管理员只能
+// 管理"权限不超出自身"的组成员与邀请码，防止借高权限组提权。
+func ensureActorCoversGroup(ctx context.Context, deps Deps, actor user.User, groupID int64) (int, string) {
+	if actor.IsSuperAdmin() {
+		return 0, ""
+	}
+	index, err := groupPermissionIndex(ctx, deps)
+	if err != nil {
+		return http.StatusInternalServerError, "读取用户组失败"
+	}
+	perms, exists := index[groupID]
+	if !exists {
+		return http.StatusBadRequest, "用户组不存在"
+	}
+	for _, code := range perms {
+		if !actor.HasPermission(code) {
+			return http.StatusForbidden, "不能操作权限超出自身范围的用户组"
+		}
+	}
+	return 0, ""
+}
+
+// containsCode 判断权限码集合是否包含指定码。
+func containsCode(codes []string, target string) bool {
+	for _, code := range codes {
+		if code == target {
+			return true
+		}
+	}
+	return false
 }
 
 func handleAdminInvitations(w http.ResponseWriter, r *http.Request, deps Deps, u user.User, path string) {
@@ -661,7 +969,21 @@ func handleAdminInvitations(w http.ResponseWriter, r *http.Request, deps Deps, u
 			writeBusinessError(w, 400, "请求格式错误")
 			return
 		}
-		messageID, err := deps.AdminRepo.IssueInvitationCodes(r.Context(), u.ID, req.TargetType, req.TargetID, req.Quantity)
+		// 组邀请码同样受"权限子集"约束：否则持有 ManageInvitations 的管理员
+		// 可以给高权限组发码、再注册新账号实现提权。
+		if req.TargetType == "group" {
+			if status, msg := ensureActorCoversGroup(r.Context(), deps, u, req.TargetID); msg != "" {
+				writeBusinessError(w, status, msg)
+				return
+			}
+		}
+		// 邀请码有效期由系统配置决定（0 = 永久），管理员可随时调整。
+		knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+		if knobErr != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "读取系统配置失败")
+			return
+		}
+		messageID, err := deps.AdminRepo.IssueInvitationCodes(r.Context(), u.ID, req.TargetType, req.TargetID, req.Quantity, knobs.InvitationValidDays)
 		if errors.Is(err, admin.ErrInvitationTargetInvalid) || errors.Is(err, admin.ErrInvitationQuantity) {
 			writeBusinessError(w, 400, err.Error())
 			return
@@ -750,14 +1072,6 @@ func requireAdminPermission(w http.ResponseWriter, u user.User, code string) boo
 	return false
 }
 
-func requireSuperAdmin(w http.ResponseWriter, u user.User) bool {
-	if u.IsSuperAdmin() {
-		return true
-	}
-	writeBusinessError(w, http.StatusForbidden, "仅系统超级管理员可访问")
-	return false
-}
-
 func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, u user.User) {
 	if r.Method == http.MethodGet {
 		settings, err := deps.SystemSettings.Get(r.Context())
@@ -770,7 +1084,12 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 			writeBusinessError(w, 500, "读取动态令牌用户组失败")
 			return
 		}
-		writeJSON(w, 200, systemConfigResponse(settings, allowed, required))
+		knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+		if knobErr != nil {
+			writeBusinessError(w, 500, "读取系统配置失败")
+			return
+		}
+		writeJSON(w, 200, systemConfigResponse(settings, knobs, allowed, required, deps.Blobs.EncryptionAvailable()))
 		return
 	}
 	if r.Method != http.MethodPut {
@@ -780,6 +1099,11 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 	var req adminSystemConfigRequest
 	if err := decodeSmallJSON(w, r, &req); err != nil {
 		writeBusinessError(w, 400, "请求格式错误")
+		return
+	}
+	// 开启新文件加密前必须已配置 KEK，否则之后所有上传都会失败。
+	if req.EncryptNewFiles && !deps.Blobs.EncryptionAvailable() {
+		writeBusinessError(w, 400, "未配置加密密钥（XPH_ENCRYPTION_KEYS），无法开启新文件加密")
 		return
 	}
 	settings, err := deps.SystemSettings.UpdateAll(r.Context(), systemsetting.Config{
@@ -798,8 +1122,24 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		UploadTaskChunkConcurrency: req.UploadTaskChunkConcurrency,
 		UploadUserTaskConcurrency:  req.UploadUserTaskConcurrency,
 		TrashRetentionDays:         req.TrashRetentionDays,
+		EncryptNewFiles:            req.EncryptNewFiles,
+		ProxyRealtimeDecrypt:       req.ProxyRealtimeDecrypt,
+		ShareRetrievalMode:         req.ShareRetrievalMode,
+		StorageChunkSizeBytes:      req.StorageChunkSizeBytes,
+		PickupAllowPermanent:       req.PickupAllowPermanent,
+		CrossUserDedupe:            req.CrossUserDedupe,
+		InvitationValidDays:        req.InvitationValidDays,
+		UploadMaxFileBytes:         req.UploadMaxFileBytes,
 	})
-	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) || errors.Is(err, systemsetting.ErrPickupLifetime) {
+	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) || errors.Is(err, systemsetting.ErrPickupLifetime) || errors.Is(err, systemsetting.ErrInvitationValidity) || errors.Is(err, systemsetting.ErrUploadMaxFileBytes) {
+		writeBusinessError(w, 400, err.Error())
+		return
+	}
+	if errors.Is(err, systemsetting.ErrRetrievalMode) {
+		writeBusinessError(w, 400, "分享交付方式无效")
+		return
+	}
+	if errors.Is(err, systemsetting.ErrStorageChunkSize) {
 		writeBusinessError(w, 400, err.Error())
 		return
 	}
@@ -812,16 +1152,21 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		return
 	}
 	ip := net.ParseIP(clientIP(r))
-	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview, "uploadChunkSizeBytes": settings.UploadChunkSizeBytes, "uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency, "uploadUserTaskConcurrency": settings.UploadUserTaskConcurrency, "trashRetentionDays": settings.TrashRetentionDays}, ip)
+	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview, "uploadChunkSizeBytes": settings.UploadChunkSizeBytes, "uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency, "uploadUserTaskConcurrency": settings.UploadUserTaskConcurrency, "trashRetentionDays": settings.TrashRetentionDays, "encryptNewFiles": settings.EncryptNewFiles, "proxyRealtimeDecrypt": settings.ProxyRealtimeDecrypt, "shareRetrievalMode": settings.ShareRetrievalMode}, ip)
 	allowed, required, err := deps.AdminRepo.ListTOTPPolicyGroups(r.Context())
 	if err != nil {
 		writeBusinessError(w, 500, "读取动态令牌用户组失败")
 		return
 	}
-	writeJSON(w, 200, systemConfigResponse(settings, allowed, required))
+	knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+	if knobErr != nil {
+		writeBusinessError(w, 500, "读取系统配置失败")
+		return
+	}
+	writeJSON(w, 200, systemConfigResponse(settings, knobs, allowed, required, deps.Blobs.EncryptionAvailable()))
 }
 
-func systemConfigResponse(settings sqlcgen.SystemSetting, allowedGroups, requiredGroups []string) map[string]any {
+func systemConfigResponse(settings sqlcgen.SystemSetting, knobs systemsetting.Knobs, allowedGroups, requiredGroups []string, encryptionConfigured bool) map[string]any {
 	return map[string]any{
 		"status": "ok", "siteName": settings.SiteName, "siteIconUrl": currentSiteIconURL(settings.StoragePath),
 		"customHomepageConfigured": customHomepageConfigured(settings.StoragePath),
@@ -833,6 +1178,10 @@ func systemConfigResponse(settings sqlcgen.SystemSetting, allowedGroups, require
 		"pickupCodeLength": settings.PickupLength, "pickupCodeCaseSensitive": settings.PickupCaseSensitive,
 		"pickupCodeIncludeLetters": settings.PickupIncludeLetters, "pickupCodeIncludeNumbers": settings.PickupIncludeNumbers,
 		"pickupMaxLifetimeSeconds": nullableInt64(settings.PickupMaxLifetimeSeconds),
+		"pickupAllowPermanent":     knobs.PickupAllowPermanent,
+		"crossUserDedupe":          knobs.CrossUserDedupe,
+		"invitationValidDays":      knobs.InvitationValidDays,
+		"uploadMaxFileBytes":       knobs.UploadMaxFileBytes,
 		"loginTOTPEnabled":         settings.LoginTotpEnabled,
 		"loginTOTPAllowedGroups":   allowedGroups,
 		"loginTOTPRequiredGroups":  requiredGroups,
@@ -841,6 +1190,13 @@ func systemConfigResponse(settings sqlcgen.SystemSetting, allowedGroups, require
 		"uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency,
 		"uploadUserTaskConcurrency":  settings.UploadUserTaskConcurrency,
 		"trashRetentionDays":         settings.TrashRetentionDays,
+		"encryptNewFiles":            settings.EncryptNewFiles,
+		"proxyRealtimeDecrypt":       settings.ProxyRealtimeDecrypt,
+		"shareRetrievalMode":         settings.ShareRetrievalMode,
+		"storageChunkSizeBytes":      settings.StorageChunkSizeBytes,
+		// encryptionConfigured 告诉管理界面当前部署是否配置了 KEK（未配置时
+		// 不允许开启新文件加密）。
+		"encryptionConfigured": encryptionConfigured,
 	}
 }
 

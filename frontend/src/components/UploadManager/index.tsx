@@ -68,6 +68,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const activeOwner = useRef(ownerId);
   const controllers = useRef(new Map<string, AbortController>());
   const fileCache = useRef(new Map<string, File>());
+  // 完成态轮询的定时器：切换账号/卸载时必须清理，否则会对旧任务继续发请求。
+  const completionTimers = useRef<number[]>([]);
   const replaceFileTarget = useRef<UploadTask>();
   const fileInput = useRef<HTMLInputElement>();
 
@@ -273,6 +275,8 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     polling.current.clear();
     controllers.current.forEach((controller) => controller.abort());
     controllers.current.clear();
+    completionTimers.current.forEach((timer) => window.clearTimeout(timer));
+    completionTimers.current = [];
     fileCache.current.clear();
     setTasks([]);
     setConfig(DEFAULT_CONFIG);
@@ -317,7 +321,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     );
     completing.forEach((task) => {
       polling.current.add(task.id);
-      window.setTimeout(async () => {
+      const timer = window.setTimeout(async () => {
         try {
           const response = await fetchUploadTask(task.id);
           const latest: UploadTask = response.data.task;
@@ -338,9 +342,12 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
           });
         } finally {
           polling.current.delete(task.id);
+          const timerIndex = completionTimers.current.indexOf(timer);
+          if (timerIndex >= 0) completionTimers.current.splice(timerIndex, 1);
           setSchedulerTick((value) => value + 1);
         }
       }, 1500);
+      completionTimers.current.push(timer);
     });
   }, [notifyCompleted, ownerId, schedulerTick, tasks, updateTask]);
 

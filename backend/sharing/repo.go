@@ -13,6 +13,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/randomtoken"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,10 +61,13 @@ type DirectLink struct {
 }
 
 type OwnerShareItem struct {
-	ID                int64             `json:"id"`
-	URL               *string           `json:"url,omitempty"`
-	ShareType         string            `json:"shareType"`
-	PickupCode        *string           `json:"pickupCode,omitempty"`
+	ID         int64   `json:"id"`
+	URL        *string `json:"url,omitempty"`
+	ShareType  string  `json:"shareType"`
+	PickupCode *string `json:"pickupCode,omitempty"`
+	// PickupCodeLive 表示取件码当前是否占用码空间；失效码（已停用/过期/删除）
+	// 可被释放并重新分配，前端据此提示"码已失效，重新启用会复用或换发新码"。
+	PickupCodeLive    bool              `json:"pickupCodeLive"`
 	Password          *string           `json:"password,omitempty"`
 	Resource          resource.Resource `json:"resource"`
 	ExpiresAt         *time.Time        `json:"expiresAt,omitempty"`
@@ -182,17 +186,32 @@ func NewRepo(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 func (r *Repo) CountActiveSharesByOwner(ctx context.Context, ownerID int64) (int64, error) {
 	var count int64
+	// 与列表同口径：主根资源已不可交付（回收站/彻底删除/被物理清理）的分享不
+	// 计入"有效分享"，否则用户删除文件后配额仍被"幽灵分享"永久占用。
 	err := r.pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM shares
-		WHERE owner_user_id = $1 AND is_active AND NOT admin_blocked AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`, ownerID).Scan(&count)
+		SELECT COUNT(*) FROM shares s
+		WHERE s.owner_user_id = $1 AND s.is_active AND NOT s.admin_blocked AND s.deleted_at IS NULL
+		  AND (s.expires_at IS NULL OR s.expires_at > NOW())
+		  AND EXISTS (
+		      SELECT 1 FROM share_resources sr
+		      JOIN resources r ON r.id = sr.resource_id
+		      WHERE sr.share_id = s.id AND sr.display_order = 0
+		        AND r.trashed_at IS NULL AND r.purged_at IS NULL
+		  )`, ownerID).Scan(&count)
 	return count, err
 }
 
 func (r *Repo) CountActiveDirectLinksByOwner(ctx context.Context, ownerID int64) (int64, error) {
 	var count int64
+	// 与列表同口径：资源已不可交付的直链不计入"有效直链"（避免幽灵占额）。
 	err := r.pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM direct_links
-		WHERE owner_user_id = $1 AND is_active AND (expires_at IS NULL OR expires_at > NOW())`, ownerID).Scan(&count)
+		SELECT COUNT(*) FROM direct_links d
+		WHERE d.owner_user_id = $1 AND d.is_active AND (d.expires_at IS NULL OR d.expires_at > NOW())
+		  AND EXISTS (
+		      SELECT 1 FROM resources r
+		      WHERE r.id = d.resource_id AND r.kind = 'file'
+		        AND r.trashed_at IS NULL AND r.purged_at IS NULL
+		  )`, ownerID).Scan(&count)
 	return count, err
 }
 
@@ -218,13 +237,13 @@ func (r *Repo) countLinksToEnableByOwner(ctx context.Context, table string, owne
 
 func (r *Repo) ListSharesByOwner(ctx context.Context, ownerID int64) ([]OwnerShareItem, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT s.id,s.token_value,s.share_type,s.pickup_code,s.password_value,s.expires_at,s.password_value IS NOT NULL,s.show_owner,
+		SELECT s.id,s.token_value,s.share_type,s.pickup_code,s.pickup_code_live,s.password_value,s.expires_at,s.password_value IS NOT NULL,s.show_owner,
 		       s.description,s.description_format,
 		       s.download_limit,s.traffic_limit_bytes,s.download_count,s.traffic_used_bytes,
 		       s.is_active,COALESCE(review.status,'approved'),COALESCE(review.reason,''),s.created_at,
 		       (SELECT COUNT(*) FROM share_resources sr JOIN resources counted ON counted.id=sr.resource_id WHERE sr.share_id=s.id AND counted.trashed_at IS NULL),
-		       r.id,r.owner_user_id,r.parent_id,r.kind,r.name,r.storage_key,
-		       r.size_bytes,r.sha256_checksum,r.mime_type,r.created_at,r.updated_at
+		       r.id,r.owner_user_id,r.parent_id,r.kind,r.name,
+		       r.size_bytes,r.sha256_checksum,r.mime_type,r.blob_id,r.created_at,r.updated_at
 		FROM shares s
 		JOIN share_resources primary_link ON primary_link.share_id=s.id AND primary_link.display_order=0
 		JOIN resources r ON r.id=primary_link.resource_id
@@ -240,14 +259,14 @@ func (r *Repo) ListSharesByOwner(ctx context.Context, ownerID int64) ([]OwnerSha
 		var tokenValue *string
 		var resourceCount int
 		if err := rows.Scan(
-			&item.ID, &tokenValue, &item.ShareType, &item.PickupCode, &item.Password, &item.ExpiresAt, &item.HasPassword, &item.ShowOwner,
+			&item.ID, &tokenValue, &item.ShareType, &item.PickupCode, &item.PickupCodeLive, &item.Password, &item.ExpiresAt, &item.HasPassword, &item.ShowOwner,
 			&item.Description, &item.DescriptionFormat,
 			&item.DownloadLimit, &item.TrafficLimitBytes, &item.DownloadCount,
 			&item.TrafficUsedBytes, &item.IsActive, &item.ReviewStatus, &item.ReviewReason,
 			&item.CreatedAt, &resourceCount,
 			&item.Resource.ID, &item.Resource.OwnerUserID, &item.Resource.ParentID,
-			&item.Resource.Kind, &item.Resource.Name, &item.Resource.StorageKey,
-			&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType,
+			&item.Resource.Kind, &item.Resource.Name,
+			&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType, &item.Resource.BlobID,
 			&item.Resource.CreatedAt, &item.Resource.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -270,8 +289,8 @@ func (r *Repo) ListDirectLinksByOwner(ctx context.Context, ownerID int64) ([]Own
 	rows, err := r.pool.Query(ctx, `
 		SELECT d.id,d.token_value,d.expires_at,d.download_limit,d.traffic_limit_bytes,
 		       d.download_count,d.traffic_used_bytes,d.is_active,d.created_at,
-		       r.id,r.owner_user_id,r.parent_id,r.kind,r.name,r.storage_key,
-		       r.size_bytes,r.sha256_checksum,r.mime_type,r.created_at,r.updated_at
+		       r.id,r.owner_user_id,r.parent_id,r.kind,r.name,
+		       r.size_bytes,r.sha256_checksum,r.mime_type,r.blob_id,r.created_at,r.updated_at
 		FROM direct_links d JOIN resources r ON r.id=d.resource_id
 		WHERE d.owner_user_id=$1 AND r.kind='file' AND r.trashed_at IS NULL ORDER BY d.id DESC LIMIT 500`, ownerID)
 	if err != nil {
@@ -286,8 +305,8 @@ func (r *Repo) ListDirectLinksByOwner(ctx context.Context, ownerID int64) ([]Own
 			&item.ID, &tokenValue, &item.ExpiresAt, &item.DownloadLimit, &item.TrafficLimitBytes,
 			&item.DownloadCount, &item.TrafficUsedBytes, &item.IsActive, &item.CreatedAt,
 			&item.Resource.ID, &item.Resource.OwnerUserID, &item.Resource.ParentID,
-			&item.Resource.Kind, &item.Resource.Name, &item.Resource.StorageKey,
-			&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType,
+			&item.Resource.Kind, &item.Resource.Name,
+			&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType, &item.Resource.BlobID,
 			&item.Resource.CreatedAt, &item.Resource.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -330,7 +349,7 @@ func (r *Repo) CreateShare(ctx context.Context, p CreateShareParams) (Share, str
 				token_value,owner_user_id,password_value,expires_at,show_owner,description,
 				description_format,download_limit,traffic_limit_bytes,share_type,pickup_code,pickup_case_sensitive
 			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pickup',$10,$11)
-			ON CONFLICT (pickup_code) WHERE pickup_code IS NOT NULL DO NOTHING RETURNING id`,
+			ON CONFLICT (pickup_code) WHERE pickup_code IS NOT NULL AND pickup_code_live DO NOTHING RETURNING id`,
 				token, p.OwnerUserID, p.PasswordValue, p.ExpiresAt, p.ShowOwner, p.Description,
 				p.DescriptionFormat, p.DownloadLimit, p.TrafficLimitBytes, code, p.PickupOptions.CaseSensitive).Scan(&id)
 			if err == nil {
@@ -369,13 +388,21 @@ func (r *Repo) CreateShare(ctx context.Context, p CreateShareParams) (Share, str
 
 func (r *Repo) GetShareByPickupCode(ctx context.Context, code string) (Share, error) {
 	code = strings.TrimSpace(code)
-	return r.getShare(ctx, `s.share_type='pickup' AND NOT s.admin_blocked AND s.deleted_at IS NULL AND (s.pickup_code=$1 OR (NOT s.pickup_case_sensitive AND s.pickup_code=UPPER($1)))`, code)
+	// 必须限定 pickup_code_live：失效码释放后可以被其它分享重新分配，于是同一个码
+	// 在历史上可能存在多行（一行占位中、若干行已释放）。若不过滤，可能命中已停用/
+	// 已过期的旧行，导致用户拿着有效码却打不开（公开流程会先查码再校验有效性）。
+	// 占位行由部分唯一索引保证全局唯一，因此该谓词下至多命中一行。
+	return r.getShare(ctx, `s.share_type='pickup' AND s.pickup_code_live AND NOT s.admin_blocked AND s.deleted_at IS NULL AND (s.pickup_code=$1 OR (NOT s.pickup_case_sensitive AND s.pickup_code=UPPER($1)))`, code)
 }
 
 func (r *Repo) GetShareByToken(ctx context.Context, token string) (Share, error) {
-	var blocked, deleted bool
-	err := r.pool.QueryRow(ctx, `SELECT admin_blocked,deleted_at IS NOT NULL FROM shares WHERE token_value=$1`, token).Scan(&blocked, &deleted)
-	if errors.Is(err, pgx.ErrNoRows) || deleted {
+	var blocked, deleted, ownerDisabled bool
+	// 作者被禁用时对外不可访问（软下架）：恢复启用后链接即可用。
+	err := r.pool.QueryRow(ctx, `
+		SELECT s.admin_blocked, s.deleted_at IS NOT NULL,
+		       COALESCE((SELECT u.is_disabled FROM users u WHERE u.id = s.owner_user_id), FALSE)
+		FROM shares s WHERE s.token_value=$1`, token).Scan(&blocked, &deleted, &ownerDisabled)
+	if errors.Is(err, pgx.ErrNoRows) || deleted || ownerDisabled {
 		return Share{}, ErrNotFound
 	}
 	if err != nil {
@@ -450,6 +477,239 @@ func (r *Repo) BatchSharesByOwner(ctx context.Context, ownerID int64, ids []int6
 
 func (r *Repo) BatchDirectLinksByOwner(ctx context.Context, ownerID int64, ids []int64, action string) error {
 	return r.batchLinksByOwner(ctx, "direct_links", ownerID, ids, action)
+}
+
+// ShareState 是分享的关键状态快照（取件码占位同步使用）。
+type ShareState struct {
+	IsPickup bool
+	Code     string
+	CodeLive bool
+	// Usable 表示分享当前是否"值得占用取件码"：未删除、已启用、未过期，且审核未
+	// 判定为需要删链（share_moderations：rejected + delete_link）。
+	//
+	// 注意：普通"审核中/未通过"（无 delete_link）仍算 Usable —— 审核是可逆状态，
+	// 码留给用户改好后复用，避免每次审核往返都换码。仅当审核明确要求删链时才释放。
+	Usable bool
+}
+
+// shareUsablePredicate 是"分享可否占用取件码"的统一判定（GetShareState 与
+// ReleaseDeadPickupCodes 共用同一语义，避免两处漂移）。要求查询里 shares 表名为 s。
+const shareUsablePredicate = `
+	s.deleted_at IS NULL AND s.is_active AND (s.expires_at IS NULL OR s.expires_at > NOW())
+	AND COALESCE((SELECT NOT (m.status='rejected' AND m.delete_link)
+	              FROM share_moderations m WHERE m.share_id=s.id), TRUE)`
+
+// GetShareState 读取分享状态；owner 为 nil 时不限定归属（管理端使用）。
+func (r *Repo) GetShareState(ctx context.Context, owner *int64, id int64) (ShareState, error) {
+	var state ShareState
+	err := r.pool.QueryRow(ctx, `
+		SELECT s.share_type='pickup', COALESCE(s.pickup_code,''), COALESCE(s.pickup_code_live,FALSE),
+		       (`+shareUsablePredicate+`)
+		FROM shares s
+		WHERE s.id=$1 AND ($2::bigint IS NULL OR s.owner_user_id=$2)`, id, owner).
+		Scan(&state.IsPickup, &state.Code, &state.CodeLive, &state.Usable)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ShareState{}, ErrNotFound
+	}
+	return state, err
+}
+
+// SyncPickupCodeLive 依据分享当前状态同步取件码占位：
+//   - 分享不可用（已删除/已停用/已过期）：释放占位，让该码可被其它分享分配；
+//   - 分享重新可用：原码仍空闲则复用，已被占用则换发新码（rotated=true）。
+//
+// 仅对取件码分享生效；返回最终码与是否换发。
+func (r *Repo) SyncPickupCodeLive(ctx context.Context, owner *int64, id int64, options randomtoken.CodeOptions) (string, bool, error) {
+	state, err := r.GetShareState(ctx, owner, id)
+	if err != nil {
+		return "", false, err
+	}
+	if !state.IsPickup {
+		return "", false, nil
+	}
+	if !state.Usable {
+		if state.CodeLive {
+			if _, err := r.pool.Exec(ctx, `UPDATE shares SET pickup_code_live=FALSE WHERE id=$1`, id); err != nil {
+				return "", false, err
+			}
+		}
+		return state.Code, false, nil
+	}
+	if state.CodeLive {
+		return state.Code, false, nil
+	}
+	// 复用原码；被他人占用（唯一索引冲突）则换发新码重试。
+	candidate := state.Code
+	for attempt := 0; attempt < 256; attempt++ {
+		if candidate == "" {
+			code, codeErr := randomtoken.NewCode(options)
+			if codeErr != nil {
+				return "", false, codeErr
+			}
+			candidate = code
+		}
+		tag, execErr := r.pool.Exec(ctx, `
+			UPDATE shares SET pickup_code=$2, pickup_code_live=TRUE
+			WHERE id=$1 AND deleted_at IS NULL
+			  AND NOT EXISTS (
+			      SELECT 1 FROM shares s2 WHERE s2.pickup_code=$2 AND s2.pickup_code_live AND s2.id<>$1
+			  )`, id, candidate)
+		if execErr == nil {
+			if tag.RowsAffected() > 0 {
+				return candidate, candidate != state.Code, nil
+			}
+			// 影响 0 行：原码已被其它分享占用（NOT EXISTS 守卫生效），换发新码重试。
+			candidate = ""
+			continue
+		}
+		if !isUniqueViolationErr(execErr) {
+			return "", false, execErr
+		}
+		candidate = ""
+	}
+	// 重试耗尽：可能是码空间已满，也可能是分享在过程中被删除，区分后再返回。
+	if _, stateErr := r.GetShareState(ctx, owner, id); errors.Is(stateErr, ErrNotFound) {
+		return "", false, ErrNotFound
+	}
+	return "", false, ErrPickupCodesExhausted
+}
+
+// ReleaseDeadPickupCodes 释放"失效取件码"占位：已删除 / 已停用 / 已过期 / 审核
+// 判定需删链的取件码分享不再占用码空间（码保留在行上供追溯，重新可用时复用或换
+// 发）。owner 为 nil 时清理全站（管理端维护），否则只清理该用户。返回释放数量。
+func (r *Repo) ReleaseDeadPickupCodes(ctx context.Context, owner *int64) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE shares s SET pickup_code_live=FALSE
+		WHERE s.share_type='pickup' AND s.pickup_code IS NOT NULL AND s.pickup_code_live
+		  AND NOT (`+shareUsablePredicate+`)
+		  AND ($1::bigint IS NULL OR s.owner_user_id=$1)`, owner)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func isUniqueViolationErr(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// AdminShareItem 是管理端分享列表项（含取件码状态与归属）。
+type AdminShareItem struct {
+	ID               int64      `json:"id"`
+	OwnerUserID      int64      `json:"ownerUserId"`
+	OwnerName        string     `json:"ownerName"`
+	ShareType        string     `json:"shareType"`
+	URL              *string    `json:"url,omitempty"`
+	PickupCode       *string    `json:"pickupCode,omitempty"`
+	PickupCodeLive   bool       `json:"pickupCodeLive"`
+	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
+	IsActive         bool       `json:"isActive"`
+	AdminBlocked     bool       `json:"adminBlocked"`
+	Deleted          bool       `json:"deleted"`
+	DownloadCount    int64      `json:"downloadCount"`
+	TrafficUsedBytes int64      `json:"trafficUsedBytes"`
+	ResourceName     string     `json:"resourceName"`
+	CreatedAt        time.Time  `json:"createdAt"`
+}
+
+// ListAdminShares 管理端列出分享（可按类型过滤 + 关键字搜索取件码/所有者/文件名）。
+func (r *Repo) ListAdminShares(ctx context.Context, shareType, query string, limit int) ([]AdminShareItem, error) {
+	// 上限与 handler 的参数校验保持一致（默认 500，最多 2000），避免调用方传参被
+	// 静默改成其它值造成"要 1000 条却只回 500 条"的困惑。
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT s.id, s.owner_user_id, u.username, s.share_type, s.token_value,
+		       s.pickup_code, s.pickup_code_live, s.expires_at, s.is_active,
+		       s.admin_blocked, s.deleted_at IS NOT NULL,
+		       s.download_count, s.traffic_used_bytes, COALESCE(r.name,''), s.created_at
+		FROM shares s
+		JOIN users u ON u.id=s.owner_user_id
+		LEFT JOIN share_resources sr ON sr.share_id=s.id AND sr.display_order=0
+		LEFT JOIN resources r ON r.id=sr.resource_id
+		WHERE ($1 = '' OR s.share_type = $1)
+		  AND ($2 = '' OR s.pickup_code ILIKE '%'||$2||'%' OR u.username ILIKE '%'||$2||'%' OR COALESCE(r.name,'') ILIKE '%'||$2||'%')
+		ORDER BY s.created_at DESC
+		LIMIT $3`, shareType, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AdminShareItem, 0)
+	for rows.Next() {
+		var item AdminShareItem
+		var tokenValue *string
+		if err := rows.Scan(&item.ID, &item.OwnerUserID, &item.OwnerName, &item.ShareType, &tokenValue,
+			&item.PickupCode, &item.PickupCodeLive, &item.ExpiresAt, &item.IsActive,
+			&item.AdminBlocked, &item.Deleted, &item.DownloadCount, &item.TrafficUsedBytes,
+			&item.ResourceName, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		if tokenValue != nil && item.ShareType == "link" {
+			url := "/s/" + *tokenValue
+			item.URL = &url
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// AdminUpdateShareParams 管理端分享修改（未设置的项保持不变）。
+type AdminUpdateShareParams struct {
+	ID              int64
+	UpdateExpiresAt bool
+	ExpiresAt       *time.Time
+	UpdateActive    bool
+	Active          bool
+	Unblock         bool
+}
+
+// AdminUpdateShare 管理端修改分享：有效期（ExpiresAt=nil 表示永久）、启用状态、
+// 解除封禁。
+func (r *Repo) AdminUpdateShare(ctx context.Context, p AdminUpdateShareParams) error {
+	// shares 表没有 updated_at 列：用恒真赋值占位（该列不在本函数可改字段内，
+	// 避免与后续 SET 子句重复赋值），后续子句按需拼接。
+	query := `UPDATE shares SET download_count=download_count`
+	args := []any{p.ID}
+	if p.UpdateExpiresAt {
+		args = append(args, p.ExpiresAt)
+		query += fmt.Sprintf(", expires_at=$%d", len(args))
+	}
+	if p.UpdateActive {
+		args = append(args, p.Active)
+		query += fmt.Sprintf(", is_active=$%d", len(args))
+	}
+	if p.Unblock {
+		query += ", admin_blocked=FALSE, deleted_at=NULL"
+	}
+	query += " WHERE id=$1 AND deleted_at IS NULL"
+	tag, err := r.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AdminDeleteShare 管理端删除分享：软删除并释放取件码占位。
+func (r *Repo) AdminDeleteShare(ctx context.Context, id int64) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE shares SET deleted_at=NOW(), pickup_code_live=FALSE
+		WHERE id=$1 AND deleted_at IS NULL`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *Repo) batchLinksByOwner(ctx context.Context, table string, ownerID int64, ids []int64, action string) error {
@@ -548,14 +808,16 @@ func (r *Repo) CompleteDirectDownload(ctx context.Context, id, bytes int64) (boo
 }
 
 // CreateDownloadJob 只创建短时下载任务；下载次数在任务完整取流后提交。
-func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams) (string, error) {
+// 返回任务 ID 与一次性 token：ID 用于统一交付会话的计数回调，token 用于
+// 制品模式的一次性下载地址。
+func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams) (int64, string, error) {
 	token, err := randomtoken.New(32)
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
@@ -564,10 +826,10 @@ func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams)
 		WHERE id=$1 AND is_active AND NOT admin_blocked AND deleted_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > NOW())`, p.ShareID).Scan(&shareID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrLimitReached
+		return 0, "", ErrLimitReached
 	}
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
 
 	var jobID int64
@@ -581,28 +843,42 @@ func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams)
 		p.PackMode, p.DeliveryMode, p.ArtifactPath, p.ArtifactName,
 		p.ArtifactContentType, p.ArtifactSHA256, p.ArtifactTemporary, p.TotalBytes, p.ExpiresAt).Scan(&jobID)
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
 	for _, file := range p.Files {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO share_download_job_files (job_id, resource_id, relative_path)
 			VALUES ($1,$2,$3)`, jobID, file.ResourceID, file.RelativePath); err != nil {
-			return "", err
+			return 0, "", err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", err
+		return 0, "", err
 	}
-	return token, nil
+	return jobID, token, nil
 }
 
 func (r *Repo) ClaimDownloadArtifact(ctx context.Context, token string) (DownloadArtifact, error) {
 	var item DownloadArtifact
+	// 复查分享封禁状态：短时任务凭证签发后管理员仍可能封禁，claim 时以最新状态为准。
+	// 同时复查分享内所有文件的可交付性：制品是签发时刻的内容快照，任一成员文件
+	// 此后被处置（回收站/拉黑/审核驳回）即不再可信，需重新发起下载按最新内容重打包。
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, artifact_path, artifact_name, artifact_content_type,
-		       total_bytes, artifact_temporary, artifact_sha256
-		FROM share_download_jobs
-		WHERE token_hash = $1 AND pack_mode = 'backend' AND expires_at > NOW()`, randomtoken.Hash(token)).Scan(
+		SELECT j.id, j.artifact_path, j.artifact_name, j.artifact_content_type,
+		       j.total_bytes, j.artifact_temporary, j.artifact_sha256
+		FROM share_download_jobs j
+		JOIN shares s ON s.id = j.share_id
+		WHERE j.token_hash = $1 AND j.pack_mode = 'backend' AND j.expires_at > NOW()
+		  AND NOT s.admin_blocked AND s.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM users u2 WHERE u2.id = s.owner_user_id AND u2.is_disabled)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM share_download_job_files f
+		      JOIN resources r2 ON r2.id = f.resource_id
+		      LEFT JOIN file_moderations m2 ON m2.resource_id = r2.id
+		      WHERE f.job_id = j.id
+		        AND (r2.trashed_at IS NOT NULL OR r2.purged_at IS NOT NULL OR r2.admin_blocked
+		             OR COALESCE(m2.status, 'approved') <> 'approved')
+		  )`, randomtoken.Hash(token)).Scan(
 		&item.JobID, &item.Path, &item.Name, &item.ContentType, &item.SizeBytes, &item.Temporary, &item.SHA256,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -614,21 +890,27 @@ func (r *Repo) ClaimDownloadArtifact(ctx context.Context, token string) (Downloa
 func (r *Repo) ClaimDownloadJobFile(ctx context.Context, token, resourceID string) (DownloadJobFile, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT j.id, f.relative_path,
-		       r.id, r.owner_user_id, r.parent_id, r.kind, r.name, r.storage_key,
-		       r.size_bytes, r.sha256_checksum, r.mime_type, r.created_at, r.updated_at
+		       r.id, r.owner_user_id, r.parent_id, r.kind, r.name,
+		       r.size_bytes, r.sha256_checksum, r.mime_type, r.blob_id, r.created_at, r.updated_at
 		FROM share_download_job_files f
 		JOIN share_download_jobs j ON j.id=f.job_id
+		JOIN shares s ON s.id = j.share_id
 		JOIN resources r ON r.id=f.resource_id
+		LEFT JOIN file_moderations m ON m.resource_id = r.id
 		WHERE f.job_id = j.id AND f.resource_id = r.id
 		  AND j.token_hash = $1 AND j.pack_mode = 'frontend'
-		  AND j.expires_at > NOW() AND f.resource_id = $2`,
+		  AND j.expires_at > NOW() AND f.resource_id = $2
+		  AND NOT s.admin_blocked AND s.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM users u2 WHERE u2.id = s.owner_user_id AND u2.is_disabled)
+		  AND NOT r.admin_blocked AND r.trashed_at IS NULL AND r.purged_at IS NULL
+		  AND COALESCE(m.status, 'approved') = 'approved'`,
 		randomtoken.Hash(token), resourceID)
 	var item DownloadJobFile
 	err := row.Scan(
 		&item.JobID, &item.RelativePath,
 		&item.Resource.ID, &item.Resource.OwnerUserID, &item.Resource.ParentID,
-		&item.Resource.Kind, &item.Resource.Name, &item.Resource.StorageKey,
-		&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType,
+		&item.Resource.Kind, &item.Resource.Name,
+		&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType, &item.Resource.BlobID,
 		&item.Resource.CreatedAt, &item.Resource.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -859,8 +1141,8 @@ func (r *Repo) getShare(ctx context.Context, predicate string, arg any) (Share, 
 		       s.download_limit, s.traffic_limit_bytes, s.download_count,
 		       s.traffic_used_bytes, s.is_active, s.created_at,
 		       u.username,
-		       r.id, r.owner_user_id, r.parent_id, r.kind, r.name, r.storage_key,
-		       r.size_bytes, r.sha256_checksum, r.mime_type, r.created_at, r.updated_at
+		       r.id, r.owner_user_id, r.parent_id, r.kind, r.name,
+		       r.size_bytes, r.sha256_checksum, r.mime_type, r.blob_id, r.created_at, r.updated_at
 		FROM shares s
 		JOIN users u ON u.id = s.owner_user_id
 		JOIN share_resources primary_link ON primary_link.share_id=s.id AND primary_link.display_order=0
@@ -874,8 +1156,8 @@ func (r *Repo) getShare(ctx context.Context, predicate string, arg any) (Share, 
 		&item.TrafficUsedBytes, &item.IsActive, &item.CreatedAt,
 		&item.OwnerUsername,
 		&item.Resource.ID, &item.Resource.OwnerUserID, &item.Resource.ParentID,
-		&item.Resource.Kind, &item.Resource.Name, &item.Resource.StorageKey,
-		&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType,
+		&item.Resource.Kind, &item.Resource.Name,
+		&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType, &item.Resource.BlobID,
 		&item.Resource.CreatedAt, &item.Resource.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -893,8 +1175,8 @@ func (r *Repo) getShare(ctx context.Context, predicate string, arg any) (Share, 
 
 func (r *Repo) listShareResources(ctx context.Context, shareID int64) ([]resource.Resource, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT r.id,r.owner_user_id,r.parent_id,r.kind,r.name,r.storage_key,
-		       r.size_bytes,r.sha256_checksum,r.mime_type,r.created_at,r.updated_at
+		SELECT r.id,r.owner_user_id,r.parent_id,r.kind,r.name,
+		       r.size_bytes,r.sha256_checksum,r.mime_type,r.blob_id,r.created_at,r.updated_at
 		FROM share_resources sr JOIN resources r ON r.id=sr.resource_id
 		WHERE sr.share_id=$1 AND r.trashed_at IS NULL ORDER BY sr.display_order`, shareID)
 	if err != nil {
@@ -905,7 +1187,7 @@ func (r *Repo) listShareResources(ctx context.Context, shareID int64) ([]resourc
 	for rows.Next() {
 		var item resource.Resource
 		if err := rows.Scan(&item.ID, &item.OwnerUserID, &item.ParentID, &item.Kind, &item.Name,
-			&item.StorageKey, &item.SizeBytes, &item.SHA256Checksum, &item.MimeType,
+			&item.SizeBytes, &item.SHA256Checksum, &item.MimeType, &item.BlobID,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -923,19 +1205,21 @@ func (r *Repo) getDirectLink(ctx context.Context, predicate string, arg any) (Di
 		SELECT d.id, d.token_value, d.owner_user_id, d.expires_at,
 		       d.download_limit, d.traffic_limit_bytes, d.download_count,
 		       d.traffic_used_bytes, d.is_active, d.created_at,
-		       r.id, r.owner_user_id, r.parent_id, r.kind, r.name, r.storage_key,
-		       r.size_bytes, r.sha256_checksum, r.mime_type, r.created_at, r.updated_at
+		       r.id, r.owner_user_id, r.parent_id, r.kind, r.name,
+		       r.size_bytes, r.sha256_checksum, r.mime_type, r.blob_id, r.created_at, r.updated_at
 		FROM direct_links d
 		JOIN resources r ON r.id = d.resource_id
-		WHERE (`+predicate+`) AND r.trashed_at IS NULL`, arg)
+		WHERE (`+predicate+`) AND r.trashed_at IS NULL
+		  -- 作者被禁用时直链一并下架（恢复启用后即可用）。
+		  AND COALESCE((SELECT u.is_disabled FROM users u WHERE u.id = d.owner_user_id), FALSE) = FALSE`, arg)
 	var item DirectLink
 	err := row.Scan(
 		&item.ID, &item.TokenValue, &item.OwnerUserID, &item.ExpiresAt,
 		&item.DownloadLimit, &item.TrafficLimitBytes, &item.DownloadCount,
 		&item.TrafficUsedBytes, &item.IsActive, &item.CreatedAt,
 		&item.Resource.ID, &item.Resource.OwnerUserID, &item.Resource.ParentID,
-		&item.Resource.Kind, &item.Resource.Name, &item.Resource.StorageKey,
-		&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType,
+		&item.Resource.Kind, &item.Resource.Name,
+		&item.Resource.SizeBytes, &item.Resource.SHA256Checksum, &item.Resource.MimeType, &item.Resource.BlobID,
 		&item.Resource.CreatedAt, &item.Resource.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

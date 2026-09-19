@@ -31,11 +31,6 @@ func (r *Repo) GetByID(ctx context.Context, id int64) (sqlcgen.QuotaProfile, err
 	return qp, err
 }
 
-// List 返回所有 quota profile（系统在前，业务在后）。
-func (r *Repo) List(ctx context.Context) ([]sqlcgen.QuotaProfile, error) {
-	return r.q.ListQuotaProfiles(ctx)
-}
-
 // CreateQuotaProfile 业务层创建非系统 quota profile。
 // is_system 永远 false（系统 profile 由 bootstrap 创建）。
 // 任意限额字段传 nil 表示"不限"。

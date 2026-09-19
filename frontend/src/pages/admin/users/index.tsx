@@ -30,7 +30,7 @@ import {
   IconStop,
   IconUserGroup,
 } from '@arco-design/web-react/icon';
-import { AdminPageHeader } from '../shared';
+import { AdminPageHeader, formatBytes } from '../shared';
 import styles from '../style/index.module.less';
 import uiText from '@/utils/uiText';
 import { SealEnvironmentError, isSealStale, submitSealed } from '@/utils/loginSeal';
@@ -49,6 +49,7 @@ interface UserItem {
   groups: string[];
   disabled: boolean;
   createdAt: string;
+  usedBytes?: number;
 }
 interface UserGroupItem {
   id: number;
@@ -413,6 +414,13 @@ function Users() {
         ) : (
           <span>-</span>
         ),
+    },
+    {
+      title: uiText('存储用量'),
+      dataIndex: 'usedBytes',
+      width: 140,
+      className: styles['mobile-hidden'],
+      render: (value: number) => formatBytes(value || 0),
     },
     {
       title: uiText('创建时间'),

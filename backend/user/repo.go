@@ -249,6 +249,7 @@ func (r *Repo) Register(ctx context.Context, name, password, invitationCode stri
 			SELECT id,issued_to_group_id
 			FROM invitation_codes
 			WHERE code_hash=$1 AND used_at IS NULL AND revoked_at IS NULL
+			  AND (expires_at IS NULL OR expires_at > NOW())
 			FOR UPDATE`, randomtoken.Hash(invitationCode)).Scan(&invitationID, &invitationGroupID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return User{}, ErrInvitationInvalid

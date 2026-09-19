@@ -1,8 +1,10 @@
-// Package filestore 负责资源内容在磁盘上的安全落盘、校验和打包。
+// Package filestore 负责上传分片的临时落盘与校验工具。
+//
+// 说明：物理对象（blob）的读写已迁移到 blobstore；本包只保留上传过程中
+// 「尚未成为正式对象」的临时分片管理，以及制品文件的校验工具。
 package filestore
 
 import (
-	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,13 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 )
 
 var (
-	ErrChecksumMismatch = errors.New("filestore: 文件校验失败")
 	ErrUnsafeStorageKey = errors.New("filestore: 非法存储键")
+	// ErrChunkTooLarge 表示上传分片超过声明上限（调用方据此返回 413 而非 500）。
+	ErrChunkTooLarge = errors.New("filestore: 上传分片超过允许大小")
 )
 
 type Store struct {
@@ -28,6 +30,8 @@ type Store struct {
 
 func New(settings *systemsetting.Repo) *Store { return &Store{settings: settings} }
 
+// Root 返回存储根目录（绝对路径，自动创建 .tmp 子目录）。管理员磁盘统计与
+// 上传临时目录都基于它。
 func (s *Store) Root(ctx context.Context) (string, error) {
 	settings, err := s.settings.Get(ctx)
 	if err != nil {
@@ -90,7 +94,7 @@ func (s *Store) WriteUploadChunk(ctx context.Context, sessionID string, index in
 	n, copyErr := io.Copy(io.MultiWriter(temp, hash), io.LimitReader(src, limit+1))
 	if copyErr != nil || n > limit {
 		if copyErr == nil {
-			copyErr = fmt.Errorf("分片超过允许大小")
+			copyErr = ErrChunkTooLarge
 		}
 		return "", "", 0, copyErr
 	}
@@ -127,195 +131,7 @@ func (s *Store) RemoveUploadSession(ctx context.Context, sessionID string) error
 	return os.RemoveAll(filepath.Join(root, ".tmp", "upload-sessions", sessionID))
 }
 
-// CloneFile 为秒传创建独立目录项。优先使用硬链接，文件系统不支持时回退复制。
-func (s *Store) CloneFile(ctx context.Context, sourceStorageKey, targetStorageKey string) (string, error) {
-	source, err := s.Path(ctx, sourceStorageKey)
-	if err != nil {
-		return "", err
-	}
-	root, err := s.Root(ctx)
-	if err != nil {
-		return "", err
-	}
-	target, err := safePath(root, targetStorageKey)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-		return "", err
-	}
-	if err := os.Link(source, target); err == nil {
-		return target, nil
-	}
-	src, err := os.Open(source)
-	if err != nil {
-		return "", err
-	}
-	defer src.Close()
-	dst, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", err
-	}
-	ok := false
-	defer func() {
-		_ = dst.Close()
-		if !ok {
-			_ = os.Remove(target)
-		}
-	}()
-	if _, err := io.Copy(dst, src); err != nil {
-		return "", err
-	}
-	if err := dst.Sync(); err != nil {
-		return "", err
-	}
-	if err := dst.Close(); err != nil {
-		return "", err
-	}
-	ok = true
-	return target, nil
-}
-
-func (s *Store) Commit(ctx context.Context, tempPath, storageKey string) (string, error) {
-	root, err := s.Root(ctx)
-	if err != nil {
-		return "", err
-	}
-	finalPath, err := safePath(root, storageKey)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0o750); err != nil {
-		return "", fmt.Errorf("创建文件目录: %w", err)
-	}
-	if err := os.Rename(tempPath, finalPath); err != nil {
-		return "", fmt.Errorf("提交文件: %w", err)
-	}
-	return finalPath, nil
-}
-
-func (s *Store) Path(ctx context.Context, storageKey string) (string, error) {
-	root, err := s.Root(ctx)
-	if err != nil {
-		return "", err
-	}
-	return safePath(root, storageKey)
-}
-
-// Remove 删除一个已校验存储键对应的物理文件。文件不存在视为已完成清理。
-func (s *Store) Remove(ctx context.Context, storageKey string) error {
-	path, err := s.Path(ctx, storageKey)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-func (s *Store) ValidateFile(ctx context.Context, item resource.Resource) (string, error) {
-	if item.Kind != resource.KindFile || item.StorageKey == nil || item.SHA256Checksum == nil {
-		return "", fmt.Errorf("filestore: 资源不是完整文件")
-	}
-	filePath, err := s.Path(ctx, *item.StorageKey)
-	if err != nil {
-		return "", err
-	}
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	checksum, size, err := checksumReader(f)
-	if err != nil {
-		return "", err
-	}
-	if checksum != *item.SHA256Checksum || size != item.SizeBytes {
-		return "", ErrChecksumMismatch
-	}
-	return filePath, nil
-}
-
-// BuildZip 递归打包目录。所有文件在 ZIP 完成前逐一重新计算 SHA-256，任何一个
-// 文件损坏都会中止，不会把部分损坏内容发送给下载方。
-func (s *Store) BuildZip(ctx context.Context, tree []resource.TreeEntry) (string, int64, error) {
-	if len(tree) == 0 || tree[0].Kind != resource.KindFolder {
-		return "", 0, fmt.Errorf("filestore: ZIP 根资源必须是文件夹")
-	}
-	temp, err := s.NewTemp(ctx, "folder-*.zip")
-	if err != nil {
-		return "", 0, err
-	}
-	tempPath := temp.Name()
-	ok := false
-	defer func() {
-		_ = temp.Close()
-		if !ok {
-			_ = os.Remove(tempPath)
-		}
-	}()
-
-	zw := zip.NewWriter(temp)
-	for _, entry := range tree {
-		zipName := filepath.ToSlash(entry.RelativePath)
-		if entry.Kind == resource.KindFolder {
-			if !strings.HasSuffix(zipName, "/") {
-				zipName += "/"
-			}
-			if _, err := zw.CreateHeader(&zip.FileHeader{Name: zipName, Method: zip.Store}); err != nil {
-				return "", 0, err
-			}
-			continue
-		}
-		if entry.StorageKey == nil || entry.SHA256Checksum == nil {
-			return "", 0, fmt.Errorf("filestore: 文件元数据不完整: %s", entry.ID)
-		}
-		filePath, err := s.Path(ctx, *entry.StorageKey)
-		if err != nil {
-			return "", 0, err
-		}
-		src, err := os.Open(filePath)
-		if err != nil {
-			return "", 0, err
-		}
-		h := &zip.FileHeader{Name: zipName, Method: zip.Deflate}
-		h.SetModTime(entry.UpdatedAt)
-		dst, err := zw.CreateHeader(h)
-		if err != nil {
-			_ = src.Close()
-			return "", 0, err
-		}
-		hash := sha256.New()
-		n, copyErr := io.Copy(io.MultiWriter(dst, hash), src)
-		closeErr := src.Close()
-		if copyErr != nil {
-			return "", 0, copyErr
-		}
-		if closeErr != nil {
-			return "", 0, closeErr
-		}
-		if n != entry.SizeBytes || hex.EncodeToString(hash.Sum(nil)) != *entry.SHA256Checksum {
-			return "", 0, fmt.Errorf("%w: %s", ErrChecksumMismatch, entry.RelativePath)
-		}
-	}
-	if err := zw.Close(); err != nil {
-		return "", 0, err
-	}
-	if err := temp.Sync(); err != nil {
-		return "", 0, err
-	}
-	info, err := temp.Stat()
-	if err != nil {
-		return "", 0, err
-	}
-	if err := temp.Close(); err != nil {
-		return "", 0, err
-	}
-	ok = true
-	return tempPath, info.Size(), nil
-}
-
+// ChecksumFile 计算本地文件的 SHA-256 与大小（用于下载制品校验）。
 func ChecksumFile(path string) (string, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -334,11 +150,11 @@ func checksumReader(r io.Reader) (string, int64, error) {
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
-func safePath(root, storageKey string) (string, error) {
-	if storageKey == "" || filepath.IsAbs(storageKey) {
+func safePath(root, ref string) (string, error) {
+	if ref == "" || filepath.IsAbs(ref) {
 		return "", ErrUnsafeStorageKey
 	}
-	clean := filepath.Clean(storageKey)
+	clean := filepath.Clean(ref)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", ErrUnsafeStorageKey
 	}

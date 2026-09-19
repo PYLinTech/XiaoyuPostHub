@@ -36,5 +36,9 @@ UPDATE system_settings SET
     upload_task_chunk_concurrency=sqlc.arg(upload_task_chunk_concurrency),
     upload_user_task_concurrency=sqlc.arg(upload_user_task_concurrency),
     trash_retention_days=sqlc.arg(trash_retention_days),
+    encrypt_new_files=sqlc.arg(encrypt_new_files),
+    proxy_realtime_decrypt=sqlc.arg(proxy_realtime_decrypt),
+    share_retrieval_mode=sqlc.arg(share_retrieval_mode),
+    storage_chunk_size_bytes=sqlc.arg(storage_chunk_size_bytes),
     updated_at=NOW()
 WHERE id=1 RETURNING *;

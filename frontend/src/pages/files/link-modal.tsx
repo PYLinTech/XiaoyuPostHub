@@ -1,4 +1,5 @@
 import { createShare, createDirectLink } from '@/api/endpoints';
+import { apiErrorMessage } from '@/api/client';
 import React, { useEffect, useState } from 'react';
 import {
   Button,
@@ -68,6 +69,7 @@ export default function LinkModal({
     url: string;
     generatedPassword?: string;
     pickupCode?: string;
+    sha256?: string;
   }>();
   useEffect(() => {
     if (!visible) return;
@@ -98,9 +100,8 @@ export default function LinkModal({
     setLoading(true);
     try {
       const common = {
-        ...(mode === 'share' && shareType === 'pickup'
-          ? {}
-          : { expiresInSeconds: Number(expiry) }),
+        // 取件码同样支持自选有效期（0 = 永久，是否允许由管理端开关决定）。
+        expiresInSeconds: Number(expiry),
         downloadLimit: downloadLimit ?? null,
         trafficLimitBytes:
           trafficGB == null ? null : Math.round(trafficGB * 1024 * 1024 * 1024),
@@ -131,11 +132,14 @@ export default function LinkModal({
           : '',
         generatedPassword: response.data.generatedPassword,
         pickupCode: response.data.pickupCode,
+        sha256: response.data.sha256,
       });
     } catch (error) {
       Message.error(
-        error?.response?.data?.msg ||
-          (mode === 'share' ? uiText('创建分享失败') : uiText('创建直链失败'))
+        apiErrorMessage(
+          error,
+          mode === 'share' ? uiText('创建分享失败') : uiText('创建直链失败')
+        )
       );
     } finally {
       setLoading(false);
@@ -183,6 +187,9 @@ export default function LinkModal({
             {result.pickupCode
               ? uiText('取件码仅在生成后提供，请及时保存。')
               : uiText('完整链接仅在生成后提供，请及时保存。')}
+            {result.sha256
+              ? uiText('校验码可用于核对下载文件内容的完整性。')
+              : ''}
           </Typography.Text>
           {result.pickupCode ? (
             <>
@@ -199,6 +206,20 @@ export default function LinkModal({
             <div className={styles['result-line']}>
               <code>{result.url}</code>
               <Button icon={<IconCopy />} onClick={() => copyText(result.url)}>{uiText('复制')}</Button>
+            </div>
+          )}
+          {result.sha256 && (
+            <div className={styles['result-line']}>
+              <code>
+                {uiText('SHA-256 校验码：')}
+                {result.sha256}
+              </code>
+              <Button
+                icon={<IconCopy />}
+                onClick={() => copyText(result.sha256 as string)}
+              >
+                {uiText('复制校验码')}
+              </Button>
             </div>
           )}
           {result.generatedPassword && (
@@ -243,14 +264,14 @@ export default function LinkModal({
               <Typography.Text bold>{resource?.name}</Typography.Text>
             </div>
           )}
-          {shareType !== 'pickup' && <div className={styles['modal-field']}>
+          <div className={styles['modal-field']}>
             <Typography.Text>{uiText('有效期')}</Typography.Text>
             <Select
               value={expiry}
               options={expiryOptions()}
               onChange={setExpiry}
             />
-          </div>}
+          </div>
           <div className={styles['modal-field']}>
             <Typography.Text>{uiText('下载次数限制')}</Typography.Text>
             <InputNumber

@@ -31,6 +31,11 @@ func siteConfigHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		iconURL := currentSiteIconURL(settings.StoragePath)
+		knobs, err := deps.SystemSettings.GetKnobs(r.Context())
+		if err != nil {
+			writeBusinessError(w, http.StatusInternalServerError, "读取站点配置失败")
+			return
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":                   "ok",
@@ -38,6 +43,8 @@ func siteConfigHandler(deps Deps) http.HandlerFunc {
 			"siteIconUrl":              iconURL,
 			"pickupMaxLifetimeSeconds": nullableInt64(settings.PickupMaxLifetimeSeconds),
 			"pickupCodeLength":         settings.PickupLength,
+			// 前端据此决定是否展示"永久有效"选项（后端仍会校验）。
+			"pickupAllowPermanent": knobs.PickupAllowPermanent,
 		})
 	}
 }

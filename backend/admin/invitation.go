@@ -92,8 +92,12 @@ func (r *Repo) GetInvitationDashboard(ctx context.Context) (InvitationDashboard,
 		       CASE WHEN c.issued_to_user_id IS NOT NULL THEN 'user' ELSE 'group' END,
 		       COALESCE(c.issued_to_user_id,c.issued_to_group_id),
 		       COALESCE(target_user.username,target_group.name,'已删除'),
-		       CASE WHEN c.revoked_at IS NOT NULL THEN 'revoked' WHEN c.used_at IS NOT NULL THEN 'used' ELSE 'available' END,
-		       used_user.username,c.used_at,c.created_at
+		       CASE WHEN c.revoked_at IS NOT NULL THEN 'revoked'
+		            WHEN c.used_at IS NOT NULL THEN 'used'
+		            WHEN c.expires_at IS NOT NULL AND c.expires_at <= NOW() THEN 'expired'
+		            ELSE 'available' END,
+		       CASE WHEN c.used_by_user_id IS NOT NULL THEN COALESCE(used_user.username,'已删除用户') END,
+		       c.used_at,c.created_at
 		FROM invitation_codes c
 		LEFT JOIN users target_user ON target_user.id=c.issued_to_user_id
 		LEFT JOIN user_groups target_group ON target_group.id=c.issued_to_group_id
@@ -118,7 +122,7 @@ func (r *Repo) SetRegistrationRequiresInvitation(ctx context.Context, required b
 	return err
 }
 
-func (r *Repo) IssueInvitationCodes(ctx context.Context, actorID int64, targetType string, targetID int64, quantity int) (int64, error) {
+func (r *Repo) IssueInvitationCodes(ctx context.Context, actorID int64, targetType string, targetID int64, quantity int, validDays int32) (int64, error) {
 	if quantity < 1 || quantity > 100 {
 		return 0, ErrInvitationQuantity
 	}
@@ -155,9 +159,11 @@ func (r *Repo) IssueInvitationCodes(ctx context.Context, actorID int64, targetTy
 		prefix := code[:4]
 		var insertErr error
 		if targetType == "user" {
-			_, insertErr = tx.Exec(ctx, `INSERT INTO invitation_codes(code_hash,code_prefix,issued_by_user_id,issued_to_user_id) VALUES($1,$2,$3,$4)`, randomtoken.Hash(code), prefix, actorID, targetID)
+			_, insertErr = tx.Exec(ctx, `INSERT INTO invitation_codes(code_hash,code_prefix,issued_by_user_id,issued_to_user_id,expires_at)
+				VALUES($1,$2,$3,$4, CASE WHEN $5::int > 0 THEN NOW() + MAKE_INTERVAL(days => $5::int) ELSE NULL END)`, randomtoken.Hash(code), prefix, actorID, targetID, validDays)
 		} else {
-			_, insertErr = tx.Exec(ctx, `INSERT INTO invitation_codes(code_hash,code_prefix,issued_by_user_id,issued_to_group_id) VALUES($1,$2,$3,$4)`, randomtoken.Hash(code), prefix, actorID, targetID)
+			_, insertErr = tx.Exec(ctx, `INSERT INTO invitation_codes(code_hash,code_prefix,issued_by_user_id,issued_to_group_id,expires_at)
+				VALUES($1,$2,$3,$4, CASE WHEN $5::int > 0 THEN NOW() + MAKE_INTERVAL(days => $5::int) ELSE NULL END)`, randomtoken.Hash(code), prefix, actorID, targetID, validDays)
 		}
 		if insertErr != nil {
 			return 0, insertErr

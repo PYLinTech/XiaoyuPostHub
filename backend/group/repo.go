@@ -33,22 +33,6 @@ func (r *Repo) GetByID(ctx context.Context, id int64) (sqlcgen.UserGroup, error)
 	return g, err
 }
 
-func (r *Repo) List(ctx context.Context) ([]sqlcgen.UserGroup, error) {
-	return r.q.ListUserGroups(ctx)
-}
-
-// CreateGroup 业务层创建用户组。
-//   - is_system 永远 false（系统 group 由 bootstrap 创建）
-func (r *Repo) CreateGroup(ctx context.Context, name, description string, quotaProfileID int64, priority int32) (sqlcgen.UserGroup, error) {
-	return r.q.CreateUserGroup(ctx, sqlcgen.CreateUserGroupParams{
-		Name:           name,
-		IsSystem:       false,
-		Description:    strToText(description),
-		QuotaProfileID: quotaProfileID,
-		Priority:       priority,
-	})
-}
-
 // UpdateGroupQuotaProfile 修改用户组配额方案。每个用户组始终绑定一个方案。
 func (r *Repo) UpdateGroupQuotaProfile(ctx context.Context, groupID, quotaProfileID int64) error {
 	if _, err := r.GetByID(ctx, groupID); err != nil {
@@ -77,20 +61,55 @@ func (r *Repo) UpdateGroupPriority(ctx context.Context, groupID int64, priority 
 	return nil
 }
 
-// DeleteGroup 删 group（仅非系统 group）。
-// ON DELETE CASCADE 会清掉成员关系与用户组权限。
-func (r *Repo) DeleteGroup(ctx context.Context, groupID int64) error {
-	g, err := r.GetByID(ctx, groupID)
+// StorageBinding 是用户的有效存储绑定解析结果。
+type StorageBinding struct {
+	// BackendID 为 0 表示未绑定任何存储后端（调用方使用全局默认后端）。
+	BackendID int64
+	// Enabled 是绑定后端当前是否可用于写入；BackendID == 0 时无意义。
+	Enabled bool
+}
+
+// UpdateGroupStorageBackend 修改用户组绑定的存储后端；backendID 为 nil 表示
+// 解绑（组内新上传回退全局默认）。后端的存在性与启用状态由调用方（管理端）
+// 校验；组不存在时返回 ErrGroupNotFound。不在此处重复查询组是否存在——由
+// UPDATE 的影响行数判定，避免与调用方的读取重复。
+func (r *Repo) UpdateGroupStorageBackend(ctx context.Context, groupID int64, backendID *int64) error {
+	target := pgtype.Int8{}
+	if backendID != nil {
+		target = pgtype.Int8{Int64: *backendID, Valid: true}
+	}
+	affected, err := r.q.UpdateUserGroupStorageBackend(ctx, sqlcgen.UpdateUserGroupStorageBackendParams{
+		ID:               groupID,
+		StorageBackendID: target,
+	})
 	if err != nil {
 		return err
 	}
-	if g.IsSystem {
-		return ErrGroupIsSystem
-	}
-	if _, err := r.q.DeleteUserGroup(ctx, groupID); err != nil {
-		return err
+	if affected == 0 {
+		return fmt.Errorf("%w: id=%d", ErrGroupNotFound, groupID)
 	}
 	return nil
+}
+
+// EffectiveStorageBackend 解析用户的有效存储后端：所属用户组中 priority 最高
+// 且已绑定后端的组（与配额方案的选择规则一致）。
+//
+// 未绑定任何后端时返回零值（BackendID == 0），调用方使用全局默认后端。
+// BackendID != 0 且 Enabled == false 表示绑定后端已被停用：调用方应明确拒绝
+// 上传，不静默回退——静默改写落盘位置会破坏「组 = 存储」的可预期性，也会让
+// 后续按组迁移的范围失真。
+func (r *Repo) EffectiveStorageBackend(ctx context.Context, userID int64) (StorageBinding, error) {
+	row, err := r.q.GetEffectiveStorageBackendByUser(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return StorageBinding{}, nil
+	}
+	if err != nil {
+		return StorageBinding{}, err
+	}
+	if !row.StorageBackendID.Valid {
+		return StorageBinding{}, nil
+	}
+	return StorageBinding{BackendID: row.StorageBackendID.Int64, Enabled: row.IsEnabled}, nil
 }
 
 // ListGroupIDsByUser 列出 user 的所有 group id。

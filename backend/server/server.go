@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/admin"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/blobstore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/inbox"
@@ -24,17 +25,23 @@ import (
 //
 // 后续 handler 通过 deps 使用用户、用户组和配额等仓库。
 type Deps struct {
-	UserRepo       *user.Repo
-	SessionRepo    *session.Repo
-	GroupRepo      *group.Repo
-	QuotaRepo      *quota.Repo
-	ResourceRepo   *resource.Repo
-	SharingRepo    *sharing.Repo
-	FileStore      *filestore.Store
+	UserRepo     *user.Repo
+	SessionRepo  *session.Repo
+	GroupRepo    *group.Repo
+	QuotaRepo    *quota.Repo
+	ResourceRepo *resource.Repo
+	SharingRepo  *sharing.Repo
+	FileStore    *filestore.Store
+	// HostDiskPath 是「实时概览」统计的宿主磁盘路径（部署级配置，默认 "/"）。
+	HostDiskPath   string
 	SystemSettings *systemsetting.Repo
 	AdminRepo      *admin.Repo
 	InboxRepo      *inbox.Repo
 	UploadRepo     *upload.Repo
+	// Blobs 提供物理对象的读写与引用计数；交付相关接口依赖它。
+	Blobs *blobstore.Service
+	// Deliveries 是统一交付接口 /dl/<id> 的内存会话表，由 NewRouter 初始化。
+	Deliveries *deliveryManager
 	// HTTPS 声明站点是否通过 HTTPS 提供服务：为 false 时会话 Cookie 不带
 	// Secure 属性（否则浏览器不会在 HTTP 下回传）。
 	HTTPS bool
@@ -59,12 +66,20 @@ func NewRouter(staticDir string, deps Deps) (http.Handler, error) {
 		return nil, fmt.Errorf("初始化静态文件服务失败：%w", err)
 	}
 
+	if deps.Deliveries == nil {
+		deps.Deliveries = newDeliveryManager()
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/api/", APIHandler(deps))
 	// 直链即数据：/d/<token> 必须挂在外层 mux（APIHandler 只接收 /api/ 前缀），
 	// 由后端直接返回文件流，可直接浏览器下载或 curl 调用；错误保持 JSON 协议。
 	if deps.ResourceRepo != nil && deps.SharingRepo != nil && deps.FileStore != nil && deps.QuotaRepo != nil && deps.SystemSettings != nil {
 		mux.HandleFunc("/d/", directDownloadHandler(deps))
+	}
+	// 统一交付接口：内存级随机地址，业务入口（直链/分享下载/临时链接）解析到它。
+	if deps.Blobs != nil {
+		mux.HandleFunc("/dl/", deliveryHandler(deps))
 	}
 	// API 必须保留结构化 JSON 错误；浏览器静态页面继续使用内置 HTML 错误页。
 	mux.Handle("/", WithErrorPage(homePageHandler(deps, staticH)))
@@ -147,7 +162,9 @@ func APIHandler(deps Deps) http.Handler {
 		mux.HandleFunc("/api/direct-links/manage/", directLinkManageHandler(deps))
 		mux.HandleFunc("/api/share-downloads/", shareDownloadJobHandler(deps))
 	}
-	if deps.AdminRepo != nil && deps.SystemSettings != nil {
+	// Blobs 是管理接口的必需依赖（存储后端、加密开关、维护任务都会调用它），
+	// 缺失时应整体不注册，而不是在请求处理中 panic。
+	if deps.AdminRepo != nil && deps.SystemSettings != nil && deps.Blobs != nil {
 		mux.HandleFunc("/api/admin/", adminHandler(deps))
 	}
 

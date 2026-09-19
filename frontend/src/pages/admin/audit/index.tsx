@@ -1,6 +1,8 @@
 import { fetchAdminAudit, fetchFileReviews, fetchShareReviews, reviewResources, downloadReviewedFiles, fetchReviewedTrash, deleteReviewedTrashItem, emptyReviewedTrash } from '@/api/endpoints';
 import { apiErrorMessage } from '@/api/client';
+import { downloadBlob } from '@/utils/download';
 import React, { useContext, useEffect, useMemo, useState } from 'react';
+import ShareManage from './share-manage';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import {
@@ -50,6 +52,7 @@ interface FileReview {
   blocked: boolean;
   exists: boolean;
   trashedAt?: string;
+  purgedAt?: string;
   submittedAt: string;
   rowKey?: string;
 }
@@ -100,6 +103,7 @@ function statusTag(value: string) {
     pending: ['orange', uiText('待审核')],
     rejected: ['red', uiText('未通过')],
     trashed: ['gray', uiText('已删除')],
+    purged: ['gray', uiText('用户已彻底删除')],
     deleted: ['gray', uiText('文件已删除')],
     blocked: ['red', uiText('已拉黑')],
   }[value] || ['gray', value];
@@ -366,8 +370,10 @@ function Audit() {
       return;
     }
     try {
+      // 用 arraybuffer 而非 blob：错误体也能被 apiErrorMessage 同步解码出服务端
+      // 本地化文案（blob 错误体会丢失 msg，只剩 axios 的通用英文串）。
       const response = await downloadReviewedFiles({ resourceIds: ids },
-        { responseType: 'blob' }
+        { responseType: 'arraybuffer' }
       );
       const disposition = response.headers['content-disposition'] || '';
       const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
@@ -376,12 +382,7 @@ function Audit() {
         : ids.length === 1
         ? selectedFiles[0].name
         : uiText('审核文件.zip');
-      const url = URL.createObjectURL(response.data);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = name;
-      anchor.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(new Blob([response.data]), name);
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('下载失败')));
     }
@@ -398,11 +399,15 @@ function Audit() {
   };
 
   const removeReviewedTrash = async (id: string) => {
-    await deleteReviewedTrashItem(id);
-    setTrashItems((current) =>
-      current.filter((item) => item.resourceId !== id)
-    );
-    loadFiles();
+    try {
+      await deleteReviewedTrashItem(id);
+      setTrashItems((current) =>
+        current.filter((item) => item.resourceId !== id)
+      );
+      loadFiles();
+    } catch (error) {
+      Message.error(apiErrorMessage(error, uiText('删除失败')));
+    }
   };
 
   const fileColumns = [
@@ -729,6 +734,11 @@ function Audit() {
             />
             </TabPane>
           )}
+          {canReviewShares && (
+            <TabPane key="shares-manage" title={uiText('取件码管理')}>
+              <ShareManage />
+            </TabPane>
+          )}
           {canReadAudit && (
             <TabPane key="audit" title={uiText('系统审计')}>
             <Table
@@ -879,9 +889,13 @@ function Audit() {
             status="danger"
             disabled={!trashItems.length}
             onClick={async () => {
-              await emptyReviewedTrash();
-              setTrashItems([]);
-              loadFiles();
+              try {
+                await emptyReviewedTrash();
+                setTrashItems([]);
+                loadFiles();
+              } catch (error) {
+                Message.error(apiErrorMessage(error, uiText('清空回收站失败')));
+              }
             }}
           >
             {uiText('清空回收站')}

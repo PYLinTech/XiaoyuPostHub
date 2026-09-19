@@ -114,6 +114,22 @@ func (r *Repo) DeleteExpired(ctx context.Context) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// DeleteCompletedBefore 回收"已完成"上传会话的残留元数据。
+//
+// 完成路径只清理磁盘分片目录并保留 DB 行（用于幂等重放：客户端重复 complete 能拿回
+// 资源）。但会话行与分片行会随每次上传无界增长，因此按保留期定期回收：分片行由
+// upload_chunks.session_id 的 ON DELETE CASCADE 一并删除。保留期内的行不受影响，
+// 幂等重放与上传面板展示都有充足窗口。
+func (r *Repo) DeleteCompletedBefore(ctx context.Context, before time.Time) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM upload_sessions
+		WHERE status = 'completed' AND updated_at < $1`, before)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (r *Repo) findActive(ctx context.Context, ownerID int64, parentID *string, filename, checksum string) (Session, error) {
 	row := r.pool.QueryRow(ctx, `
 		SELECT id, owner_user_id, batch_id, parent_id, filename, total_size, chunk_size,
@@ -251,6 +267,128 @@ func (r *Repo) RecordChunk(ctx context.Context, ownerID int64, sessionID string,
 	return err
 }
 
+// CancelOwned 取消未完成的上传会话：同一事务内删除分片记录并置为 canceled。
+//
+// 分片记录必须随取消一起清除：此前只删磁盘目录、保留 upload_chunks 行，导致
+// 取消后 resume 会按"已收到分片"跳过重传，complete 因文件缺失永远 409（用户
+// 无法自救的死锁）。已完成/正在合并的会话不允许取消（避免把已落库文件"取消"
+// 成僵尸会话）。
+func (r *Repo) CancelOwned(ctx context.Context, ownerID int64, id string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM upload_sessions WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`, id, ownerID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if status == "completing" || status == "completed" {
+		return ErrInvalidState
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM upload_chunks WHERE session_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE upload_sessions SET status='canceled', error_message='', updated_at=NOW() WHERE id=$1 AND owner_user_id=$2`, id, ownerID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// PendingUploadBytes 返回用户进行中上传会话的声明字节总数与会话数，用于在途
+// 预扣：分片上传期间不产生资源、不占配额，若不预扣即可反复建会话写满临时盘。
+// excludeSessionID 排除当前会话（合并校验时自身已计入）。
+func (r *Repo) PendingUploadBytes(ctx context.Context, ownerID int64, excludeSessionID string) (int64, int, error) {
+	var bytes int64
+	var sessions int
+	err := r.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(total_size),0)::BIGINT, COUNT(*) FROM upload_sessions
+		WHERE owner_user_id=$1 AND status IN ('queued','uploading','paused','completing')
+		  AND ($2 = '' OR id <> $2)`, ownerID, excludeSessionID).Scan(&bytes, &sessions)
+	return bytes, sessions, err
+}
+
+// SetUserActionStatus 用户操作（暂停/恢复）专用状态更新：带条件（CAS）拒绝覆盖
+// "合并中/已完成"状态，防止读-写之间的竞态把正在合并的会话改回 queued/paused。
+// 失败/合并等系统侧状态仍走 SetStatus（合并失败需要在 completing 上标记 failed）。
+// AdminUploadItem 是管理端"在途上传任务"列表项。
+type AdminUploadItem struct {
+	ID           string    `json:"id"`
+	OwnerUserID  int64     `json:"ownerUserId"`
+	OwnerName    string    `json:"ownerName"`
+	Filename     string    `json:"filename"`
+	TotalSize    int64     `json:"totalSize"`
+	TotalChunks  int32     `json:"totalChunks"`
+	Status       string    `json:"status"`
+	ErrorMessage string    `json:"errorMessage,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// ListAdminUploads 列出进行中的上传会话（按最近更新排序）：这些会话不产生资源、
+// 但占用临时盘，管理员据此清理用户放弃的任务（不必等待 7 天过期）。
+func (r *Repo) ListAdminUploads(ctx context.Context, limit int) ([]AdminUploadItem, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT s.id, s.owner_user_id, u.username, s.filename, s.total_size, s.total_chunks,
+		       s.status, s.error_message, s.created_at, s.updated_at
+		FROM upload_sessions s
+		JOIN users u ON u.id = s.owner_user_id
+		WHERE s.status IN ('queued','uploading','paused','completing')
+		ORDER BY s.updated_at DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AdminUploadItem, 0)
+	for rows.Next() {
+		var item AdminUploadItem
+		if err := rows.Scan(&item.ID, &item.OwnerUserID, &item.OwnerName, &item.Filename,
+			&item.TotalSize, &item.TotalChunks, &item.Status, &item.ErrorMessage,
+			&item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// AdminCancelUpload 管理端取消进行中的上传会话：置为 canceled 并删除分片记录
+// （分片目录由调用方清理）。已完成/已结束的会话返回 ErrNotFound。
+func (r *Repo) AdminCancelUpload(ctx context.Context, id string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE upload_sessions SET status='canceled', error_message='由管理员取消', updated_at=NOW()
+		WHERE id=$1 AND status IN ('queued','uploading','paused','completing')`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	if _, err := r.pool.Exec(ctx, `DELETE FROM upload_chunks WHERE session_id=$1`, id); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Repo) SetUserActionStatus(ctx context.Context, ownerID int64, id, status string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE upload_sessions SET status=$3, error_message='', updated_at=NOW()
+		WHERE id=$1 AND owner_user_id=$2 AND status NOT IN ('completing','completed')`, id, ownerID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInvalidState
+	}
+	return nil
+}
+
 func (r *Repo) SetStatus(ctx context.Context, ownerID int64, id, status, message string) error {
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE upload_sessions SET status=$3, error_message=$4, updated_at=NOW()
@@ -335,19 +473,6 @@ func (r *Repo) RecoverInterrupted(ctx context.Context) error {
 		SET status='failed', error_message='服务中断，请继续上传', updated_at=NOW()
 		WHERE status='completing'`)
 	return err
-}
-
-func (r *Repo) MarkCompleted(ctx context.Context, ownerID int64, id, resourceID string) error {
-	tag, err := r.pool.Exec(ctx, `
-		UPDATE upload_sessions SET status='completed', resource_id=$3, error_message='', updated_at=NOW()
-		WHERE id=$1 AND owner_user_id=$2`, id, ownerID, resourceID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
 }
 
 type scanner interface{ Scan(...any) error }

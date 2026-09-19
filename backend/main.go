@@ -23,10 +23,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/admin"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/blobstore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/bootstrap"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/config"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db"
@@ -90,7 +92,7 @@ func main() {
 
 	// 1. 初始化程序自身的非敏感运行期配置；已有值不会被默认值覆盖。
 	settingsCtx, settingsCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	settingsRepo := systemsetting.NewRepo(q)
+	settingsRepo := systemsetting.NewRepo(q, database.Pool())
 	if err := settingsRepo.EnsureDefaults(settingsCtx); err != nil {
 		settingsCancel()
 		log.Fatalf("初始化系统配置失败：%v", err)
@@ -112,12 +114,54 @@ func main() {
 	}
 	bootCancel3()
 
-	// 5. 构造 Repo
+	// 5. 构造物理对象服务（本机后端根目录来自 system_settings.storage_path）
+	blobRoot := func(ctx context.Context) (string, error) {
+		settings, err := settingsRepo.Get(ctx)
+		if err != nil {
+			return "", err
+		}
+		root := filepath.Clean(settings.StoragePath)
+		if !filepath.IsAbs(root) {
+			return "", fmt.Errorf("存储路径必须是绝对路径：%s", root)
+		}
+		return root, nil
+	}
+	encryptionConfig, err := blobstore.ParseEncryptionKeys(cfg.EncryptionKeys)
+	if err != nil {
+		log.Fatalf("解析加密密钥配置失败：%v", err)
+	}
+	if encryptionConfig.Available() {
+		log.Printf("文件加密密钥已加载：主密钥 keyId=%s（可用密钥 %d 个）",
+			encryptionConfig.PrimaryKeyID(), encryptionConfig.KeyCount())
+	}
+	blobService := blobstore.NewService(database.Pool(), blobRoot, blobstore.ServiceOptions{
+		Encryption: encryptionConfig,
+		Pan123: blobstore.Pan123Credentials{
+			ClientID:     cfg.Pan123ClientID,
+			ClientSecret: cfg.Pan123ClientSecret,
+		},
+		S3: blobstore.S3Credentials{
+			AccessKeyID:     cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+		},
+	})
+	blobReloadCtx, blobReloadCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := blobService.Reload(blobReloadCtx); err != nil {
+		blobReloadCancel()
+		log.Fatalf("初始化存储后端失败：%v", err)
+	}
+	blobReloadCancel()
+	if initialSettings, settingsErr := settingsRepo.Get(context.Background()); settingsErr == nil &&
+		initialSettings.EncryptNewFiles && !encryptionConfig.Available() {
+		log.Printf("警告：已开启新文件加密，但未配置 XPH_ENCRYPTION_KEYS，上传新文件将失败")
+	}
+
+	// 6. 构造 Repo
 	groupRepo := group.NewRepo(q)
 	quotaRepo := quota.NewRepo(q)
 	userRepo := user.NewRepo(database.Pool(), q, groupRepo)
 	sessionRepo := session.NewRepo(database.Pool())
-	resourceRepo := resource.NewRepo(database.Pool())
+	resourceRepo := resource.NewRepo(database.Pool(), blobService)
 	sharingRepo := sharing.NewRepo(database.Pool())
 	fileStore := filestore.New(settingsRepo)
 	adminRepo := admin.NewRepo(database.Pool())
@@ -139,8 +183,11 @@ func main() {
 	}
 	log.Printf("登录载荷加密已启用：keyId=%s，算法=%s（内存密钥，重启自动轮换）", passwordSeal.KeyID(), passwordSeal.Algorithm())
 
-	// 注入可信反向代理网段（未配置时保持“优先采信 X-Real-IP”的历史行为）。
+	// 注入可信反向代理网段：仅命中网段的直连来源才会采信 X-Real-IP（防伪造）。
 	server.SetTrustedProxies(cfg.TrustedProxyCIDRs)
+	if len(cfg.TrustedProxyCIDRs) == 0 {
+		log.Printf("未配置 TRUSTED_PROXY_CIDRS：不采信 X-Real-IP（直连部署为正确设置；若部署在反向代理之后，请配置该变量，否则限流将按代理 IP 统计）")
+	}
 
 	handler, err := server.NewRouter(staticPath, server.Deps{
 		UserRepo:       userRepo,
@@ -150,10 +197,12 @@ func main() {
 		ResourceRepo:   resourceRepo,
 		SharingRepo:    sharingRepo,
 		FileStore:      fileStore,
+		HostDiskPath:   cfg.HostDiskPath,
 		SystemSettings: settingsRepo,
 		AdminRepo:      adminRepo,
 		InboxRepo:      inboxRepo,
 		UploadRepo:     uploadRepo,
+		Blobs:          blobService,
 		HTTPS:          cfg.HTTPSEnabled,
 		PasswordSeal:   passwordSeal,
 		HSTSEnabled:    cfg.HSTSEnabled,
@@ -177,6 +226,8 @@ func main() {
 	defer stopCleanup()
 	go sessionRepo.StartCleanup(cleanupCtx)
 	go sharingRepo.StartDownloadJobCleanup(cleanupCtx)
+	// 存储维护任务执行器（跨后端迁移 / 补加密 / 孤儿清理）。
+	go server.RunStorageTasks(cleanupCtx, adminRepo, blobService)
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
@@ -195,21 +246,38 @@ func main() {
 						}
 					}
 				}
+				// 已完成上传会话的元数据按保留期回收：完成路径保留 DB 行是为了
+				// 幂等重放，但会话/分片行会随每次上传无界增长，需定期清理。
+				if removed, err := uploadRepo.DeleteCompletedBefore(cleanupCtx, time.Now().Add(-7*24*time.Hour)); err != nil {
+					log.Printf("清理已完成上传任务记录失败：%v", err)
+				} else if removed > 0 {
+					log.Printf("已清理 %d 条已完成上传任务记录", removed)
+				}
 				settings, err := settingsRepo.Get(cleanupCtx)
 				if err != nil {
 					log.Printf("读取回收期限失败：%v", err)
 					continue
 				}
 				before := time.Now().Add(-time.Duration(settings.TrashRetentionDays) * 24 * time.Hour)
-				keys, err := resourceRepo.DeleteTrashExpiredBefore(cleanupCtx, before)
+				// 到期只标记"用户不可见、不可恢复"：资源行与物理文件保留，
+				// 管理员审查页与存储清理仍能看到，物理删除由管理员执行。
+				marked, err := resourceRepo.MarkTrashExpiredPurged(cleanupCtx, before)
 				if err != nil {
-					log.Printf("清理过期回收站失败：%v", err)
+					log.Printf("处理过期回收站失败：%v", err)
 					continue
 				}
-				for _, key := range keys {
-					if err := fileStore.Remove(cleanupCtx, key); err != nil {
-						log.Printf("清理过期回收站文件失败 key=%s: %v", key, err)
-					}
+				if marked > 0 {
+					log.Printf("已将 %d 项超过回收期限的内容标记为彻底删除（物理文件保留待管理员清理）", marked)
+				}
+				// 孤儿对象不做任何自动清理：物理删除只由管理员在「存储管理 →
+				// 维护任务 → 孤立文件」手动发起（先扫描出清单、确认后再清理）。
+				// 后台循环只标记"用户不可见"，绝不删除物理文件。
+				// 取件码维护：释放已失效（停用/过期/删除）取件码的占位，使码空间可
+				// 被重新分配。永久取件码长期积累会挤占码空间，这里自动腾位置。
+				if freed, err := sharingRepo.ReleaseDeadPickupCodes(cleanupCtx, nil); err != nil {
+					log.Printf("释放失效取件码失败：%v", err)
+				} else if freed > 0 {
+					log.Printf("已释放 %d 个失效取件码（码空间可重新分配）", freed)
 				}
 			}
 		}

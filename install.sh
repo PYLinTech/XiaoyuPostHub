@@ -300,6 +300,28 @@ HTTPS_ENABLED=true
 # HSTS：默认启用；纯 HTTP 部署下浏览器会忽略该响应头，如需完全静默可设为 false。
 # HSTS_ENABLED=true
 
+# 存储加密密钥（可选）：在管理端开启「新文件加密存储」前必须配置，否则上传会失败。
+# 格式：keyId:base64(32 字节明文密钥)，多个密钥用英文逗号分隔；第一个用于加密
+# 新文件，其余用于解密历史数据（支持密钥轮换）。
+# ⚠️ 安全提示：密钥丢失等于已加密文件永久不可恢复，请离线备份；该值属于敏感
+#    配置，不要提交到版本库或写入工单。
+# 生成示例：openssl rand -base64 32
+# XPH_ENCRYPTION_KEYS=key1:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=
+
+# 123 云盘开放平台凭据（可选）：仅在管理端启用「123 云盘」存储后端时需要。
+# 凭据由 123 云盘「开发者权益包」以站内信下发，属于敏感配置（不入库、不下发
+# 浏览器）；存储根目录文件夹 ID 等非敏感参数在管理端的「存储管理」中填写。
+# 注意：远端后端（123 云盘 / 对象存储）上传前会把文件落到本机临时目录（最大
+# 为一个存储分片大小），请确保临时目录（或 TMPDIR 指向的目录）有足够磁盘空间。
+# XPH_PAN123_CLIENT_ID=
+# XPH_PAN123_CLIENT_SECRET=
+
+# S3 兼容对象存储凭据（可选）：仅在管理端启用「对象存储」后端时需要
+# （AWS S3 / MinIO / Cloudflare R2 / 阿里云 OSS / 腾讯云 COS 等）。
+# endpoint、bucket、region、前缀等非敏感参数在管理端的「存储管理」中填写。
+# XPH_S3_ACCESS_KEY_ID=
+# XPH_S3_SECRET_ACCESS_KEY=
+
 # 可信反向代理网段（可选，逗号分隔的 CIDR）。
 # 配置后只有来自这些网段的请求才采信 X-Real-IP，防止直连客户端伪造该头
 # 绕过基于 IP 的登录限流；留空表示始终采信 X-Real-IP。
@@ -783,7 +805,10 @@ stop_service() {
 restart_service() {
     check_docker
     require_compose_file
-    run_step "重启服务" compose restart
+    # 用「重建」而不是 `compose restart`：env_file（.env）只在**创建容器**时读取并写进
+    # 容器环境变量，restart 会沿用旧值——用户改完 .env 重启却不生效正是这个原因。
+    # 重建只停机几秒，数据保留在数据卷中。
+    run_step "重建并启动服务（使 .env 变更生效）" compose up -d --force-recreate --remove-orphans
 }
 
 uninstall_service() {

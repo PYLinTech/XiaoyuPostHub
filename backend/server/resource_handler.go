@@ -4,10 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -135,7 +133,7 @@ func serveOwnedResourcesDownload(w http.ResponseWriter, r *http.Request, deps De
 		writeDownloadPreparationError(w, err)
 		return
 	}
-	path, size, err := deps.FileStore.BuildZip(r.Context(), tree)
+	path, size, err := buildZip(r.Context(), deps, tree)
 	if path != "" {
 		defer os.Remove(path) //nolint:errcheck
 	}
@@ -143,7 +141,7 @@ func serveOwnedResourcesDownload(w http.ResponseWriter, r *http.Request, deps De
 		writeDownloadPreparationError(w, err)
 		return
 	}
-	serveDownload(w, r, path, size, tree[0].Name+".zip", "application/zip")
+	serveLocalArtifact(w, r, path, size, tree[0].Name+".zip", "application/zip")
 }
 
 func resourceItemHandler(deps Deps) http.HandlerFunc {
@@ -223,23 +221,23 @@ func requireApprovedFile(w http.ResponseWriter, r *http.Request, deps Deps, reso
 }
 
 func serveOwnedFile(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource) {
-	path, err := deps.FileStore.ValidateFile(r.Context(), item)
+	// 交付策略：明文直接输出（302 配置且后端支持直链时重定向到第三方）；
+	// 加密文件按"服务器实时解密"开关决定由服务器解密输出明文，或输出密文并在
+	// 响应头下发解密元数据（浏览器端解密）。
+	serveFileContentWithOptions(w, r, deps, item, "attachment", true)
+}
+
+// serveOwnedFileDecrypted 始终由服务器解密并校验后输出明文，用于管理员审核
+// 下载等内部场景（管理员必须能直接看到内容，与交付开关无关）。
+func serveOwnedFileDecrypted(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource) {
+	reader, blob, err := blobReader(r.Context(), deps, item)
 	if err != nil {
-		log.Printf("下载文件校验失败 id=%s: %v", item.ID, err)
-		writeBusinessError(w, http.StatusUnprocessableEntity, "文件完整性校验失败")
+		log.Printf("打开文件失败 id=%s: %v", item.ID, err)
+		writeBusinessError(w, http.StatusUnprocessableEntity, "文件不存在或已损坏")
 		return
 	}
-	contentType := ""
-	if item.MimeType != nil {
-		contentType = strings.TrimSpace(*item.MimeType)
-	}
-	if contentType == "" {
-		contentType = mime.TypeByExtension(strings.ToLower(filepath.Ext(item.Name)))
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	serveDownload(w, r, path, item.SizeBytes, item.Name, contentType)
+	setContentSHA256Header(w, blob.SHA256)
+	serveBlobStream(w, r, reader, blob.SizeBytes, item.Name, blobContentType(item))
 }
 
 // serveResourcePreview 只向资源所有者返回文件内容。每次读取前都会重新计算
@@ -278,35 +276,11 @@ func serveResourcePreview(w http.ResponseWriter, r *http.Request, deps Deps, id 
 }
 
 func serveResourceFilePreview(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource) {
-	filePath, err := deps.FileStore.ValidateFile(r.Context(), item)
-	if err != nil {
-		log.Printf("预览文件校验失败 id=%s: %v", item.ID, err)
-		writeBusinessError(w, http.StatusUnprocessableEntity, "文件完整性校验失败")
-		return
-	}
-	file, err := os.Open(filePath)
-	if err != nil {
-		writeBusinessError(w, http.StatusNotFound, "文件不存在")
-		return
-	}
-	defer file.Close()
-
-	contentType := ""
-	if item.MimeType != nil {
-		contentType = strings.TrimSpace(*item.MimeType)
-	}
-	if contentType == "" {
-		contentType = mime.TypeByExtension(strings.ToLower(filepath.Ext(item.Name)))
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": item.Name}))
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, item.Name, item.UpdatedAt, file)
+	// 与下载共用交付策略：加密 + 服务器实时解密关时输出密文并下发解密元数据
+	// （前端读取响应头解密后交给预览器）。
+	serveFileContent(w, r, deps, item, "inline")
 }
 
 func normalizeID(id *string) *string {
@@ -329,6 +303,8 @@ func writeResourceMutationError(w http.ResponseWriter, err error) {
 		writeBusinessError(w, http.StatusNotFound, "父文件夹不存在")
 	case errors.Is(err, resource.ErrNameConflict):
 		writeBusinessError(w, http.StatusConflict, "同一目录下已存在同名资源")
+	case errors.Is(err, resource.ErrAdminBlocked):
+		writeBusinessError(w, http.StatusForbidden, "文件已被管理员限制，无法覆盖")
 	case errors.As(err, &pgErr) && pgErr.Code == "23505":
 		writeBusinessError(w, http.StatusConflict, "同一目录下已存在同名资源")
 	default:

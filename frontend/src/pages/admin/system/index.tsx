@@ -1,5 +1,6 @@
 import { fetchAdminSystemConfig, updateAdminSystemConfig, testAdminUpload, uploadSiteIcon, deleteSiteIcon, fetchCustomHomepage, saveCustomHomepage, deleteCustomHomepage } from '@/api/endpoints';
 import { apiErrorMessage } from '@/api/client';
+import { useHistory } from 'react-router-dom';
 import React, { useContext, useEffect, useRef, useState } from 'react';
 import {
   Alert,
@@ -10,8 +11,10 @@ import {
   Input,
   InputNumber,
   Message,
+  Modal,
   Radio,
   Spin,
+  Switch,
   Typography,
 } from '@arco-design/web-react';
 import { IconDelete, IconSave, IconUpload } from '@arco-design/web-react/icon';
@@ -25,6 +28,7 @@ const FormItem = Form.Item;
 function SystemConfig() {
   const [form] = Form.useForm();
   const { setSiteConfig } = useContext(GlobalContext);
+  const history = useHistory();
   const iconInputRef = useRef<HTMLInputElement>();
   const homepageInputRef = useRef<HTMLInputElement>();
   const [loading, setLoading] = useState(true);
@@ -37,19 +41,30 @@ function SystemConfig() {
     useState(false);
   const [customHomepageEnabled, setCustomHomepageEnabled] = useState(false);
   const [customHomepageHTML, setCustomHomepageHTML] = useState('');
+  // 部署是否配置了加密密钥（XPH_ENCRYPTION_KEYS）：未配置时不允许开启加密。
+  const [encryptionConfigured, setEncryptionConfigured] = useState(false);
+  /** 服务端配置 → 表单值：首次加载与保存后回填共用同一份换算，避免两处默认值漂移。 */
+  const toFormValues = (data: Record<string, unknown>) => ({
+    ...data,
+    pickupLifetimeHours:
+      data.pickupMaxLifetimeSeconds == null
+        ? undefined
+        : (data.pickupMaxLifetimeSeconds as number) / 3600,
+    pickupAllowPermanent: (data.pickupAllowPermanent as boolean | undefined) ?? true,
+    invitationValidDays: (data.invitationValidDays as number | undefined) ?? 90,
+    crossUserDedupe: (data.crossUserDedupe as boolean | undefined) ?? true,
+    uploadMaxFileGB:
+      ((data.uploadMaxFileBytes as number) || 100 * 1024 ** 3) / 1024 ** 3,
+    uploadChunkSizeMB:
+      ((data.uploadChunkSizeBytes as number) || 8 * 1024 * 1024) / 1024 / 1024,
+    storageChunkSizeMB: ((data.storageChunkSizeBytes as number) || 0) / 1024 / 1024,
+  });
   useEffect(() => {
     fetchAdminSystemConfig()
       .then((res) => {
-        form.setFieldsValue({
-          ...res.data,
-          pickupLifetimeHours:
-            res.data.pickupMaxLifetimeSeconds == null
-              ? undefined
-              : res.data.pickupMaxLifetimeSeconds / 3600,
-          uploadChunkSizeMB:
-            (res.data.uploadChunkSizeBytes || 8 * 1024 * 1024) / 1024 / 1024,
-        });
+        form.setFieldsValue(toFormValues(res.data));
         setIconUrl(res.data.siteIconUrl || '');
+        setEncryptionConfigured(Boolean(res.data.encryptionConfigured));
         setCustomHomepageConfigured(Boolean(res.data.customHomepageConfigured));
         setCustomHomepageEnabled(Boolean(res.data.customHomepageConfigured));
         if (res.data.customHomepageConfigured) {
@@ -72,7 +87,13 @@ function SystemConfig() {
       Message.error(uiText('邀请码和分享码都必须至少包含字母或数字'));
       throw new Error('invalid random code charset');
     }
-    const { uploadChunkSizeMB, pickupLifetimeHours, ...payload } = values;
+    const {
+      uploadChunkSizeMB,
+      pickupLifetimeHours,
+      storageChunkSizeMB,
+      uploadMaxFileGB,
+      ...payload
+    } = values;
     const res = await updateAdminSystemConfig({
       ...payload,
       pickupMaxLifetimeSeconds:
@@ -80,16 +101,12 @@ function SystemConfig() {
           ? null
           : pickupLifetimeHours * 3600,
       uploadChunkSizeBytes: uploadChunkSizeMB * 1024 * 1024,
+      storageChunkSizeBytes: (storageChunkSizeMB || 0) * 1024 * 1024,
+      uploadMaxFileBytes: Math.round((uploadMaxFileGB ?? 100) * 1024 ** 3),
     });
-    form.setFieldsValue({
-      ...res.data,
-      pickupLifetimeHours:
-        res.data.pickupMaxLifetimeSeconds == null
-          ? undefined
-          : res.data.pickupMaxLifetimeSeconds / 3600,
-      uploadChunkSizeMB: res.data.uploadChunkSizeBytes / 1024 / 1024,
-    });
+    form.setFieldsValue(toFormValues(res.data));
     setIconUrl(res.data.siteIconUrl || '');
+    setEncryptionConfigured(Boolean(res.data.encryptionConfigured));
     setSiteConfig?.({
       siteName: res.data.siteName,
       siteIconUrl: res.data.siteIconUrl || '',
@@ -110,8 +127,7 @@ function SystemConfig() {
       setSaving(true);
       await persistConfig(true);
     } catch (error) {
-      if (error?.response)
-        Message.error(error.response.data?.msg || uiText('保存失败'));
+      Message.error(apiErrorMessage(error, uiText('保存失败')));
     } finally {
       setSaving(false);
     }
@@ -130,9 +146,12 @@ function SystemConfig() {
       });
       Message.success(uiText('站点图标已上传并实时生效'));
     } catch (error) {
-      if (error?.response) {
-        Message.error(error.response.data?.msg || uiText('图标上传失败'));
+      // 上传前会先保存整页表单：校验失败时给出真实原因，而不是"上传失败"。
+      if ((error as { errorFields?: unknown })?.errorFields) {
+        Message.error(uiText('请先完善表单中的存储配置'));
+        return;
       }
+      Message.error(apiErrorMessage(error, uiText('图标上传失败')));
     } finally {
       setIconUploading(false);
       if (iconInputRef.current) iconInputRef.current.value = '';
@@ -179,6 +198,10 @@ function SystemConfig() {
       setCustomHomepageEnabled(true);
       Message.success(uiText('自定义首页已保存并实时生效'));
     } catch (error) {
+      if ((error as { errorFields?: unknown })?.errorFields) {
+        Message.error(uiText('请先完善表单中的存储配置'));
+        return;
+      }
       Message.error(apiErrorMessage(error, uiText('首页保存失败')));
     } finally {
       setHomepageUploading(false);
@@ -208,9 +231,13 @@ function SystemConfig() {
       );
       Message.success(uiText('分片大小验证通过'));
     } catch (error) {
-      if (error?.response) {
-        Message.error(error.response.data?.msg || uiText('分片大小验证失败'));
+      // 表单校验失败抛出的是 errorFields 对象而非接口错误：给出"请先填写"，
+      // 不要复用泛化的"验证失败"。
+      if ((error as { errorFields?: unknown })?.errorFields) {
+        Message.error(uiText('请先填写分片大小'));
+        return;
       }
+      Message.error(apiErrorMessage(error, uiText('分片大小验证失败')));
     } finally {
       setChunkTesting(false);
     }
@@ -303,9 +330,22 @@ function SystemConfig() {
                 </FormItem>
                 <FormItem label={uiText('自定义首页')}>
                   <Checkbox checked={customHomepageEnabled} disabled={homepageUploading} onChange={(checked) => {
-                    if (checked) setCustomHomepageEnabled(true);
-                    else if (customHomepageConfigured) removeHomepage();
-                    else setCustomHomepageEnabled(false);
+                    if (checked) {
+                      setCustomHomepageEnabled(true);
+                      return;
+                    }
+                    if (!customHomepageConfigured) {
+                      setCustomHomepageEnabled(false);
+                      return;
+                    }
+                    // 取消勾选会删除已保存的自定义首页，先确认再执行。
+                    Modal.confirm({
+                      title: uiText('移除自定义首页'),
+                      content: uiText('将删除已保存的自定义首页内容，此操作不可撤销。'),
+                      okText: uiText('确认移除'),
+                      cancelText: uiText('取消'),
+                      onOk: () => removeHomepage(),
+                    });
                   }}>{uiText('启用自定义首页')}</Checkbox>
                   {customHomepageEnabled && <>
                     <Input.TextArea
@@ -384,6 +424,13 @@ function SystemConfig() {
                     />
                   </FormItem>
                   <FormItem
+                    label={uiText('单文件上限（GB）')}
+                    field="uploadMaxFileGB"
+                    rules={[{ required: true, type: 'number', min: 1 }]}
+                  >
+                    <InputNumber min={1} step={1} precision={0} suffix="GB" />
+                  </FormItem>
+                  <FormItem
                     label={uiText('单任务并发数')}
                     field="uploadTaskChunkConcurrency"
                     rules={[{ required: true }]}
@@ -415,6 +462,16 @@ function SystemConfig() {
                     '单任务并发数控制一个文件同时上传的分片数，单用户任务并发数控制同时上传的文件数。'
                   )}
                 </Text>
+                <FormItem field="crossUserDedupe" triggerPropName="checked">
+                  <Checkbox>
+                    {uiText('允许跨用户秒传复用（关闭后仅复用自己已有的文件，更保护隐私）')}
+                  </Checkbox>
+                </FormItem>
+                <Text type="secondary">
+                  {uiText(
+                    '开启时按内容哈希全平台去重：任何用户知道文件的 SHA-256 与大小即可秒传他人的私有文件（省存储但可能越权读取）；关闭后只与自己已有的对象去重。'
+                  )}
+                </Text>
               </div>
               <div className={styles['config-section']}>
                 <div className={styles['config-title']}>
@@ -426,7 +483,7 @@ function SystemConfig() {
                 <Form.Item shouldUpdate noStyle>
                   {(values) => values.loginTOTPEnabled ? (
                     <>
-                      <Button onClick={() => { window.location.href = '/admin/access?tab=permissions'; }}>
+                      <Button onClick={() => history.push('/admin/access?tab=permissions')}>
                         {uiText('前往配置用户组权限')}
                       </Button>
                       <div style={{ marginTop: 8, minWidth: 0 }}>
@@ -444,7 +501,9 @@ function SystemConfig() {
               <div className={styles['config-section']}>
                 <div className={styles['config-title']}>{uiText('回收站')}</div>
                 <Text type="secondary" className={styles['config-description']}>
-                  {uiText('到期内容将自动永久删除，默认保留 30 天。')}
+                  {uiText(
+                    '到期内容将自动永久删除，默认保留 30 天。缩短保留期后，超出期限的内容会在下一次清理时立即彻底删除。'
+                  )}
                 </Text>
                 <FormItem
                   label={uiText('回收期限')}
@@ -507,6 +566,18 @@ function SystemConfig() {
                     >
                       <InputNumber min={4} max={64} precision={0} />
                     </FormItem>
+                    <FormItem
+                      label={uiText('邀请码有效期（天，0 = 永久）')}
+                      field="invitationValidDays"
+                      rules={[{ type: 'number', min: 0, max: 3650 }]}
+                    >
+                      <InputNumber
+                        min={0}
+                        max={3650}
+                        precision={0}
+                        placeholder={uiText('0 表示永久')}
+                      />
+                    </FormItem>
                     <div className={styles['random-code-options']}>
                       <FormItem
                         field="invitationCodeCaseSensitive"
@@ -538,8 +609,13 @@ function SystemConfig() {
                       <FormItem field="pickupCodeIncludeLetters" triggerPropName="checked"><Checkbox>{uiText('包含字母')}</Checkbox></FormItem>
                       <FormItem field="pickupCodeIncludeNumbers" triggerPropName="checked"><Checkbox>{uiText('包含数字')}</Checkbox></FormItem>
                     </div>
-                    <FormItem label={uiText('取件码有效期')} field="pickupLifetimeHours" rules={[{ type: 'number', min: 1 }]}>
+                    <FormItem label={uiText('取件码默认有效期')} field="pickupLifetimeHours" rules={[{ type: 'number', min: 1 }]}>
                       <InputNumber min={1} step={1} precision={0} suffix={uiText('小时')} placeholder={uiText('永久有效')} />
+                    </FormItem>
+                    <FormItem field="pickupAllowPermanent" triggerPropName="checked">
+                      <Checkbox>
+                        {uiText('允许永久有效的取件码（码空间有限，可在分享页「清理失效取件码」腾位置）')}
+                      </Checkbox>
                     </FormItem>
                   </div>
                   <div className={styles['random-code-group']}>
@@ -646,6 +722,78 @@ function SystemConfig() {
                       {uiText('一次性临时链接')}
                     </Radio>
                   </Radio.Group>
+                </FormItem>
+                <FormItem
+                  label={uiText('分享页交付方式')}
+                  field="shareRetrievalMode"
+                  rules={[
+                    {
+                      required: true,
+                    },
+                  ]}
+                >
+                  <Radio.Group type="button">
+                    <Radio value="proxy">{uiText('本机中转')}</Radio>
+                    <Radio value="redirect">
+                      {uiText('302 直跳第三方')}
+                    </Radio>
+                  </Radio.Group>
+                </FormItem>
+                <Text type="secondary" className={styles['config-description']}>
+                  {uiText(
+                    '选择 302 时，文件由浏览器直连存储后端下载：明文文件无需处理，浏览器一次跳转即可下载；加密文件先下发密钥信封，再由浏览器拉取密文并解密（服务器不承担流量）。预览与文件夹打包固定走本机中转。302 模式下实时解密开关不生效。'
+                  )}
+                </Text>
+                <FormItem
+                  label={uiText('服务器实时解密')}
+                  field="proxyRealtimeDecrypt"
+                  triggerPropName="checked"
+                >
+                  <Switch />
+                </FormItem>
+                <Text type="secondary" className={styles['config-description']}>
+                  {uiText(
+                    '开启后，本机中转交付的加密文件由服务器解密后输出明文；关闭后改由浏览器端解密（密钥实时非对称下发，仅 HTTPS 部署可用），"一次性临时链接"会自动降级为"前端读取 Blob 流"以保证可解密。直链始终由服务器解密，不受此开关影响。'
+                  )}
+                </Text>
+              </div>
+              <div
+                className={`${styles['config-section']} ${styles['config-section-wide']}`}
+              >
+                <div className={styles['config-title']}>
+                  {uiText('存储加密')}
+                </div>
+                <FormItem
+                  label={uiText('新文件加密存储')}
+                  field="encryptNewFiles"
+                  triggerPropName="checked"
+                  disabled={!encryptionConfigured}
+                  extra={
+                    encryptionConfigured
+                      ? undefined
+                      : uiText('当前部署未配置加密密钥')
+                  }
+                >
+                  <Switch disabled={!encryptionConfigured} />
+                </FormItem>
+                <Text type="secondary" className={styles['config-description']}>
+                  {encryptionConfigured
+                    ? uiText(
+                        '开启后新上传的文件使用 AES-256-GCM 分块加密存储（每个文件独立随机密钥，密钥经部署密钥包裹后保存在数据库）；关闭时新文件保持明文存储，历史文件不受影响。'
+                      )
+                    : uiText(
+                        '当前部署未配置加密密钥（XPH_ENCRYPTION_KEYS），无法开启新文件加密。'
+                      )}
+                </Text>
+                <FormItem
+                  label={uiText('新上传分片大小（MiB）')}
+                  field="storageChunkSizeMB"
+                  rules={[{ required: true }]}
+                  extra={uiText(
+                    '分片存储为强制项（不可关闭）：必须是 4MiB 的整数倍（4~1024），默认 64MiB。分片与加密兼容（分片边界与加密块对齐），已有对象可在「存储管理」用分片任务重写。'
+                  )}
+                >
+                  <InputNumber min={4} max={1024} step={4} style={{ width: 200 }} />
                 </FormItem>
               </div>
             </div>

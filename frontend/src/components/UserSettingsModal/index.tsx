@@ -13,10 +13,11 @@ export default function UserSettingsModal() {
   const [status, setStatus] = useState<Status>();
   const [setup, setSetup] = useState<Setup>();
   const [code, setCode] = useState('');
+  const [currentCode, setCurrentCode] = useState('');
   const [loading, setLoading] = useState(false);
   const load = useCallback(() => fetchTotpStatus().then((res) => setStatus(res.data)), []);
   useEffect(() => {
-    const open = () => { setVisible(true); setSetup(undefined); setCode(''); load().catch(() => Message.error(uiText('安全配置加载失败'))); };
+    const open = () => { setVisible(true); setSetup(undefined); setCode(''); setCurrentCode(''); load().catch(() => Message.error(uiText('安全配置加载失败'))); };
     window.addEventListener('xph-open-user-settings', open);
     return () => window.removeEventListener('xph-open-user-settings', open);
   }, [load]);
@@ -27,9 +28,12 @@ export default function UserSettingsModal() {
   };
   const confirm = async () => {
     if (!setup || code.length !== 6) return Message.warning(uiText('请输入 6 位动态令牌'));
+    // 替换已配置的令牌时必须先验证当前令牌（防止会话被劫持后换绑 2FA）。
+    if (status?.configured && currentCode.length !== 6)
+      return Message.warning(uiText('请输入当前动态令牌'));
     try {
       setLoading(true);
-      await confirmTotpSetup({ secret: setup.secret, code });
+      await confirmTotpSetup({ secret: setup.secret, code, currentCode });
       Message.success(uiText('动态令牌配置成功'));
       setSetup(undefined); await load(); window.location.reload();
     } catch (error) { Message.error(apiErrorMessage(error, uiText('动态令牌校验失败'))); }
@@ -42,6 +46,9 @@ export default function UserSettingsModal() {
       <Typography.Paragraph>{uiText('请使用验证器应用扫描二维码，或手动复制下方链接。完成后输入应用显示的 6 位动态令牌以确认绑定。')}</Typography.Paragraph>
       <div style={{ textAlign: 'center', margin: '20px 0' }}><img src={setup.qrCode} alt={uiText('动态令牌二维码')} width={220} height={220} /></div>
       <Input value={setup.url} readOnly suffix={<Button type="text" icon={<IconCopy />} onClick={() => navigator.clipboard.writeText(setup.url).then(() => Message.success(uiText('已复制')))} />} />
+      {status?.configured && <Input style={{ marginTop: 16 }} inputMode="numeric" maxLength={6} value={currentCode}
+        placeholder={uiText('当前已配置动态令牌，请先输入当前显示的动态码')}
+        onChange={(value) => setCurrentCode(value.replace(/\D/g, '').slice(0, 6))} />}
       <Input style={{ marginTop: 16 }} inputMode="numeric" maxLength={6} value={code} placeholder={uiText('请输入 6 位动态令牌')}
         onChange={(value) => setCode(value.replace(/\D/g, '').slice(0, 6))} />
       <Button style={{ marginTop: 16 }} type="primary" long loading={loading} onClick={confirm}>{uiText('确认配置')}</Button>

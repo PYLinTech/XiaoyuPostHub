@@ -44,6 +44,8 @@ type totpLoginRequest struct {
 type totpConfirmRequest struct {
 	Secret string `json:"secret"`
 	Code   string `json:"code"`
+	// CurrentCode 是替换已配置令牌时必须提供的当前动态码（防会话劫持换绑）。
+	CurrentCode string `json:"currentCode"`
 }
 
 // apiStatusResponse 通用返回：status=ok | error，error 时 msg 必填。
@@ -227,7 +229,7 @@ func totpLoginHandler(deps Deps) http.HandlerFunc {
 			writeJSON(w, 400, apiStatusResponse{Status: "error", Msg: "请求格式错误"})
 			return
 		}
-		userID, err := deps.UserRepo.ConsumeTOTPChallenge(r.Context(), req.ChallengeToken, req.Code)
+		userID, err := deps.UserRepo.ConsumeTOTPChallenge(r.Context(), req.ChallengeToken, req.Code, clientIP(r))
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, apiStatusResponse{Status: "error", Msg: "动态令牌无效或已过期"})
 			return
@@ -288,7 +290,7 @@ func totpSettingsHandler(deps Deps) http.HandlerFunc {
 				writeBusinessError(w, 400, "请求格式错误")
 				return
 			}
-			if err := deps.UserRepo.SaveTOTP(r.Context(), u.ID, req.Secret, req.Code); err != nil {
+			if err := deps.UserRepo.SaveTOTP(r.Context(), u.ID, req.Secret, req.Code, req.CurrentCode); err != nil {
 				writeBusinessError(w, 400, "动态令牌校验失败")
 				return
 			}

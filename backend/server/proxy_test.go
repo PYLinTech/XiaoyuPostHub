@@ -14,13 +14,13 @@ func newRequest(remoteAddr, forwarded string) *http.Request {
 	return r
 }
 
-// 未配置可信网段时保持历史行为：始终优先采信 X-Real-IP。
-func TestClientIPPrefersForwardedHeaderByDefault(t *testing.T) {
+// 未配置可信网段时不再采信 X-Real-IP（防可直连客户端伪造头绕过 IP 维度限流）。
+func TestClientIPIgnoresForwardedHeaderByDefault(t *testing.T) {
 	SetTrustedProxies(nil)
 	t.Cleanup(func() { SetTrustedProxies(nil) })
 
-	if got := clientIP(newRequest("10.1.2.3:4567", "203.0.113.9")); got != "203.0.113.9" {
-		t.Fatalf("默认行为应采信 X-Real-IP，得到 %q", got)
+	if got := clientIP(newRequest("10.1.2.3:4567", "203.0.113.9")); got != "10.1.2.3" {
+		t.Fatalf("未配置可信网段时不应采信 X-Real-IP，得到 %q", got)
 	}
 }
 

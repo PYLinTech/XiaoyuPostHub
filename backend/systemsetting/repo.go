@@ -4,13 +4,13 @@ package systemsetting
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -20,6 +20,10 @@ const (
 	PackFrontend       = "frontend"
 	DeliveryBlob       = "blob"
 	DeliveryTemporary  = "temporary_link"
+	// RetrievalProxy 表示分享页交付走本机中转；RetrievalRedirect 表示 302 直跳
+	// 第三方（对象存储/云盘）。需要解密的场景强制中转。
+	RetrievalProxy    = "proxy"
+	RetrievalRedirect = "redirect"
 )
 
 var (
@@ -32,6 +36,10 @@ var (
 	ErrTrashRetention     = errors.New("systemsetting: 回收期限必须在 1 到 3650 天之间")
 	ErrDownloadMode       = errors.New("systemsetting: 下载策略无效")
 	ErrPickupLifetime     = errors.New("systemsetting: 取件码有效期上限无效")
+	ErrInvitationValidity = errors.New("systemsetting: 邀请码有效期必须在 0（永久）到 3650 天之间")
+	ErrUploadMaxFileBytes = errors.New("systemsetting: 单文件上限必须在 16MiB 到 1TiB 之间")
+	ErrRetrievalMode      = errors.New("systemsetting: 交付方式无效")
+	ErrStorageChunkSize   = errors.New("systemsetting: 分片大小必须是 4MiB 的整数倍（4MiB~1GiB），分片存储不可关闭")
 )
 
 type Config struct {
@@ -59,11 +67,112 @@ type Config struct {
 	UploadTaskChunkConcurrency int16
 	UploadUserTaskConcurrency  int16
 	TrashRetentionDays         int16
+	// EncryptNewFiles 开启后新上传文件使用分块 AES-256-GCM 加密存储。
+	EncryptNewFiles bool
+	// ProxyRealtimeDecrypt 控制本机中转交付加密文件时是否由服务器实时解密；
+	// 关闭后由浏览器端解密（密钥实时非对称下发）。直链始终服务器解密。
+	ProxyRealtimeDecrypt bool
+	// ShareRetrievalMode 是分享页交付方式（proxy / redirect）。
+	ShareRetrievalMode string
+	// StorageChunkSizeBytes 是新上传对象的分片粒度（0 = 不分片）；必须为
+	// 加密块（4MiB）的整数倍，保证加密后分片仍可独立随机读取。
+	StorageChunkSizeBytes int32
+	// PickupAllowPermanent 允许创建/修改"永久有效"的取件码分享（管理端开关）。
+	PickupAllowPermanent bool
+	// InvitationValidDays 邀请码有效期（天），0 = 永久。
+	InvitationValidDays int32
+	// UploadMaxFileBytes 单文件系统硬上限（独立于用户组配额的安全上限）。
+	UploadMaxFileBytes int64
+	// CrossUserDedupe 秒传是否允许跨用户复用物理对象（false = 只复用本人对象）。
+	CrossUserDedupe bool
 }
 
-type Repo struct{ q *sqlcgen.Queries }
+// DefaultUploadMaxFileBytes 是单文件系统硬上限的默认值（100GiB）。
+const DefaultUploadMaxFileBytes int64 = 100 << 30
 
-func NewRepo(q *sqlcgen.Queries) *Repo { return &Repo{q: q} }
+type Repo struct {
+	q *sqlcgen.Queries
+	// pool 仅用于 post-034 新增列的读写（见 Knobs）。为 nil 时退化为默认值，
+	// 便于不依赖数据库连接的单元测试构造。
+	pool *pgxpool.Pool
+}
+
+func NewRepo(q *sqlcgen.Queries, pools ...*pgxpool.Pool) *Repo {
+	repo := &Repo{q: q}
+	if len(pools) > 0 {
+		repo.pool = pools[0]
+	}
+	return repo
+}
+
+// Knobs 是后加的管理端开关（独立于 sqlc 生成查询）：新增列在无 sqlc 环境无法
+// 重新生成绑定，这里用最小原始 SQL 读写，避免改动生成代码。
+type Knobs struct {
+	// PickupAllowPermanent 允许创建/修改"永久有效"的取件码分享。
+	PickupAllowPermanent bool
+	// InvitationValidDays 邀请码有效期（天），0 表示永久。
+	InvitationValidDays int32
+	// UploadMaxFileBytes 单文件系统硬上限（安全上限，独立于用户组配额）。
+	UploadMaxFileBytes int64
+	// CrossUserDedupe 秒传是否允许跨用户复用物理对象（全平台去重）。
+	// TRUE：任何用户凭 sha256+精确大小即可复用他人对象（省存储，但知道哈希即可
+	// 取得他人私有文件内容）；FALSE：只复用自己已有引用的对象。
+	CrossUserDedupe bool
+}
+
+// DefaultKnobs 返回新开关的出厂默认值（与迁移 034/035 的列默认值一致）。
+func DefaultKnobs() Knobs {
+	return Knobs{
+		PickupAllowPermanent: true, InvitationValidDays: 90,
+		UploadMaxFileBytes: DefaultUploadMaxFileBytes, CrossUserDedupe: true,
+	}
+}
+
+// GetKnobs 读取管理端开关；未接连接池时返回默认值。
+func (r *Repo) GetKnobs(ctx context.Context) (Knobs, error) {
+	if r.pool == nil {
+		return DefaultKnobs(), nil
+	}
+	out := DefaultKnobs()
+	if err := r.pool.QueryRow(ctx, `
+		SELECT pickup_allow_permanent, invitation_valid_days, upload_max_file_bytes, cross_user_dedupe
+		FROM system_settings WHERE id=1`).
+		Scan(&out.PickupAllowPermanent, &out.InvitationValidDays, &out.UploadMaxFileBytes, &out.CrossUserDedupe); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Knobs{}, ErrNotInitialized
+		}
+		return Knobs{}, err
+	}
+	return out, nil
+}
+
+// UpdateKnobs 保存管理端开关（含校验）；未接连接池时为无操作，便于测试。
+func (r *Repo) UpdateKnobs(ctx context.Context, k Knobs) (Knobs, error) {
+	if k.InvitationValidDays < 0 || k.InvitationValidDays > 3650 {
+		return Knobs{}, ErrInvitationValidity
+	}
+	if k.UploadMaxFileBytes < 16<<20 || k.UploadMaxFileBytes > 1<<40 {
+		return Knobs{}, ErrUploadMaxFileBytes
+	}
+	if r.pool == nil {
+		return k, nil
+	}
+	out := k
+	if err := r.pool.QueryRow(ctx, `
+		UPDATE system_settings
+		SET pickup_allow_permanent=$1, invitation_valid_days=$2, upload_max_file_bytes=$3,
+		    cross_user_dedupe=$4, updated_at=NOW()
+		WHERE id=1
+		RETURNING pickup_allow_permanent, invitation_valid_days, upload_max_file_bytes, cross_user_dedupe`,
+		k.PickupAllowPermanent, k.InvitationValidDays, k.UploadMaxFileBytes, k.CrossUserDedupe).
+		Scan(&out.PickupAllowPermanent, &out.InvitationValidDays, &out.UploadMaxFileBytes, &out.CrossUserDedupe); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Knobs{}, ErrNotInitialized
+		}
+		return Knobs{}, err
+	}
+	return out, nil
+}
 
 func (r *Repo) EnsureDefaults(ctx context.Context) error { return r.q.EnsureSystemSettings(ctx) }
 
@@ -71,20 +180,6 @@ func (r *Repo) Get(ctx context.Context) (sqlcgen.SystemSetting, error) {
 	settings, err := r.q.GetSystemSettings(ctx)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlcgen.SystemSetting{}, ErrNotInitialized
-	}
-	return settings, err
-}
-
-func (r *Repo) Update(ctx context.Context, siteName, storagePath string) (sqlcgen.SystemSetting, error) {
-	siteName, storagePath, err := validateIdentity(siteName, storagePath)
-	if err != nil {
-		return sqlcgen.SystemSetting{}, err
-	}
-	settings, err := r.q.UpdateSystemIdentity(ctx, sqlcgen.UpdateSystemIdentityParams{
-		SiteName: siteName, StoragePath: storagePath,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return sqlcgen.SystemSetting{}, fmt.Errorf("%w: 请先初始化默认配置", ErrNotInitialized)
 	}
 	return settings, err
 }
@@ -115,7 +210,26 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 	if config.TrashRetentionDays < 1 || config.TrashRetentionDays > 3650 {
 		return sqlcgen.SystemSetting{}, ErrTrashRetention
 	}
-	return r.q.UpdateAllSystemSettings(ctx, sqlcgen.UpdateAllSystemSettingsParams{
+	if config.ShareRetrievalMode != RetrievalProxy && config.ShareRetrievalMode != RetrievalRedirect {
+		return sqlcgen.SystemSetting{}, ErrRetrievalMode
+	}
+	if !ValidStorageChunkSize(config.StorageChunkSizeBytes) {
+		return sqlcgen.SystemSetting{}, ErrStorageChunkSize
+	}
+	// 后加的三项开关先校验（避免主配置已写入而开关无效的半成功状态）。
+	knobs := Knobs{
+		PickupAllowPermanent: config.PickupAllowPermanent,
+		InvitationValidDays:  config.InvitationValidDays,
+		UploadMaxFileBytes:   config.UploadMaxFileBytes,
+		CrossUserDedupe:      config.CrossUserDedupe,
+	}
+	if knobs.InvitationValidDays < 0 || knobs.InvitationValidDays > 3650 {
+		return sqlcgen.SystemSetting{}, ErrInvitationValidity
+	}
+	if knobs.UploadMaxFileBytes < 16<<20 || knobs.UploadMaxFileBytes > 1<<40 {
+		return sqlcgen.SystemSetting{}, ErrUploadMaxFileBytes
+	}
+	settings, err := r.q.UpdateAllSystemSettings(ctx, sqlcgen.UpdateAllSystemSettingsParams{
 		SiteName: siteName, StoragePath: storagePath,
 		FolderPackMode: config.FolderPackMode, ShareDeliveryMode: config.ShareDeliveryMode,
 		InvitationLength: config.InvitationLength, InvitationCaseSensitive: config.InvitationCaseSensitive,
@@ -131,7 +245,29 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 		UploadTaskChunkConcurrency: config.UploadTaskChunkConcurrency,
 		UploadUserTaskConcurrency:  config.UploadUserTaskConcurrency,
 		TrashRetentionDays:         config.TrashRetentionDays,
+		EncryptNewFiles:            config.EncryptNewFiles,
+		ProxyRealtimeDecrypt:       config.ProxyRealtimeDecrypt,
+		ShareRetrievalMode:         config.ShareRetrievalMode,
+		StorageChunkSizeBytes:      config.StorageChunkSizeBytes,
 	})
+	if err != nil {
+		return sqlcgen.SystemSetting{}, err
+	}
+	if _, err := r.UpdateKnobs(ctx, knobs); err != nil {
+		return sqlcgen.SystemSetting{}, err
+	}
+	return settings, nil
+}
+
+// DefaultStorageChunkSizeBytes 是分片粒度的默认值（强制分片，不可为 0）。
+const DefaultStorageChunkSizeBytes = 64 << 20
+
+// ValidStorageChunkSize 校验分片粒度：必须是 4MiB 的整数倍（4MiB~1GiB）。
+// 分片是强制项——它与加密块对齐（保证加密对象可随机读取），也是迁移/补加密/
+// 重新分片等维护能力的基础形态，因此不再提供"不分片"选项。
+func ValidStorageChunkSize(size int32) bool {
+	const block = 4 << 20
+	return size >= block && size <= 1<<30 && size%block == 0
 }
 
 func nullableInt8(value *int64) pgtype.Int8 {

@@ -57,8 +57,14 @@ export default function TrashPage() {
 
   const restore = async (item: ResourceItem) => {
     try {
-      await restoreTrashItem(item.id);
-      Message.success(uiText('恢复完成'));
+      const response = await restoreTrashItem(item.id);
+      // 目标位置已有同名条目时后端会自动改名，这里明确告知最终名字。
+      const restoredName: string | undefined = response.data?.name;
+      Message.success(
+        restoredName && restoredName !== item.name
+          ? `${uiText('已恢复为')} ${restoredName}`
+          : uiText('恢复完成')
+      );
       await load();
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('恢复失败')));
@@ -85,7 +91,9 @@ export default function TrashPage() {
   const confirmEmptyTrash = () => {
     Modal.confirm({
       title: uiText('清空回收站'),
-      content: uiText('回收站中的全部内容将被永久删除且无法恢复。'),
+      content: uiText(
+        '回收站中的全部内容将被永久删除且无法恢复（管理员限制的文件会保留，需由管理员处理）。'
+      ),
       okButtonProps: { status: 'danger' },
       onOk: async () => {
         try {
@@ -163,10 +171,12 @@ export default function TrashPage() {
           <Button
             size="small"
             status="danger"
-            disabled={!canDelete}
+            disabled={!canDelete || item.restoreBlocked}
             onClick={() => permanentlyDelete(item)}
           >
-            {uiText('永久删除')}
+            {item.restoreBlocked
+              ? uiText('管理员限制删除')
+              : uiText('永久删除')}
           </Button>
         </Space>
       ),

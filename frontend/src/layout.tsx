@@ -14,6 +14,7 @@ import {
   IconSafe,
   IconSettings,
   IconShareAlt,
+  IconStorage,
   IconUserGroup,
 } from '@arco-design/web-react/icon';
 import Navbar, { MobileNavActions } from './components/NavBar';
@@ -46,6 +47,7 @@ const routePages = {
   'admin/users': React.lazy(() => import('./pages/admin/users')),
   'admin/access': React.lazy(() => import('./pages/admin/access')),
   'admin/audit': React.lazy(() => import('./pages/admin/audit')),
+  'admin/storage': React.lazy(() => import('./pages/admin/storage')),
   'admin/system': React.lazy(() => import('./pages/admin/system')),
 };
 function getIcon(key: string) {
@@ -58,6 +60,7 @@ function getIcon(key: string) {
     'admin/users': IconUserGroup,
     'admin/access': IconSafe,
     'admin/audit': IconHistory,
+    'admin/storage': IconStorage,
     'admin/system': IconSettings,
   };
   const Icon = icons[key];

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -50,9 +51,9 @@ func handleAdminReviews(w http.ResponseWriter, r *http.Request, deps Deps, actor
 	case path == "reviews/files/trash" && r.Method == http.MethodGet:
 		handleReviewTrashList(w, r, deps)
 	case path == "reviews/files/trash" && r.Method == http.MethodDelete:
-		handleReviewTrashEmpty(w, r, deps)
+		handleReviewTrashEmpty(w, r, deps, actor)
 	case strings.HasPrefix(path, "reviews/files/trash/") && r.Method == http.MethodDelete:
-		handleReviewTrashDelete(w, r, deps, strings.TrimPrefix(path, "reviews/files/trash/"))
+		handleReviewTrashDelete(w, r, deps, actor, strings.TrimPrefix(path, "reviews/files/trash/"))
 	case path == "reviews/shares" && r.Method == http.MethodGet:
 		handleShareReviewList(w, r, deps)
 	case path == "reviews/shares" && r.Method == http.MethodPut:
@@ -95,11 +96,18 @@ func handleFileReviewList(w http.ResponseWriter, r *http.Request, deps Deps) {
 	grouped := make(map[string]*fileReviewTask)
 	order := make([]string, 0)
 	for _, child := range flat {
-		task := grouped[child.TaskID]
+		// 分组键包含归属用户：batchId 由客户端提供，若只按批次分组，恶意用户可
+		// 用自己的 batchId 把文件混进他人审核卡片（归属显示也会串）。
+		groupKey := fmt.Sprintf("%s\x00%d", child.TaskID, child.OwnerUserID)
+		task := grouped[groupKey]
 		if task == nil {
-			task = &fileReviewTask{ID: child.TaskID, OwnerName: child.OwnerName, UploadedAt: child.SubmittedAt}
-			grouped[child.TaskID] = task
-			order = append(order, child.TaskID)
+			task = &fileReviewTask{
+				ID:         fmt.Sprintf("%s#%d", child.TaskID, child.OwnerUserID),
+				OwnerName:  child.OwnerName,
+				UploadedAt: child.SubmittedAt,
+			}
+			grouped[groupKey] = task
+			order = append(order, groupKey)
 		}
 		task.Children = append(task.Children, child)
 		if child.SubmittedAt.Before(task.UploadedAt) {
@@ -139,7 +147,10 @@ func aggregateFileStatus(items []admin.FileReviewItem) string {
 			return "deleted"
 		case item.Blocked:
 			status = "blocked"
-		case item.TrashedAt != nil && status != "blocked":
+		case item.PurgedAt != nil && status != "blocked":
+			// 用户已彻底删除：资源仍在（管理员可见、可处置），但用户侧不可恢复。
+			status = "purged"
+		case item.TrashedAt != nil && status != "blocked" && status != "purged":
 			status = "trashed"
 		case item.Status == "pending" && status == "normal":
 			status = "pending"
@@ -220,6 +231,7 @@ func handleFileModeration(w http.ResponseWriter, r *http.Request, deps Deps, act
 		return
 	}
 	warnings := make([]string, 0)
+	failures := make([]map[string]any, 0)
 	seen := map[string]bool{}
 	for _, id := range req.ResourceIDs {
 		id = strings.TrimSpace(id)
@@ -229,24 +241,26 @@ func handleFileModeration(w http.ResponseWriter, r *http.Request, deps Deps, act
 		seen[id] = true
 		item, err := deps.AdminRepo.GetFileReviewItem(r.Context(), id)
 		if err != nil {
+			// 逐条返回失败而不是中断整批：避免"部分生效、前端只看到整体失败"。
+			failures = append(failures, map[string]any{"resourceId": id, "error": "读取审核项失败"})
 			continue
 		}
 		if item.Exists {
 			if _, err := deps.ResourceRepo.SetAdminDisposition(r.Context(), id, req.Delete, req.Blocked); err != nil {
-				writeBusinessError(w, http.StatusConflict, "文件处置失败，可能存在同名恢复冲突")
-				return
+				failures = append(failures, map[string]any{"resourceId": id, "name": item.Name, "error": "文件处置失败，可能存在同名恢复冲突"})
+				continue
 			}
 		} else if !req.Delete {
 			warnings = append(warnings, item.Name+"：文件已超过回收期限并永久删除")
 		}
 		if err := deps.AdminRepo.ReviewFile(r.Context(), item, req.Status, req.Reason, req.Delete, req.Blocked, actor.ID); err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "保存文件审核失败")
-			return
+			failures = append(failures, map[string]any{"resourceId": id, "name": item.Name, "error": "保存文件审核失败"})
+			continue
 		}
 		notifyFileReview(r, deps, item, req)
 	}
 	_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "file_review.submit", "resources", strings.Join(req.ResourceIDs, ","), map[string]any{"status": req.Status, "reason": req.Reason, "delete": req.Delete, "blocked": req.Blocked}, net.ParseIP(clientIP(r)))
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "warnings": warnings})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "warnings": warnings, "failures": failures})
 }
 
 func notifyFileReview(r *http.Request, deps Deps, item admin.FileReviewItem, req moderationRequest) {
@@ -275,23 +289,25 @@ func handleShareModeration(w http.ResponseWriter, r *http.Request, deps Deps, ac
 		}
 		return
 	}
+	failures := make([]map[string]any, 0)
 	for _, id := range req.ShareIDs {
 		item, err := deps.AdminRepo.GetShareReviewItem(r.Context(), id)
 		if err != nil {
+			failures = append(failures, map[string]any{"shareId": id, "error": "读取审核项失败"})
 			continue
 		}
 		if err := deps.AdminRepo.SetShareDisposition(r.Context(), id, req.Delete, req.Blocked); err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "保存分享处置失败")
-			return
+			failures = append(failures, map[string]any{"shareId": id, "error": "保存分享处置失败"})
+			continue
 		}
 		if err := deps.AdminRepo.ReviewShare(r.Context(), id, req.Status, req.Reason, req.Delete, req.Blocked, actor.ID); err != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "保存分享审核失败")
-			return
+			failures = append(failures, map[string]any{"shareId": id, "error": "保存分享审核失败"})
+			continue
 		}
 		notifyShareReview(r, deps, item, req)
 	}
 	_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "share_review.submit", "shares", fmt.Sprint(req.ShareIDs), map[string]any{"status": req.Status, "reason": req.Reason, "delete": req.Delete, "blocked": req.Blocked}, net.ParseIP(clientIP(r)))
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "failures": failures})
 }
 
 func notifyShareReview(r *http.Request, deps Deps, item admin.ShareReviewItem, req moderationRequest) {
@@ -336,7 +352,8 @@ func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 		return
 	}
 	if len(resources) == 1 {
-		serveOwnedFile(w, r, deps, resources[0])
+		// 管理员审核场景始终由服务器解密输出明文（与交付开关无关）。
+		serveOwnedFileDecrypted(w, r, deps, resources[0])
 		return
 	}
 	root := resource.Resource{ID: fmt.Sprintf("review-%d", time.Now().UnixNano()), Kind: resource.KindFolder, Name: "审核文件", CreatedAt: time.Now(), UpdatedAt: time.Now()}
@@ -346,7 +363,7 @@ func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 		entry := resource.TreeEntry{Resource: item, RelativePath: fmt.Sprintf("%s/%s/%s", archiveSegment(meta.OwnerName), archiveSegment(meta.TaskID), item.Name)}
 		tree = append(tree, entry)
 	}
-	path, size, err := deps.FileStore.BuildZip(r.Context(), tree)
+	path, size, err := buildZip(r.Context(), deps, tree)
 	if path != "" {
 		defer os.Remove(path) //nolint:errcheck
 	}
@@ -354,7 +371,7 @@ func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 		writeBusinessError(w, http.StatusInternalServerError, "打包审核文件失败")
 		return
 	}
-	serveDownload(w, r, path, size, "审核文件.zip", "application/zip")
+	serveLocalArtifact(w, r, path, size, "审核文件.zip", "application/zip")
 }
 
 func archiveSegment(value string) string {
@@ -380,36 +397,48 @@ func handleReviewTrashList(w http.ResponseWriter, r *http.Request, deps Deps) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "items": out})
 }
 
-func handleReviewTrashDelete(w http.ResponseWriter, r *http.Request, deps Deps, id string) {
+func handleReviewTrashDelete(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User, id string) {
 	item, err := deps.AdminRepo.GetFileReviewItem(r.Context(), id)
 	if err != nil || !item.Exists || item.TrashedAt == nil || !item.DeleteFile {
 		writeBusinessError(w, http.StatusNotFound, "审核回收站文件不存在")
 		return
 	}
-	deleted, err := deps.ResourceRepo.DeleteAdminTrashedFile(r.Context(), id)
-	if err != nil {
+	// 删除资源行并降对象引用（物理文件保留，由清理工具处理）。
+	if _, err := deps.ResourceRepo.DeleteAdminTrashedFile(r.Context(), id); err != nil {
+		if errors.Is(err, resource.ErrNotFound) {
+			writeBusinessError(w, http.StatusNotFound, "审核回收站文件不存在")
+			return
+		}
+		log.Printf("永久删除受限文件失败 id=%s：%v", id, err)
 		writeBusinessError(w, http.StatusInternalServerError, "永久删除失败")
 		return
 	}
-	if deleted.StorageKey != nil {
-		_ = deps.FileStore.Remove(r.Context(), *deleted.StorageKey)
-	}
+	// 这是对"受限文件"的最终处置（释放对象引用），属敏感操作，必须入库审计。
+	_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "file.review_trash.purge", "resource", id,
+		map[string]any{"name": item.Name, "ownerUserId": item.OwnerUserID, "ownerName": item.OwnerName, "sizeBytes": item.SizeBytes},
+		net.ParseIP(clientIP(r)))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-func handleReviewTrashEmpty(w http.ResponseWriter, r *http.Request, deps Deps) {
+func handleReviewTrashEmpty(w http.ResponseWriter, r *http.Request, deps Deps, actor user.User) {
 	items, err := deps.AdminRepo.ListFileReviews(r.Context())
 	if err != nil {
 		writeBusinessError(w, http.StatusInternalServerError, "读取审核回收站失败")
 		return
 	}
+	purged := 0
 	for _, item := range items {
 		if item.Exists && item.TrashedAt != nil && item.DeleteFile {
-			deleted, deleteErr := deps.ResourceRepo.DeleteAdminTrashedFile(r.Context(), item.ResourceID)
-			if deleteErr == nil && deleted.StorageKey != nil {
-				_ = deps.FileStore.Remove(r.Context(), *deleted.StorageKey)
+			if _, purgeErr := deps.ResourceRepo.DeleteAdminTrashedFile(r.Context(), item.ResourceID); purgeErr != nil {
+				log.Printf("清空审核回收站失败 id=%s：%v", item.ResourceID, purgeErr)
+				continue
 			}
+			purged++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	if purged > 0 {
+		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "file.review_trash.empty", "resource", "",
+			map[string]any{"purged": purged}, net.ParseIP(clientIP(r)))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "purged": purged})
 }

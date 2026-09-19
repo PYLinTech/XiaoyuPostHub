@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { fetchAdminOverview } from '@/api/endpoints';
 import {
   Button,
@@ -31,6 +31,7 @@ const initialData = {
   storageUsedBytes: 0,
   storageAvailableBytes: 0,
   storageTotalBytes: 0,
+  storageDiskAvailable: false,
   activeShareCount: 0,
   activeDirectCount: 0,
   shareDownloadCount: 0,
@@ -40,10 +41,13 @@ function Overview() {
   const [data, setData] = useState(initialData);
   const [loading, setLoading] = useState(true);
   const [updatedAt, setUpdatedAt] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
   const load = () => {
     setLoading(true);
     fetchAdminOverview()
       .then((res) => {
+        if (!mounted.current) return;
         setData(res.data.data);
         setUpdatedAt(
           new Date().toLocaleTimeString('zh-CN', {
@@ -51,16 +55,19 @@ function Overview() {
           })
         );
       })
-      .catch(() => Message.error(uiText('实时概览加载失败')))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        if (mounted.current) Message.error(uiText('实时概览加载失败'));
+      })
+      .finally(() => {
+        if (mounted.current) setLoading(false);
+      });
   };
   useEffect(load, []);
-  const storageVisibleCapacity =
-    data.storageUsedBytes + data.storageAvailableBytes;
-  const storagePercent = storageVisibleCapacity
+  const diskOk = data.storageDiskAvailable !== false;
+  const storagePercent = data.storageTotalBytes
     ? Math.min(
         100,
-        Math.round((data.storageUsedBytes / storageVisibleCapacity) * 1000) / 10
+        Math.round((data.storageUsedBytes / data.storageTotalBytes) * 1000) / 10
       )
     : 0;
   const stats = [
@@ -127,32 +134,47 @@ function Overview() {
                 {[
                   uiText('API 服务'),
                   uiText('数据库连接'),
-                  uiText('文件存储'),
-                ].map((name, index) => (
-                  <div className={styles['health-item']} key={name}>
-                    <div className={styles['health-name']}>
-                      <Text bold>{name}</Text>
-                      <Tag color="green">{uiText('正常')}</Tag>
-                    </div>
-                    {index === 2 ? (
-                      <div className={styles['storage-health']}>
-                        <Text type="secondary">
-                          {uiText('已用')}
-                          {formatBytes(data.storageUsedBytes)}
-                          {uiText('/ 可用')}{' '}
-                          {formatBytes(data.storageAvailableBytes)}
-                        </Text>
-                        <Progress
-                          percent={storagePercent}
-                          showText={false}
-                          status={storagePercent >= 90 ? 'error' : 'normal'}
-                        />
+                  uiText('宿主磁盘'),
+                ].map((name, index) => {
+                  const diskRow = index === 2;
+                  const diskDown = diskRow && !diskOk;
+                  return (
+                    <div className={styles['health-item']} key={name}>
+                      <div className={styles['health-name']}>
+                        <Text bold>{name}</Text>
+                        <Tag color={diskDown ? 'gray' : 'green'}>
+                          {diskDown ? uiText('不可用') : uiText('正常')}
+                        </Tag>
                       </div>
-                    ) : (
-                      <Text type="secondary">{uiText('响应正常')}</Text>
-                    )}
-                  </div>
-                ))}
+                      {diskRow ? (
+                        <div className={styles['storage-health']}>
+                          {diskDown ? (
+                            <Text type="secondary">
+                              {uiText('未能读取宿主磁盘信息')}
+                            </Text>
+                          ) : (
+                            <>
+                              <Text type="secondary">
+                                {uiText('已用')}
+                                {formatBytes(data.storageUsedBytes)}
+                                {uiText('/ 总量')}{' '}
+                                {formatBytes(data.storageTotalBytes)}
+                              </Text>
+                              <Progress
+                                percent={storagePercent}
+                                status={
+                                  storagePercent >= 90 ? 'error' : 'normal'
+                                }
+                              />
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <Text type="secondary">{uiText('响应正常')}</Text>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </Card>
           </Col>

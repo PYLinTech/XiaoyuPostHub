@@ -68,6 +68,38 @@ type Config struct {
 	// 建议显式配置，避免客户端伪造 X-Real-IP 绕过基于 IP 的登录限流。
 	TrustedProxyCIDRs []*net.IPNet
 
+	// EncryptionKeys 是 KEK（密钥加密密钥）列表，格式：
+	//   XPH_ENCRYPTION_KEYS=keyId:base64(32字节),keyId2:base64(32字节)
+	//
+	// 第一个条目用于加密新文件，其余条目用于解密历史数据（密钥轮换）。
+	// 留空表示未配置：加密开关不可启用（上传会明确失败），明文功能不受影响。
+	//
+	// 安全约束（务必写入部署文档）：KEK 丢失等于已加密文件永久不可恢复；
+	// 该值属于敏感配置，不写入数据库、不进入日志。
+	EncryptionKeys string
+
+	// Pan123ClientID / Pan123ClientSecret 是 123 云盘开放平台的应用凭据。
+	//
+	// 仅在启用 123 云盘存储后端时需要：客户端 ID 与密钥以站内信下发，属于敏感
+	// 配置（不入库、不写日志）。存储根目录文件夹 ID 等非敏感参数配置在
+	// storage_backends.settings 中。
+	Pan123ClientID     string
+	Pan123ClientSecret string
+
+	// S3AccessKeyID / S3SecretAccessKey 是 S3 兼容对象存储的访问凭据。
+	//
+	// 仅在启用对象存储后端时需要，属于敏感配置（不入库、不写日志）。Endpoint /
+	// Bucket / Region / 前缀等非敏感参数配置在 storage_backends.settings 中。
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+
+	// HostDiskPath 是管理端「实时概览」统计的宿主磁盘路径（默认 "/"）。
+	//
+	// 概览展示的是"这台机器"的磁盘，因此不跟随管理端可改的存储路径，也不受远端
+	// 存储后端影响（远端容量不属于宿主磁盘口径）；做成部署级配置，便于数据盘挂在
+	// 其它路径时指过去。读取失败只会让该卡片显示"不可用"，不影响概览其它数据。
+	HostDiskPath string
+
 	// EnvFile 是实际加载的 .env 路径，可能为空（表示完全依赖环境变量）。
 	EnvFile string
 }
@@ -91,12 +123,21 @@ func Load(envFile string) (*Config, error) {
 		SuperAdminUsername:     pickValue("SUPER_ADMIN_USERNAME", fileKeys),
 		SuperAdminPasswordHash: pickValue("SUPER_ADMIN_PASSWORD_HASH", fileKeys),
 		StaticDir:              pickValue("STATIC_DIR", fileKeys),
+		EncryptionKeys:         pickValue("XPH_ENCRYPTION_KEYS", fileKeys),
+		Pan123ClientID:         pickValue("XPH_PAN123_CLIENT_ID", fileKeys),
+		Pan123ClientSecret:     pickValue("XPH_PAN123_CLIENT_SECRET", fileKeys),
+		S3AccessKeyID:          pickValue("XPH_S3_ACCESS_KEY_ID", fileKeys),
+		S3SecretAccessKey:      pickValue("XPH_S3_SECRET_ACCESS_KEY", fileKeys),
+		HostDiskPath:           pickValue("XPH_HOST_DISK_PATH", fileKeys),
 		HTTPSEnabled:           true,
 		HSTSEnabled:            true,
 		EnvFile:                envFile,
 	}
 	if strings.TrimSpace(c.StaticDir) == "" {
 		c.StaticDir = "/app/web"
+	}
+	if strings.TrimSpace(c.HostDiskPath) == "" {
+		c.HostDiskPath = "/"
 	}
 	if raw, ok := pickOptionalValue("HTTPS_ENABLED", fileKeys); ok {
 		switch strings.ToLower(strings.TrimSpace(raw)) {

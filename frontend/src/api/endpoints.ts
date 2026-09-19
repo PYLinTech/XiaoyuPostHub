@@ -137,13 +137,6 @@ export const updateDirectLink = (
   payload: Record<string, unknown>
 ) => axios.put(`/api/direct-links/manage/${id}`, payload);
 
-/** 公开分享页：无需登录即可读取分享元数据与内容。 */
-export const fetchShareByToken = (token: string) =>
-  axios.get(`/api/shares/${encodeURIComponent(token)}`);
-
-export const fetchSharePreview = (token: string, config?: AxiosRequestConfig) =>
-  axios.get(`/api/shares/${encodeURIComponent(token)}/preview`, config);
-
 export const fetchPickup = (code: string) =>
   axios.get(`/api/pickups/${encodeURIComponent(code)}`);
 
@@ -193,6 +186,11 @@ export const deleteQuotaProfile = (id: number) =>
 export const setGroupQuota = (id: number, payload: Record<string, unknown>) =>
   axios.put(`/api/admin/access/groups/${id}/quota`, payload);
 
+// 绑定用户组的上传存储后端；null 表示解绑（回退全局默认）。
+// 后端在绑定变化时自动创建该组存量对象的迁移任务。
+export const setGroupStorage = (id: number, storageBackendId: number | null) =>
+  axios.put(`/api/admin/access/groups/${id}/storage`, { storageBackendId });
+
 export const setGroupPermissions = (
   id: number,
   payload: Record<string, unknown>
@@ -239,6 +237,29 @@ export const fetchAdminSystemConfig = () => axios.get('/api/admin/system-config'
 export const updateAdminSystemConfig = (payload: Record<string, unknown>) =>
   axios.put('/api/admin/system-config', payload);
 
+/** 存储后端列表（管理员）：含启用/默认/就绪状态与已用容量。 */
+export const fetchAdminStorageBackends = () =>
+  axios.get('/api/admin/storage-backends');
+
+/** 新增或更新存储后端（管理员）；保存后服务端会即时重新加载。 */
+export const saveAdminStorageBackend = (payload: Record<string, unknown>) =>
+  axios.put('/api/admin/storage-backends', payload);
+
+/** 存储维护任务列表（扫描与执行两类，含阶段与进度）。 */
+export const fetchAdminStorageTasks = () =>
+  axios.get('/api/admin/storage-tasks');
+
+/** 某个任务的对象清单（扫描结果 / 失败项排查）。 */
+export const fetchAdminStorageTaskItems = (id: number) =>
+  axios.get(`/api/admin/storage-tasks/${id}/items`);
+
+/**
+ * 创建存储维护任务。
+ * action=scan 只产出清单（不改动数据）；action=apply 按扫描结果执行；action=run 直接执行（迁移）。
+ */
+export const createAdminStorageTask = (payload: Record<string, unknown>) =>
+  axios.post('/api/admin/storage-tasks', payload);
+
 export const testAdminUpload = (
   sizeBytes: number,
   body: Blob,
@@ -261,3 +282,22 @@ export const saveCustomHomepage = (payload: Record<string, unknown>) =>
   axios.post('/api/admin/homepage', payload);
 
 export const deleteCustomHomepage = () => axios.delete('/api/admin/homepage');
+
+// 管理端：分享与取件码维护（改期含永久、启停、删除、一键释放失效取件码）。
+export const fetchAdminShares = (params?: Record<string, unknown>) =>
+  axios.get('/api/admin/shares', { params });
+
+export const updateAdminShare = (id: number, payload: Record<string, unknown>) =>
+  axios.put(`/api/admin/shares/${id}`, payload);
+
+export const deleteAdminShare = (id: number) =>
+  axios.delete(`/api/admin/shares/${id}`);
+
+export const releaseAdminPickupCodes = () =>
+  axios.post('/api/admin/shares/release-codes');
+
+// 管理端：在途上传任务（占用临时盘，可查看并直接取消）。
+export const fetchAdminUploads = () => axios.get('/api/admin/uploads');
+
+export const cancelAdminUpload = (id: string) =>
+  axios.delete(`/api/admin/uploads/${encodeURIComponent(id)}`);

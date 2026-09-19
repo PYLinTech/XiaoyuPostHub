@@ -102,29 +102,27 @@ class IncrementalSHA256 {
   }
 }
 
-export async function fileSHA256(
-  file: File,
+/**
+ * 分块计算 Blob 的 SHA-256：按 4MiB 切片流式更新，避免把大文件整体读入内存。
+ * 上传前计算（File 参数）与下载后校验（Blob 参数）共用同一实现——File 本就是
+ * Blob 的子类。
+ */
+export async function blobSHA256(
+  blob: Blob,
   onProgress?: (progress: number) => void
 ) {
   const hash = new IncrementalSHA256();
   const readSize = 4 * 1024 * 1024;
-  if (file.size === 0) onProgress?.(1);
-  for (let offset = 0; offset < file.size; offset += readSize) {
+  if (blob.size === 0) onProgress?.(1);
+  for (let offset = 0; offset < blob.size; offset += readSize) {
     const data = new Uint8Array(
-      await file.slice(offset, offset + readSize).arrayBuffer()
+      await blob.slice(offset, offset + readSize).arrayBuffer()
     );
     hash.update(data);
-    onProgress?.(Math.min(1, (offset + data.length) / file.size));
+    onProgress?.(Math.min(1, (offset + data.length) / blob.size));
   }
   return hash.digest();
 }
 
-export async function blobSHA256(blob: Blob) {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    await blob.arrayBuffer()
-  );
-  return Array.from(new Uint8Array(digest))
-    .map((value) => value.toString(16).padStart(2, '0'))
-    .join('');
-}
+/** 上传前对 File 计算 SHA-256（与 blobSHA256 同一实现）。 */
+export const fileSHA256 = blobSHA256;

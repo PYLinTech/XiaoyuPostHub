@@ -73,8 +73,10 @@ export default function LinkConfigModal({
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
   const [generatedPassword, setGeneratedPassword] = useState('');
+  const [rotatedCode, setRotatedCode] = useState('');
   useEffect(() => {
     if (!visible || !item) return;
+    setRotatedCode('');
     setExpiry('keep');
     setDownloadLimit(item.downloadLimit);
     setTrafficGB(
@@ -129,6 +131,10 @@ export default function LinkConfigModal({
       onSaved();
       if (response.data.generatedPassword) {
         setGeneratedPassword(response.data.generatedPassword);
+      } else if (response.data.pickupCodeRotated && response.data.pickupCode) {
+        // 取件码被其它分享占用时后端会换发新码：必须明确展示给用户，否则用户
+        // 会继续用旧码（已失效）。
+        setRotatedCode(response.data.pickupCode);
       } else {
         Message.success(uiText('配置已保存，原链接保持不变'));
         onClose();
@@ -145,15 +151,21 @@ export default function LinkConfigModal({
       uiText(copied ? '密码已复制' : '复制失败')
     );
   };
+  const copyRotatedCode = async () => {
+    const copied = await writeClipboard(rotatedCode);
+    Message[copied ? 'success' : 'error'](
+      uiText(copied ? '已复制' : '复制失败')
+    );
+  };
   return (
     <Modal
       visible={visible}
       title={mode === 'share' ? uiText('配置分享') : uiText('配置直链')}
       onCancel={onClose}
-      onOk={generatedPassword ? onClose : save}
-      okText={generatedPassword ? uiText('完成') : uiText('保存配置')}
+      onOk={generatedPassword || rotatedCode ? onClose : save}
+      okText={generatedPassword || rotatedCode ? uiText('完成') : uiText('保存配置')}
       cancelText={uiText('取消')}
-      hideCancel={Boolean(generatedPassword)}
+      hideCancel={Boolean(generatedPassword || rotatedCode)}
       confirmLoading={loading}
       maskClosable={false}
       unmountOnExit
@@ -186,6 +198,35 @@ export default function LinkConfigModal({
               {generatedPassword}
             </code>
             <Button icon={<IconCopy />} onClick={copyPassword}>
+              {uiText('复制')}
+            </Button>
+          </div>
+        </div>
+      ) : rotatedCode ? (
+        <div className={styles['result-box']}>
+          <Typography.Title
+            heading={6}
+            style={{
+              marginTop: 0,
+            }}
+          >
+            <IconCheckCircle
+              style={{
+                color: 'rgb(var(--success-6))',
+                marginRight: 8,
+              }}
+            />
+            {uiText('取件码已更换')}
+          </Typography.Title>
+          <Typography.Text type="secondary">
+            {uiText('原取件码已被其它分享占用，已为你生成新的取件码，请重新告知取件人。')}
+          </Typography.Text>
+          <div className={styles['result-line']}>
+            <code>
+              {uiText('取件码：')}
+              {rotatedCode}
+            </code>
+            <Button icon={<IconCopy />} onClick={copyRotatedCode}>
               {uiText('复制')}
             </Button>
           </div>

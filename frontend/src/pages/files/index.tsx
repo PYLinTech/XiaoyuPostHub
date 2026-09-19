@@ -8,7 +8,6 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import axios from 'axios';
 import {
   Breadcrumb,
   Button,
@@ -43,6 +42,8 @@ import {
 } from '../storage/shared';
 import styles from '../storage/style/index.module.less';
 import uiText from '@/utils/uiText';
+import { clientKeyHeaders, decodeDelivery } from '@/utils/fileCrypto';
+import { downloadBlob } from '@/utils/download';
 import { GlobalContext } from '@/context';
 import { useUploadManager } from '@/components/UploadManager';
 interface PathItem {
@@ -60,30 +61,7 @@ function downloadName(contentDisposition: string, fallback: string) {
   }
   return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1] || fallback;
 }
-function saveBlob(blob: Blob, name: string) {
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = objectUrl;
-  anchor.download = name;
-  anchor.style.display = 'none';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-}
-async function responseErrorMessage(error: unknown, fallback: string) {
-  if (!axios.isAxiosError(error)) return fallback;
-  const data = error.response?.data;
-  if (data instanceof Blob) {
-    try {
-      const parsed = JSON.parse(await data.text());
-      return parsed?.msg || fallback;
-    } catch {
-      return fallback;
-    }
-  }
-  return data?.msg || fallback;
-}
+
 export default function FilesPage() {
   const { userInfo } = useContext(GlobalContext);
   const { addFiles } = useUploadManager();
@@ -92,6 +70,7 @@ export default function FilesPage() {
   const canUpload = permissions.includes('upload');
   const [items, setItems] = useState<ResourceItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const loadSequence = useRef(0);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [path, setPath] = useState<PathItem[]>([
     {
@@ -112,6 +91,8 @@ export default function FilesPage() {
   const parentId = path[path.length - 1]?.id;
   const uploadPath = `/${path.slice(1).map((item) => item.name).join('/')}`;
   const load = useCallback(() => {
+    // 竞态守卫：快速切换目录时，旧请求晚于新请求返回不应覆盖最新列表。
+    const sequence = (loadSequence.current += 1);
     setLoading(true);
     return fetchResourceList({
         params: parentId
@@ -120,11 +101,17 @@ export default function FilesPage() {
             }
           : {},
       })
-      .then((response) => setItems(response.data.items || []))
+      .then((response) => {
+        if (loadSequence.current === sequence) {
+          setItems(response.data.items || []);
+        }
+      })
       .catch((error) =>
         Message.error(apiErrorMessage(error, uiText('文件列表加载失败')))
       )
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (loadSequence.current === sequence) setLoading(false);
+      });
   }, [parentId]);
   useEffect(() => {
     setSelectedKeys([]);
@@ -146,13 +133,12 @@ export default function FilesPage() {
   );
   const openResource = (item: ResourceItem) => {
     if (item.kind === 'folder') {
-      setPath((current) => [
-        ...current,
-        {
-          id: item.id,
-          name: item.name,
-        },
-      ]);
+      setPath((current) => {
+        // 名称按钮的 click 与行的 dblclick 会先后触发，且双击可能重复推进：
+        // 当前目录已在路径末尾时直接忽略。
+        if (current[current.length - 1]?.id === item.id) return current;
+        return [...current, { id: item.id, name: item.name }];
+      });
     } else {
       if (!can('preview')) {
         Message.warning(uiText('当前用户组未授予预览权限'));
@@ -183,24 +169,32 @@ export default function FilesPage() {
     }
     setDownloading(true);
     try {
+      // 现场生成临时密钥对：加密文件在"服务器实时解密关"时以密文下发，
+      // 由浏览器解密后再保存。
+      const { pair, headers: keyHeaders } = await clientKeyHeaders();
       const response = await downloadResources(
         {
           resourceIds: resources.map((item) => item.id),
         },
         {
-          responseType: 'blob',
+          responseType: 'arraybuffer',
+          headers: keyHeaders,
         }
       );
       const fallback =
         resources.length === 1 && resources[0].kind === 'file'
           ? resources[0].name
           : uiText('下载文件.zip');
-      saveBlob(
-        response.data,
+      // 解码交付内容：解密 + 接收端哈希校验（服务端不做交付前校验）。
+      const blob = await decodeDelivery(pair, response.headers, response.data, {
+        verifySHA256: true,
+      });
+      downloadBlob(
+        blob,
         downloadName(response.headers['content-disposition'] || '', fallback)
       );
     } catch (error) {
-      Message.error(await responseErrorMessage(error, uiText('下载失败')));
+      Message.error(apiErrorMessage(error, uiText('下载失败')));
     } finally {
       setDownloading(false);
     }

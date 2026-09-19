@@ -338,7 +338,8 @@ export function MessageCenter({
               onClick={handleContentAction}
               dangerouslySetInnerHTML={{
                 __html:
-                  activeMessage.content || '<p>暂无消息正文</p>',
+                  activeMessage.content ||
+                  `<p>${uiText('暂无消息正文')}</p>`,
               }}
             />
           </article>

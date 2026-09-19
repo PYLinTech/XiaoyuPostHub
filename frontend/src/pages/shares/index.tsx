@@ -34,6 +34,7 @@ interface ShareItem {
   url?: string;
   shareType?: 'link' | 'pickup';
   pickupCode?: string;
+  pickupCodeLive?: boolean;
   password?: string;
   resource: ResourceItem;
   expiresAt?: string;
@@ -72,21 +73,55 @@ export default function SharesPage() {
     if (!selectedKeys.length) return;
     setOperating(true);
     try {
-      await batchManageShares({
+      const response = await batchManageShares({
         ids: selectedKeys,
         action,
       });
       setSelectedKeys([]);
-      Message.success(
-        action === 'delete'
-          ? uiText('分享已删除')
-          : action === 'enable'
-          ? uiText('分享已启用')
-          : uiText('分享已禁用')
-      );
+      const rotated = (response.data?.rotatedPickupCodes || []) as {
+        pickupCode: string;
+      }[];
+      if (action === 'enable' && rotated.length) {
+        // 重新启用后原取件码若已被其它分享占用会换发新码：必须提示，否则用户
+        // 会继续使用已失效的旧码。
+        Message.warning(
+          `${uiText('部分取件码已更换')}：${rotated
+            .map((item) => item.pickupCode)
+            .join('、')}`
+        );
+      } else {
+        Message.success(
+          action === 'delete'
+            ? uiText('分享已删除')
+            : action === 'enable'
+            ? uiText('分享已启用')
+            : uiText('分享已禁用')
+        );
+      }
       await load();
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('批量操作失败')));
+    } finally {
+      setOperating(false);
+    }
+  };
+  // 释放已失效（停用/过期/删除）取件码的占位：永久取件码较多时可腾出码空间。
+  const releaseCodes = async () => {
+    setOperating(true);
+    try {
+      const response = await batchManageShares({
+        ids: [],
+        action: 'release_codes',
+      });
+      const released = Number(response.data?.released || 0);
+      if (released > 0) {
+        Message.success(`${uiText('已释放失效取件码')}：${released}`);
+      } else {
+        Message.info(uiText('没有需要清理的失效取件码'));
+      }
+      await load();
+    } catch (error) {
+      Message.error(apiErrorMessage(error, uiText('清理失效取件码失败')));
     } finally {
       setOperating(false);
     }
@@ -206,7 +241,28 @@ export default function SharesPage() {
       className: styles['mobile-hidden'],
       render: (_, item: ShareItem) => {
         if (item.shareType === 'pickup' && item.pickupCode) {
-          return <div className={styles['link-cell']}><code>{uiText('取件码')}：{item.pickupCode}</code><Button size="mini" type="text" icon={<IconCopy />} onClick={() => copyValue(item.pickupCode as string)} /></div>;
+          return (
+            <div className={styles['link-cell']}>
+              <code>
+                {uiText('取件码')}：{item.pickupCode}
+              </code>
+              {item.pickupCodeLive === false && (
+                <Tooltip
+                  content={uiText(
+                    '该取件码已失效并可被重新分配；重新启用该分享时会复用或换发新码。'
+                  )}
+                >
+                  <Tag color="gray">{uiText('码已失效')}</Tag>
+                </Tooltip>
+              )}
+              <Button
+                size="mini"
+                type="text"
+                icon={<IconCopy />}
+                onClick={() => copyValue(item.pickupCode as string)}
+              />
+            </div>
+          );
         }
         if (!item.url)
           return (
@@ -333,6 +389,9 @@ export default function SharesPage() {
             {uiText('查看你已经生成的文件和文件夹分享。')}
           </Typography.Text>
         </div>
+        <Button icon={<IconDelete />} loading={operating} onClick={releaseCodes}>
+          {uiText('清理失效取件码')}
+        </Button>
       </div>
       <Card className={styles['list-card']}>
         <div className={styles.toolbar}>

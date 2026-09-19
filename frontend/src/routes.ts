@@ -32,12 +32,20 @@ export const adminRoutes: IRoute[] = [
       'manage_permissions',
       'manage_quotas',
       'manage_invitations',
+      // 用户组存储绑定属于系统管理权限：仅持 manage_system 的管理员也需要入口，
+      // 与后端 access 门禁的放行条件保持一致。
+      'manage_system',
     ],
   },
   {
     name: 'menu.admin.audit',
     key: 'admin/audit',
     adminPermissions: ['review_files', 'review_shares', 'read_audit_log'],
+  },
+  {
+    name: 'menu.admin.storage',
+    key: 'admin/storage',
+    adminPermissions: ['manage_system'],
   },
   {
     name: 'menu.admin.system',
