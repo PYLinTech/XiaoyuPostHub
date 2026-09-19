@@ -23,7 +23,10 @@ CONTAINER_NAME="XiaoyuPostHub"
 IMAGE_DEFAULT="pylintech/xiaoyuposthub:latest"
 PORT_DEFAULT="8080"
 NETWORK_DEFAULT="xiaoyuposthub-network"
-MIGRATION_POSTGRES_IMAGE="${XPH_MIGRATION_POSTGRES_IMAGE:-postgres:18-alpine}"
+MIGRATION_POSTGRES_IMAGE_DEFAULT="postgres:18-alpine"
+# MIGRATION_POSTGRES_IMAGE 由 resolve_migration_postgres_image 在安装时决定：
+# 优先复用本机已有的 postgres 18.x 镜像，扫不到才回落到默认镜像。
+MIGRATION_POSTGRES_IMAGE=""
 
 INSTALL_DIR="${XIAOYUPOSTHUB_HOME:-/opt/xiaoyuposthub}"
 COMPOSE_FILE="${INSTALL_DIR}/compose.yaml"
@@ -66,6 +69,7 @@ usage() {
   XIAOYUPOSTHUB_IMAGE              镜像，默认 ${IMAGE_DEFAULT}
   XIAOYUPOSTHUB_NETWORK            Docker 网络；已存在时直接加入，不存在时创建
   XIAOYUPOSTHUB_NETWORK_EXTERNAL   true 使用已有网络，false 由 Compose 创建
+  XPH_MIGRATION_POSTGRES_IMAGE     数据库迁移客户端镜像；默认扫描本机 postgres 18.x 镜像复用
 
 默认值：
   访问端口：${PORT_DEFAULT}
@@ -107,18 +111,20 @@ extract_migration_assistant() {
 
     temp_dir="$(mktemp -d)"
     extracted_file="${temp_dir}/migration-assistant.sh"
-    if ! source_container="$(docker create --entrypoint /bin/true "${image}")"; then
+    # 应用镜像声明了 VOLUME /data，docker create 会顺带生成一个随机命名的匿名卷；
+    # 用 tmpfs 覆盖该路径可直接避免产生（rm -fv 只是兜底）。
+    if ! source_container="$(docker create --tmpfs /data --entrypoint /bin/true "${image}")"; then
         rmdir "${temp_dir}"
         return 1
     fi
     if ! docker cp "${source_container}:/app/migration-assistant.sh" "${extracted_file}" \
         || [[ ! -s "${extracted_file}" ]]; then
-        docker rm -f "${source_container}" >/dev/null 2>&1 || true
+        docker rm -fv "${source_container}" >/dev/null 2>&1 || true
         rm -f "${extracted_file}"
         rmdir "${temp_dir}"
         return 1
     fi
-    docker rm -f "${source_container}" >/dev/null
+    docker rm -fv "${source_container}" >/dev/null
     chmod 700 "${extracted_file}"
     mv "${extracted_file}" "${MIGRATION_ASSISTANT_FILE}"
     rmdir "${temp_dir}"
@@ -344,6 +350,21 @@ remove_conflicting_container() {
 
     warn "发现同名旧容器，将重新创建"
     docker rm -f "${CONTAINER_NAME}" >/dev/null
+}
+
+# cleanup_anonymous_volumes 清理无主的匿名卷：临时容器会因镜像声明的 VOLUME
+# （应用镜像 /data、postgres 镜像 /var/lib/postgresql）生成随机命名的匿名卷，
+# 容器被强删或安装中断时这些卷会残留。这里只删「匿名且未被任何容器使用」的卷，
+# 具名卷（如 xiaoyuposthub_data）不会被删除。
+cleanup_anonymous_volumes() {
+    local name="" removed=0
+    while IFS= read -r name; do
+        [[ -n "${name}" ]] || continue
+        docker volume rm "${name}" >/dev/null 2>&1 || continue
+        info "清理无主匿名卷：${name}"
+        removed=$((removed + 1))
+    done < <(docker volume ls -q -f dangling=true -f label=com.docker.volume.anonymous 2>/dev/null || true)
+    [[ ${removed} -gt 0 ]] || info "无主匿名卷：无需清理"
 }
 
 read_env_value() {
@@ -735,6 +756,30 @@ current_port() {
     printf "%s" "${port:-${PORT_DEFAULT}}"
 }
 
+# resolve_migration_postgres_image 选择数据库迁移客户端（psql）镜像：
+# 显式指定 XPH_MIGRATION_POSTGRES_IMAGE 时以它为准；否则扫描本机已有的
+# postgres 18.x 镜像直接复用（命中即无需联网拉取），扫不到才回落到默认镜像。
+resolve_migration_postgres_image() {
+    local explicit="${XPH_MIGRATION_POSTGRES_IMAGE:-}"
+    local local_image=""
+
+    if [[ -n "${explicit}" ]]; then
+        printf '%s' "${explicit}"
+        return 0
+    fi
+
+    local_image="$(docker image ls --format '{{.Repository}}:{{.Tag}}' \
+        | grep -E '^([^/]+/)*postgres:18(\.[0-9]+)*(-[A-Za-z0-9._-]+)?$' \
+        | grep -Eiv 'beta|rc' \
+        | sort | tail -n 1 || true)"
+    if [[ -n "${local_image}" ]]; then
+        printf '%s' "${local_image}"
+        return 0
+    fi
+
+    printf '%s' "${MIGRATION_POSTGRES_IMAGE_DEFAULT}"
+}
+
 install_or_update() {
     local image=""
     local network=""
@@ -749,7 +794,12 @@ install_or_update() {
     write_env_value XIAOYUPOSTHUB_IMAGE "${image}"
     run_step "拉取镜像 ${image}" docker pull "${image}"
     run_step "从目标镜像提取数据库迁移助手" extract_migration_assistant "${image}"
-    run_step "拉取数据库迁移客户端 ${MIGRATION_POSTGRES_IMAGE}" docker pull "${MIGRATION_POSTGRES_IMAGE}"
+    MIGRATION_POSTGRES_IMAGE="$(resolve_migration_postgres_image)"
+    if docker image inspect "${MIGRATION_POSTGRES_IMAGE}" >/dev/null 2>&1; then
+        info "复用本机数据库迁移客户端镜像：${MIGRATION_POSTGRES_IMAGE}"
+    else
+        run_step "拉取数据库迁移客户端 ${MIGRATION_POSTGRES_IMAGE}" docker pull "${MIGRATION_POSTGRES_IMAGE}"
+    fi
 
     ensure_network
     prepare_selected_network
@@ -777,6 +827,7 @@ install_or_update() {
 
     run_step "检查 Docker Compose 配置" compose config --quiet
     run_step "更新并启动服务" compose up -d --force-recreate --remove-orphans
+    cleanup_anonymous_volumes
     print_install_summary "${image}"
 }
 

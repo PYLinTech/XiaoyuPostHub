@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
@@ -22,8 +21,6 @@ import (
 type adminSystemConfigRequest struct {
 	SiteName                     string `json:"siteName"`
 	StoragePath                  string `json:"storagePath"`
-	FolderPackMode               string `json:"folderPackMode"`
-	ShareDeliveryMode            string `json:"shareDeliveryMode"`
 	InvitationCodeLength         int16  `json:"invitationCodeLength"`
 	InvitationCodeCaseSensitive  bool   `json:"invitationCodeCaseSensitive"`
 	InvitationCodeIncludeLetters bool   `json:"invitationCodeIncludeLetters"`
@@ -45,9 +42,10 @@ type adminSystemConfigRequest struct {
 	UploadUserTaskConcurrency    int16  `json:"uploadUserTaskConcurrency"`
 	TrashRetentionDays           int16  `json:"trashRetentionDays"`
 	EncryptNewFiles              bool   `json:"encryptNewFiles"`
-	ProxyRealtimeDecrypt         bool   `json:"proxyRealtimeDecrypt"`
 	ShareRetrievalMode           string `json:"shareRetrievalMode"`
 	StorageChunkSizeBytes        int32  `json:"storageChunkSizeBytes"`
+	// 302 取数不可用时是否自动降级本机中转（默认开启）。
+	RedirectFallback bool `json:"redirectFallback"`
 	// 允许创建/修改"永久有效"的取件码分享（管理端开关）。
 	PickupAllowPermanent bool `json:"pickupAllowPermanent"`
 	// 邀请码有效期（天，0 = 永久）。
@@ -100,14 +98,16 @@ type adminUserDisabledRequest struct {
 }
 
 type adminQuotaRequest struct {
-	Name                  string `json:"name"`
-	Description           string `json:"description"`
-	StorageBytesLimit     *int64 `json:"storageBytesLimit"`
-	SingleFileBytesLimit  *int64 `json:"singleFileBytesLimit"`
-	DailyUploadBytesLimit *int64 `json:"dailyUploadBytesLimit"`
-	DailyUploadCountLimit *int64 `json:"dailyUploadCountLimit"`
-	ActiveShareCountLimit *int64 `json:"activeShareCountLimit"`
-	ActiveDirectLinkLimit *int64 `json:"activeDirectLinkLimit"`
+	Name                    string `json:"name"`
+	Description             string `json:"description"`
+	StorageBytesLimit       *int64 `json:"storageBytesLimit"`
+	SingleFileBytesLimit    *int64 `json:"singleFileBytesLimit"`
+	DailyUploadBytesLimit   *int64 `json:"dailyUploadBytesLimit"`
+	DailyUploadCountLimit   *int64 `json:"dailyUploadCountLimit"`
+	DailyDownloadBytesLimit *int64 `json:"dailyDownloadBytesLimit"`
+	DailyDownloadCountLimit *int64 `json:"dailyDownloadCountLimit"`
+	ActiveShareCountLimit   *int64 `json:"activeShareCountLimit"`
+	ActiveDirectLinkLimit   *int64 `json:"activeDirectLinkLimit"`
 }
 
 type adminGroupPermissionsRequest struct {
@@ -313,7 +313,8 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 		}
 		item, err := deps.QuotaRepo.CreateQuotaProfile(r.Context(), strings.TrimSpace(strings.ToLower(req.Name)), strings.TrimSpace(req.Description),
 			req.StorageBytesLimit, req.SingleFileBytesLimit, req.DailyUploadBytesLimit,
-			req.DailyUploadCountLimit, req.ActiveShareCountLimit, req.ActiveDirectLinkLimit)
+			req.DailyUploadCountLimit, req.DailyDownloadBytesLimit, req.DailyDownloadCountLimit,
+			req.ActiveShareCountLimit, req.ActiveDirectLinkLimit)
 		if err != nil {
 			writeBusinessError(w, http.StatusBadRequest, "配额方案名称重复或格式无效")
 			return
@@ -339,7 +340,8 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 			}
 			if err := deps.QuotaRepo.UpdateQuotaProfile(r.Context(), id, strings.TrimSpace(req.Description),
 				req.StorageBytesLimit, req.SingleFileBytesLimit, req.DailyUploadBytesLimit,
-				req.DailyUploadCountLimit, req.ActiveShareCountLimit, req.ActiveDirectLinkLimit); err != nil {
+				req.DailyUploadCountLimit, req.DailyDownloadBytesLimit, req.DailyDownloadCountLimit,
+				req.ActiveShareCountLimit, req.ActiveDirectLinkLimit); err != nil {
 				writeBusinessError(w, http.StatusBadRequest, "更新配额方案失败")
 				return
 			}
@@ -532,7 +534,8 @@ func decodeQuotaRequest(w http.ResponseWriter, r *http.Request, req *adminQuotaR
 		}
 	}
 	limits := []*int64{req.StorageBytesLimit, req.SingleFileBytesLimit, req.DailyUploadBytesLimit,
-		req.DailyUploadCountLimit, req.ActiveShareCountLimit, req.ActiveDirectLinkLimit}
+		req.DailyUploadCountLimit, req.DailyDownloadBytesLimit, req.DailyDownloadCountLimit,
+		req.ActiveShareCountLimit, req.ActiveDirectLinkLimit}
 	for _, limit := range limits {
 		if limit != nil && *limit < 0 {
 			writeBusinessError(w, http.StatusBadRequest, "配额不能为负数")
@@ -612,11 +615,6 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 				uploadSessionIDs = ids
 			}
 		}
-		// 临时 ZIP 制品路径必须在删除前收集（任务行级联删除后无法再定位）。
-		artifactPaths, artifactErr := deps.AdminRepo.CollectUserArtifactPaths(r.Context(), userID)
-		if artifactErr != nil {
-			log.Printf("收集待删除用户 %d 的临时制品失败: %v", userID, artifactErr)
-		}
 		username, blobIDs, err := deps.AdminRepo.DeleteUser(r.Context(), userID, actor.Username)
 		if errors.Is(err, admin.ErrUserNotFound) {
 			writeBusinessError(w, http.StatusNotFound, err.Error())
@@ -639,11 +637,6 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 				if err := deps.FileStore.RemoveUploadSession(r.Context(), sessionID); err != nil {
 					log.Printf("清理已删除用户 %d 的上传分片失败 id=%s: %v", userID, sessionID, err)
 				}
-			}
-		}
-		for _, artifactPath := range artifactPaths {
-			if err := os.Remove(artifactPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				log.Printf("清理已删除用户 %d 的临时制品失败 path=%s: %v", userID, artifactPath, err)
 			}
 		}
 		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user.delete", "user", username, map[string]any{}, net.ParseIP(clientIP(r)))
@@ -670,7 +663,8 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request, deps Deps, actor u
 			return
 		}
 		username, err := deps.AdminRepo.SetUserGroups(r.Context(), userID, req.GroupIDs)
-		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserWithoutGroup) {
+		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserWithoutGroup) ||
+			errors.Is(err, admin.ErrGroupGuestNotAssignable) {
 			writeBusinessError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -765,7 +759,8 @@ func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, ac
 			return
 		}
 		name, err := deps.AdminRepo.SetUserGroupMembers(r.Context(), groupID, req.UserIDs, user.EnvSuperAdminName())
-		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserNotFound) || errors.Is(err, admin.ErrUserWithoutGroup) {
+		if errors.Is(err, admin.ErrGroupNotFound) || errors.Is(err, admin.ErrUserNotFound) ||
+			errors.Is(err, admin.ErrUserWithoutGroup) || errors.Is(err, admin.ErrGroupGuestNotAssignable) {
 			writeBusinessError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -1108,7 +1103,6 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 	}
 	settings, err := deps.SystemSettings.UpdateAll(r.Context(), systemsetting.Config{
 		SiteName: req.SiteName, StoragePath: req.StoragePath,
-		FolderPackMode: req.FolderPackMode, ShareDeliveryMode: req.ShareDeliveryMode,
 		InvitationLength: req.InvitationCodeLength, InvitationCaseSensitive: req.InvitationCodeCaseSensitive,
 		InvitationIncludeLetters: req.InvitationCodeIncludeLetters, InvitationIncludeNumbers: req.InvitationCodeIncludeNumbers,
 		ShareLength: req.ShareCodeLength, ShareCaseSensitive: req.ShareCodeCaseSensitive,
@@ -1123,20 +1117,20 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		UploadUserTaskConcurrency:  req.UploadUserTaskConcurrency,
 		TrashRetentionDays:         req.TrashRetentionDays,
 		EncryptNewFiles:            req.EncryptNewFiles,
-		ProxyRealtimeDecrypt:       req.ProxyRealtimeDecrypt,
 		ShareRetrievalMode:         req.ShareRetrievalMode,
 		StorageChunkSizeBytes:      req.StorageChunkSizeBytes,
 		PickupAllowPermanent:       req.PickupAllowPermanent,
 		CrossUserDedupe:            req.CrossUserDedupe,
 		InvitationValidDays:        req.InvitationValidDays,
 		UploadMaxFileBytes:         req.UploadMaxFileBytes,
+		RedirectFallback:           req.RedirectFallback,
 	})
-	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrDownloadMode) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) || errors.Is(err, systemsetting.ErrPickupLifetime) || errors.Is(err, systemsetting.ErrInvitationValidity) || errors.Is(err, systemsetting.ErrUploadMaxFileBytes) {
+	if errors.Is(err, systemsetting.ErrSiteNameBlank) || errors.Is(err, systemsetting.ErrStoragePathInvalid) || errors.Is(err, systemsetting.ErrUploadChunkSize) || errors.Is(err, systemsetting.ErrUploadConcurrency) || errors.Is(err, systemsetting.ErrTrashRetention) || errors.Is(err, systemsetting.ErrPickupLifetime) || errors.Is(err, systemsetting.ErrInvitationValidity) || errors.Is(err, systemsetting.ErrUploadMaxFileBytes) {
 		writeBusinessError(w, 400, err.Error())
 		return
 	}
 	if errors.Is(err, systemsetting.ErrRetrievalMode) {
-		writeBusinessError(w, 400, "分享交付方式无效")
+		writeBusinessError(w, 400, "分享取数方式无效")
 		return
 	}
 	if errors.Is(err, systemsetting.ErrStorageChunkSize) {
@@ -1152,7 +1146,7 @@ func handleAdminSystemConfig(w http.ResponseWriter, r *http.Request, deps Deps, 
 		return
 	}
 	ip := net.ParseIP(clientIP(r))
-	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview, "uploadChunkSizeBytes": settings.UploadChunkSizeBytes, "uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency, "uploadUserTaskConcurrency": settings.UploadUserTaskConcurrency, "trashRetentionDays": settings.TrashRetentionDays, "encryptNewFiles": settings.EncryptNewFiles, "proxyRealtimeDecrypt": settings.ProxyRealtimeDecrypt, "shareRetrievalMode": settings.ShareRetrievalMode}, ip)
+	_ = deps.AdminRepo.WriteAudit(r.Context(), u.ID, u.Username, "system_config.update", "system_settings", "全局系统配置", map[string]any{"siteName": settings.SiteName, "storagePath": settings.StoragePath, "invitationCodeLength": settings.InvitationLength, "shareCodeLength": settings.ShareLength, "uploadRequiresReview": settings.UploadRequiresReview, "customShareRequiresReview": settings.CustomShareRequiresReview, "uploadChunkSizeBytes": settings.UploadChunkSizeBytes, "uploadTaskChunkConcurrency": settings.UploadTaskChunkConcurrency, "uploadUserTaskConcurrency": settings.UploadUserTaskConcurrency, "trashRetentionDays": settings.TrashRetentionDays, "encryptNewFiles": settings.EncryptNewFiles, "shareRetrievalMode": settings.ShareRetrievalMode, "redirectFallback": req.RedirectFallback}, ip)
 	allowed, required, err := deps.AdminRepo.ListTOTPPolicyGroups(r.Context())
 	if err != nil {
 		writeBusinessError(w, 500, "读取动态令牌用户组失败")
@@ -1170,8 +1164,8 @@ func systemConfigResponse(settings sqlcgen.SystemSetting, knobs systemsetting.Kn
 	return map[string]any{
 		"status": "ok", "siteName": settings.SiteName, "siteIconUrl": currentSiteIconURL(settings.StoragePath),
 		"customHomepageConfigured": customHomepageConfigured(settings.StoragePath),
-		"storagePath":              settings.StoragePath, "folderPackMode": settings.FolderPackMode, "shareDeliveryMode": settings.ShareDeliveryMode,
-		"invitationCodeLength": settings.InvitationLength, "invitationCodeCaseSensitive": settings.InvitationCaseSensitive,
+		"storagePath":              settings.StoragePath,
+		"invitationCodeLength":     settings.InvitationLength, "invitationCodeCaseSensitive": settings.InvitationCaseSensitive,
 		"invitationCodeIncludeLetters": settings.InvitationIncludeLetters, "invitationCodeIncludeNumbers": settings.InvitationIncludeNumbers,
 		"shareCodeLength": settings.ShareLength, "shareCodeCaseSensitive": settings.ShareCaseSensitive,
 		"shareCodeIncludeLetters": settings.ShareIncludeLetters, "shareCodeIncludeNumbers": settings.ShareIncludeNumbers,
@@ -1191,9 +1185,9 @@ func systemConfigResponse(settings sqlcgen.SystemSetting, knobs systemsetting.Kn
 		"uploadUserTaskConcurrency":  settings.UploadUserTaskConcurrency,
 		"trashRetentionDays":         settings.TrashRetentionDays,
 		"encryptNewFiles":            settings.EncryptNewFiles,
-		"proxyRealtimeDecrypt":       settings.ProxyRealtimeDecrypt,
 		"shareRetrievalMode":         settings.ShareRetrievalMode,
 		"storageChunkSizeBytes":      settings.StorageChunkSizeBytes,
+		"redirectFallback":           knobs.RedirectFallback,
 		// encryptionConfigured 告诉管理界面当前部署是否配置了 KEK（未配置时
 		// 不允许开启新文件加密）。
 		"encryptionConfigured": encryptionConfigured,

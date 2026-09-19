@@ -7,13 +7,13 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/admin"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/blobstore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
 )
@@ -48,6 +48,10 @@ func handleAdminReviews(w http.ResponseWriter, r *http.Request, deps Deps, actor
 		handleFileModeration(w, r, deps, actor)
 	case path == "reviews/files/download" && r.Method == http.MethodPost:
 		handleReviewDownload(w, r, deps)
+	case strings.HasPrefix(path, "reviews/files/content/") && r.Method == http.MethodGet:
+		handleReviewFileContent(w, r, deps, strings.TrimPrefix(path, "reviews/files/content/"))
+	case strings.HasPrefix(path, "reviews/files/parts/") && r.Method == http.MethodGet:
+		handleReviewFilePart(w, r, deps, strings.TrimPrefix(path, "reviews/files/parts/"))
 	case path == "reviews/files/trash" && r.Method == http.MethodGet:
 		handleReviewTrashList(w, r, deps)
 	case path == "reviews/files/trash" && r.Method == http.MethodDelete:
@@ -328,6 +332,8 @@ func notifyShareReview(r *http.Request, deps Deps, item admin.ShareReviewItem, r
 	_, _ = deps.InboxRepo.InsertUser(r.Context(), item.OwnerUserID, "分享审核结果", content, "审核结果")
 }
 
+// handleReviewDownload 生成审核下载计划：管理员浏览器逐文件取数（解密、合并、
+// 打包全部在前端完成），服务端只负责鉴权与发地址。
 func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 	var req reviewDownloadRequest
 	if err := decodeSmallJSON(w, r, &req); err != nil || len(req.ResourceIDs) == 0 || len(req.ResourceIDs) > 500 {
@@ -336,6 +342,7 @@ func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 	}
 	items := make([]admin.FileReviewItem, 0, len(req.ResourceIDs))
 	resources := make([]resource.Resource, 0, len(req.ResourceIDs))
+	relativePaths := make([]string, 0, len(req.ResourceIDs))
 	for _, id := range req.ResourceIDs {
 		meta, err := deps.AdminRepo.GetFileReviewItem(r.Context(), id)
 		if err != nil || !meta.Exists {
@@ -345,33 +352,126 @@ func handleReviewDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 		if err != nil {
 			continue
 		}
-		items, resources = append(items, meta), append(resources, item)
+		items = append(items, meta)
+		resources = append(resources, item)
+		relativePaths = append(relativePaths, fmt.Sprintf("%s/%s/%s",
+			archiveSegment(meta.OwnerName), archiveSegment(meta.TaskID), item.Name))
 	}
 	if len(resources) == 0 {
 		writeBusinessError(w, http.StatusNotFound, "所选文件已不存在")
 		return
 	}
-	if len(resources) == 1 {
-		// 管理员审核场景始终由服务器解密输出明文（与交付开关无关）。
-		serveOwnedFileDecrypted(w, r, deps, resources[0])
-		return
-	}
-	root := resource.Resource{ID: fmt.Sprintf("review-%d", time.Now().UnixNano()), Kind: resource.KindFolder, Name: "审核文件", CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	tree := []resource.TreeEntry{{Resource: root, RelativePath: root.Name}}
-	for index, item := range resources {
-		meta := items[index]
-		entry := resource.TreeEntry{Resource: item, RelativePath: fmt.Sprintf("%s/%s/%s", archiveSegment(meta.OwnerName), archiveSegment(meta.TaskID), item.Name)}
-		tree = append(tree, entry)
-	}
-	path, size, err := buildZip(r.Context(), deps, tree)
-	if path != "" {
-		defer os.Remove(path) //nolint:errcheck
-	}
+	settings, err := deps.SystemSettings.Get(r.Context())
 	if err != nil {
-		writeBusinessError(w, http.StatusInternalServerError, "打包审核文件失败")
+		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
 		return
 	}
-	serveLocalArtifact(w, r, path, size, "审核文件.zip", "application/zip")
+	knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+	if knobErr != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
+		return
+	}
+	blobs := make([]blobstore.Blob, 0, len(resources))
+	blobByID := make(map[string]blobstore.Blob, len(resources))
+	var totalBytes int64
+	for _, item := range resources {
+		blob, blobErr := resourceBlob(r.Context(), deps, item)
+		if blobErr != nil {
+			writeDownloadPreparationError(w, blobErr)
+			return
+		}
+		blobs = append(blobs, blob)
+		blobByID[item.ID] = blob
+		totalBytes += item.SizeBytes
+	}
+	// 多文件固定 302 优先，只有 302 不可用且开启自动降级时才回落本机中转。
+	source, sourceErr := resolveDeliverySource(r, deps, settings, knobs, blobs, len(resources) > 1)
+	if sourceErr != nil {
+		writeDeliveryFailure(w)
+		return
+	}
+	const streamBase = "/api/admin/reviews/files/content/"
+	const partBase = "/api/admin/reviews/files/parts/"
+	planItems := make([]deliveryItem, 0, len(resources))
+	for index, item := range resources {
+		blob := blobByID[item.ID]
+		streamURL, partURL := "", ""
+		if source == deliverySourceProxy {
+			streamURL = streamBase + item.ID
+		} else {
+			partURL = partBase + item.ID + "/"
+		}
+		planItem, itemErr := buildDeliveryItem(r, deps, item, blob, streamURL, partURL)
+		if itemErr != nil {
+			log.Printf("构建审核下载计划失败 resource=%s：%v", item.ID, itemErr)
+			writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+			return
+		}
+		planItem.RelativePath = relativePaths[index]
+		planItems = append(planItems, planItem)
+	}
+	response := map[string]any{
+		"status": "ok", "dataSource": source, "totalBytes": totalBytes,
+		"archiveName": "审核文件.zip", "items": planItems,
+	}
+	if len(planItems) == 1 {
+		delete(response, "archiveName")
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// handleReviewFileContent 输出审核文件内容（本机中转取数）：加密对象且浏览器具备
+// 前端解密能力时下发密文 + 密钥信封，否则服务器解密兜底输出明文。
+func handleReviewFileContent(w http.ResponseWriter, r *http.Request, deps Deps, id string) {
+	item, err := deps.ResourceRepo.GetByIDIncludingTrash(r.Context(), strings.TrimSpace(id))
+	if err != nil || item.Kind != resource.KindFile {
+		writeBusinessError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	blob, blobErr := resourceBlob(r.Context(), deps, item)
+	if blobErr != nil {
+		writeDownloadPreparationError(w, blobErr)
+		return
+	}
+	if _, ok := deliverItemStream(w, r, deps, blob, item.Name, blobContentType(item),
+		"attachment", blobstore.PresignForShare); !ok {
+		return
+	}
+}
+
+// handleReviewFilePart 为审核下载逐片发放第三方直链（前端按需逐片请求）。
+func handleReviewFilePart(w http.ResponseWriter, r *http.Request, deps Deps, rest string) {
+	id, rawIndex, found := strings.Cut(rest, "/")
+	if !found {
+		writeBusinessError(w, http.StatusNotFound, "下载地址不存在")
+		return
+	}
+	index, err := strconv.ParseInt(rawIndex, 10, 32)
+	if err != nil || index < 0 {
+		writeBusinessError(w, http.StatusNotFound, "下载地址不存在")
+		return
+	}
+	item, err := deps.ResourceRepo.GetByIDIncludingTrash(r.Context(), strings.TrimSpace(id))
+	if err != nil || item.Kind != resource.KindFile {
+		writeBusinessError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	blob, blobErr := resourceBlob(r.Context(), deps, item)
+	if blobErr != nil {
+		writeDownloadPreparationError(w, blobErr)
+		return
+	}
+	url, presignErr := presignItemPart(r, deps, blob, int32(index), blobstore.PresignForShare)
+	if presignErr != nil {
+		if errors.Is(presignErr, errDeliveryUnavailable) {
+			writeDeliveryFailure(w)
+			return
+		}
+		log.Printf("准备直链失败 resource=%s：%v", item.ID, presignErr)
+		writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "url": url})
 }
 
 func archiveSegment(value string) string {

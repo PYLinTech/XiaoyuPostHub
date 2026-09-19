@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -29,6 +30,9 @@ var (
 	ErrUserWithoutGroup = errors.New("每位用户至少需要归属一个用户组")
 	// ErrGroupSoleMembers 表示待删除用户组中存在"只属于该组"的成员。
 	ErrGroupSoleMembers = errors.New("删除后部分成员将失去全部用户组，请先为他们分配其它用户组")
+	// ErrGroupGuestNotAssignable 表示试图把账号加入 guest（未登录访客）组：
+	// 该组只用于未登录访问按 IP 限流，不接受成员。
+	ErrGroupGuestNotAssignable = errors.New("未登录访客用户组不接受成员")
 )
 
 type Overview struct {
@@ -66,16 +70,18 @@ type UserGroupItem struct {
 }
 
 type QuotaItem struct {
-	ID                    int64   `json:"id"`
-	Name                  string  `json:"name"`
-	Description           *string `json:"description,omitempty"`
-	StorageBytesLimit     *int64  `json:"storageBytesLimit,omitempty"`
-	SingleFileBytesLimit  *int64  `json:"singleFileBytesLimit,omitempty"`
-	DailyUploadBytesLimit *int64  `json:"dailyUploadBytesLimit,omitempty"`
-	DailyUploadCountLimit *int64  `json:"dailyUploadCountLimit,omitempty"`
-	ActiveShareCountLimit *int64  `json:"activeShareCountLimit,omitempty"`
-	ActiveDirectLinkLimit *int64  `json:"activeDirectLinkLimit,omitempty"`
-	IsSystem              bool    `json:"isSystem"`
+	ID                      int64   `json:"id"`
+	Name                    string  `json:"name"`
+	Description             *string `json:"description,omitempty"`
+	StorageBytesLimit       *int64  `json:"storageBytesLimit,omitempty"`
+	SingleFileBytesLimit    *int64  `json:"singleFileBytesLimit,omitempty"`
+	DailyUploadBytesLimit   *int64  `json:"dailyUploadBytesLimit,omitempty"`
+	DailyUploadCountLimit   *int64  `json:"dailyUploadCountLimit,omitempty"`
+	DailyDownloadBytesLimit *int64  `json:"dailyDownloadBytesLimit,omitempty"`
+	DailyDownloadCountLimit *int64  `json:"dailyDownloadCountLimit,omitempty"`
+	ActiveShareCountLimit   *int64  `json:"activeShareCountLimit,omitempty"`
+	ActiveDirectLinkLimit   *int64  `json:"activeDirectLinkLimit,omitempty"`
+	IsSystem                bool    `json:"isSystem"`
 }
 
 type AccessGroupItem struct {
@@ -238,10 +244,13 @@ func (r *Repo) GetUserGroupIDs(ctx context.Context, userID int64) ([]int64, erro
 	return out, rows.Err()
 }
 
+// ListUserGroups 列出可分配给账号的用户组。
+// guest（未登录访客）组不接受成员，因此不在此列表中（access 页面用
+// ListAccessGroups，仍能看到并配置它）。
 func (r *Repo) ListUserGroups(ctx context.Context) ([]UserGroupItem, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id,name,description,is_system,created_at
-		FROM user_groups ORDER BY is_system DESC,name`)
+		FROM user_groups WHERE name<>$1 ORDER BY is_system DESC,name`, quota.NameGuest)
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +380,10 @@ func (r *Repo) SetUserGroupMembers(ctx context.Context, groupID int64, userIDs [
 	} else if err != nil {
 		return "", err
 	}
+	// guest 组只用于未登录访客（按 IP 限流），不接受成员。
+	if groupName == quota.NameGuest {
+		return "", ErrGroupGuestNotAssignable
+	}
 	unique := make(map[int64]struct{}, len(userIDs))
 	for _, userID := range userIDs {
 		if userID < 1 {
@@ -474,6 +487,14 @@ func (r *Repo) SetUserGroups(ctx context.Context, userID int64, groupIDs []int64
 		}
 		if count != len(ids) {
 			return "", ErrGroupNotFound
+		}
+		// guest 组只用于未登录访客（按 IP 限流），不接受成员。
+		var guestCount int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM user_groups WHERE id=ANY($1) AND name=$2`, ids, quota.NameGuest).Scan(&guestCount); err != nil {
+			return "", err
+		}
+		if guestCount > 0 {
+			return "", ErrGroupGuestNotAssignable
 		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM user_group_memberships WHERE user_id=$1`, userID); err != nil {
@@ -637,33 +658,13 @@ func (r *Repo) DeleteUser(ctx context.Context, userID int64, actorName string) (
 	return username, blobIDs, nil
 }
 
-// CollectUserArtifactPaths 收集用户名下分享的临时 ZIP 制品路径。必须在外键级联
-// 删除（DeleteUser）之前调用：任务行删除后制品文件将永久失联（磁盘泄漏）。
-func (r *Repo) CollectUserArtifactPaths(ctx context.Context, userID int64) ([]string, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT DISTINCT j.artifact_path FROM share_download_jobs j
-		JOIN shares s ON s.id = j.share_id
-		WHERE s.owner_user_id = $1 AND j.artifact_path IS NOT NULL`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	paths := make([]string, 0, 4)
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			return nil, err
-		}
-		paths = append(paths, path)
-	}
-	return paths, rows.Err()
-}
-
 func (r *Repo) ListQuotaProfiles(ctx context.Context) ([]QuotaItem, error) {
 	quotaRows, err := r.pool.Query(ctx, `
 		SELECT id,name,description,storage_bytes_limit,single_file_bytes_limit,
-		       daily_upload_bytes_limit,daily_upload_count_limit,active_share_count_limit,
-		       active_direct_link_limit,is_system FROM quota_profiles ORDER BY is_system DESC,name`)
+		       daily_upload_bytes_limit,daily_upload_count_limit,
+		       daily_download_bytes_limit,daily_download_count_limit,
+		       active_share_count_limit,active_direct_link_limit,is_system
+		FROM quota_profiles ORDER BY is_system DESC,name`)
 	if err != nil {
 		return nil, err
 	}
@@ -673,6 +674,7 @@ func (r *Repo) ListQuotaProfiles(ctx context.Context) ([]QuotaItem, error) {
 		var item QuotaItem
 		if err := quotaRows.Scan(&item.ID, &item.Name, &item.Description, &item.StorageBytesLimit,
 			&item.SingleFileBytesLimit, &item.DailyUploadBytesLimit, &item.DailyUploadCountLimit,
+			&item.DailyDownloadBytesLimit, &item.DailyDownloadCountLimit,
 			&item.ActiveShareCountLimit, &item.ActiveDirectLinkLimit, &item.IsSystem); err != nil {
 			return nil, err
 		}

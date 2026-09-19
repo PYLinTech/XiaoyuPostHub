@@ -42,26 +42,14 @@ import {
 } from '../storage/shared';
 import styles from '../storage/style/index.module.less';
 import uiText from '@/utils/uiText';
-import { clientKeyHeaders, decodeDelivery } from '@/utils/fileCrypto';
-import { downloadBlob } from '@/utils/download';
+import { clientKeyHeaders } from '@/utils/fileCrypto';
+import { DownloadPlan, downloadPlan } from '@/utils/delivery';
 import { GlobalContext } from '@/context';
 import { useUploadManager } from '@/components/UploadManager';
 interface PathItem {
   id?: string;
   name: string;
 }
-function downloadName(contentDisposition: string, fallback: string) {
-  const encoded = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-  if (encoded) {
-    try {
-      return decodeURIComponent(encoded);
-    } catch {
-      return fallback;
-    }
-  }
-  return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1] || fallback;
-}
-
 export default function FilesPage() {
   const { userInfo } = useContext(GlobalContext);
   const { addFiles } = useUploadManager();
@@ -169,30 +157,18 @@ export default function FilesPage() {
     }
     setDownloading(true);
     try {
-      // 现场生成临时密钥对：加密文件在"服务器实时解密关"时以密文下发，
-      // 由浏览器解密后再保存。
+      // 现场生成临时密钥对：加密文件由浏览器端解密（服务端只负责发地址）。
       const { pair, headers: keyHeaders } = await clientKeyHeaders();
       const response = await downloadResources(
         {
           resourceIds: resources.map((item) => item.id),
         },
         {
-          responseType: 'arraybuffer',
           headers: keyHeaders,
         }
       );
-      const fallback =
-        resources.length === 1 && resources[0].kind === 'file'
-          ? resources[0].name
-          : uiText('下载文件.zip');
-      // 解码交付内容：解密 + 接收端哈希校验（服务端不做交付前校验）。
-      const blob = await decodeDelivery(pair, response.headers, response.data, {
-        verifySHA256: true,
-      });
-      downloadBlob(
-        blob,
-        downloadName(response.headers['content-disposition'] || '', fallback)
-      );
+      // 前端接收：逐文件/逐片取数 → 解密 → 合并/打包 → 保存。
+      await downloadPlan(response.data as DownloadPlan, pair);
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('下载失败')));
     } finally {

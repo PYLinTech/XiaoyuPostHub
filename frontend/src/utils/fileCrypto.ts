@@ -1,13 +1,19 @@
 /**
  * 浏览器端文件解密（与后端 backend/blobstore/crypto.go 严格对称）。
  *
+ * 交付形态（前端接收定稿）：
+ *   - 本机中转：服务端下发连续密文流（请求方无法前端解密时改发明文兜底），
+ *     密文按固定块解密；
+ *   - 302 取数：前端逐片拉取第三方密文，按片解密后顺序合并（单片同样走这条
+ *     路径，不存在单分片特殊分支）。
+ *
  * 密钥协商：每次请求现场生成临时 RSA-OAEP-2048 密钥对（用完即弃、不落盘、
  * 刷新即换），公钥经 X-XPH-Client-Public-Key 请求头发给服务端；服务端只下发
  * 用该公钥加密的 DEK 信封，私钥始终不出浏览器内存。
  *
  * 内容解密：AES-256-GCM 分块（默认 4MiB/块），块 nonce = 文件级 nonce（8 字节）
- * 与块序号（4 字节大端）拼接；块密文 = 明文 + 16 字节 tag。固定块大小让进度、
- * Range 与断点续传在密文上仍然可用。
+ * 与块序号（4 字节大端）拼接；块密文 = 明文 + 16 字节 tag。固定块大小让块序号
+ * 可直接由明文偏移推出，因此逐片解密与合并互不影响。
  */
 
 import { blobSHA256 } from '@/utils/sha256';
@@ -30,7 +36,7 @@ export const CONTENT_SHA256_HEADER = 'x-xph-content-sha256';
 
 /**
  * 接收端校验：比对下载内容的明文 SHA-256。
- * expected 为空（例如 zip 制品、第三方直跳）时跳过；不一致时抛错，调用方应
+ * expected 为空（例如明文对象以外的兜底路径）时跳过；不一致时抛错，调用方应
  * 拒绝保存并提示用户重试。
  */
 export async function verifyContentSHA256(
@@ -47,6 +53,7 @@ export async function verifyContentSHA256(
 
 const ALGORITHM = 'aes-256-gcm-chunked';
 const GCM_TAG_BYTES = 16;
+const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
 
 /** Web Crypto 是否可用：非安全上下文（HTTP 部署）下浏览器不提供 subtle。 */
 export function encryptionSupported(): boolean {
@@ -79,7 +86,7 @@ export async function exportPublicKey(pair: CryptoKeyPair): Promise<string> {
 
 /**
  * 生成临时密钥对与请求头（每次交付请求现场调用，用完即弃）。
- * 非安全上下文（HTTP 部署）返回空头，此时服务端会走"代理解密"路径。
+ * 非安全上下文（HTTP 部署）返回空头，此时服务端按「无法前端解密」兜底输出明文。
  */
 export async function clientKeyHeaders(): Promise<{
   pair: CryptoKeyPair | null;
@@ -123,36 +130,40 @@ export function parseEncryptionHeader(
 }
 
 /**
- * 解密分块密文为明文 Blob。
- * 密文布局：块1密文 ‖ 块2密文 ‖ ...，每块 = 明文(≤chunkSize) + 16 字节 tag。
+ * 解开密钥信封并导入 AES-GCM 密钥（本机中转与 302 逐片解密共用）。
+ * 无临时密钥对（非安全上下文）时无法解密，必须抛错。
  */
-export async function decryptChunked(
-  pair: CryptoKeyPair,
-  meta: EncryptionMeta,
-  cipher: ArrayBuffer,
-  mimeType = 'application/octet-stream'
-): Promise<Blob> {
+export async function importDeliveryKey(
+  pair: CryptoKeyPair | null,
+  meta: EncryptionMeta
+): Promise<CryptoKey> {
+  if (!pair) {
+    throw new Error(uiText('该文件需要在浏览器端解密，但当前环境不支持'));
+  }
+  if (meta.sizeBytes < 0) {
+    throw new Error(uiText('加密元数据的明文长度无效'));
+  }
   const dek = await crypto.subtle.decrypt(
     { name: 'RSA-OAEP' },
     pair.privateKey,
     base64ToBytes(meta.keyEnvelope)
   );
-  const key = await crypto.subtle.importKey('raw', dek, 'AES-GCM', false, [
-    'decrypt',
-  ]);
-  if (meta.sizeBytes < 0) {
-    throw new Error(uiText('加密元数据的明文长度无效'));
-  }
-  const nonceBase = base64ToBytes(meta.fileNonce);
-  const chunkSize = meta.chunkSize || 4 * 1024 * 1024;
-  const wire = new Uint8Array(cipher);
-  if (meta.wireSize && wire.byteLength < meta.wireSize) {
-    throw new Error(uiText('密文长度与元数据不符，文件可能不完整'));
-  }
-  const parts: BlobPart[] = [];
-  let index = 0;
+  return crypto.subtle.importKey('raw', dek, 'AES-GCM', false, ['decrypt']);
+}
+
+/** 从 startIndex 块序号开始，按块解密一段密文并返回明文分块。 */
+async function decryptWireRange(
+  key: CryptoKey,
+  nonceBase: Uint8Array,
+  chunkSize: number,
+  startIndex: number,
+  wire: Uint8Array,
+  plainLength: number
+): Promise<ArrayBuffer[]> {
+  const out: ArrayBuffer[] = [];
+  let index = startIndex;
   let offset = 0;
-  let remaining = meta.sizeBytes;
+  let remaining = plainLength;
   while (remaining > 0) {
     const plainLen = Math.min(chunkSize, remaining);
     const wireLen = plainLen + GCM_TAG_BYTES;
@@ -164,18 +175,79 @@ export async function decryptChunked(
       key,
       wire.subarray(offset, offset + wireLen)
     );
-    parts.push(plain);
+    out.push(plain);
     offset += wireLen;
     remaining -= plainLen;
     index += 1;
   }
-  return new Blob(parts, { type: mimeType });
+  return out;
 }
 
 /**
- * 用准备好的加密元数据解密：用于「302 直链 + 浏览器端解密」场景——密文取自
- * 第三方直链（响应头由第三方控制，无法携带我们的元数据），因此密钥信封随
- * 准备响应（JSON）一并下发。
+ * 解密连续密文（本机中转流）。
+ * 密文布局：块1密文 ‖ 块2密文 ‖ ...，每块 = 明文(≤chunkSize) + 16 字节 tag。
+ */
+export async function decryptChunked(
+  pair: CryptoKeyPair | null,
+  meta: EncryptionMeta,
+  cipher: ArrayBuffer,
+  mimeType = 'application/octet-stream'
+): Promise<Blob> {
+  const key = await importDeliveryKey(pair, meta);
+  const nonceBase = base64ToBytes(meta.fileNonce);
+  const chunkSize = meta.chunkSize || DEFAULT_CHUNK_SIZE;
+  const wire = new Uint8Array(cipher);
+  if (meta.wireSize && wire.byteLength < meta.wireSize) {
+    throw new Error(uiText('密文长度与元数据不符，文件可能不完整'));
+  }
+  const blocks = await decryptWireRange(
+    key,
+    nonceBase,
+    chunkSize,
+    0,
+    wire,
+    meta.sizeBytes
+  );
+  return new Blob(blocks, { type: mimeType });
+}
+
+/**
+ * 解密分片密文（302 逐片取数）：逐片解密后顺序合并。
+ * 每片的起始块序号 = 前面各片明文长度之和 ÷ chunkSize（分片边界与加密块对齐，
+ * 因此恒为整数）；单片同样是长度 1 的列表，走同一条路径。
+ */
+export async function decryptParts(
+  pair: CryptoKeyPair | null,
+  meta: EncryptionMeta,
+  parts: Array<{ plainSize: number }>,
+  payloads: ArrayBuffer[],
+  mimeType = 'application/octet-stream'
+): Promise<Blob> {
+  const key = await importDeliveryKey(pair, meta);
+  const nonceBase = base64ToBytes(meta.fileNonce);
+  const chunkSize = meta.chunkSize || DEFAULT_CHUNK_SIZE;
+  const out: BlobPart[] = [];
+  let startIndex = 0;
+  for (let index = 0; index < parts.length; index += 1) {
+    const wire = new Uint8Array(payloads[index] || new ArrayBuffer(0));
+    const plainLength = Math.max(0, parts[index].plainSize);
+    const blocks = await decryptWireRange(
+      key,
+      nonceBase,
+      chunkSize,
+      startIndex,
+      wire,
+      plainLength
+    );
+    blocks.forEach((block) => out.push(block));
+    startIndex += Math.ceil(plainLength / chunkSize);
+  }
+  return new Blob(out, { type: mimeType });
+}
+
+/**
+ * 用准备好的加密元数据解密：用于「302 取数」等场景——密文来自第三方（响应头
+ * 由第三方控制），因此密钥信封随我们的准备响应（JSON）一并下发。
  */
 export async function decryptWithMeta(
   pair: CryptoKeyPair | null,
@@ -183,22 +255,12 @@ export async function decryptWithMeta(
   cipher: ArrayBuffer,
   mimeType = 'application/octet-stream'
 ): Promise<Blob> {
-  if (!pair) {
-    throw new Error(uiText('该文件需要在浏览器端解密，但当前环境不支持'));
-  }
   return decryptChunked(pair, meta, cipher, mimeType);
 }
 
 /**
  * 解码一次交付响应：按加密元数据解密为 Blob（无元数据即明文交付），可选按
- * 明文 SHA-256 校验。
- *
- * 四条交付路径共用（文件页下载、文件页预览、分享页预览、分享页下载及其 302
- * 直链分支）——请求方式（GET/POST、进度回调、额外请求头）仍由各调用方自理，
- * 这里只统一"解密 → 组装 → 校验"这段数据变换。
- *
- * 加密元数据默认取响应头；302 直链场景下响应头由第三方控制，密钥信封来自准备
- * 响应，此时经 options.meta 传入（校验值同理用 expectedSHA256）。
+ * 明文 SHA-256 校验。用于预览等仍以响应头下发元数据的路径。
  */
 export async function decodeDelivery(
   pair: CryptoKeyPair | null,

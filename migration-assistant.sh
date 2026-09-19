@@ -9,9 +9,21 @@ POSTGRES_IMAGE="${XPH_MIGRATION_POSTGRES_IMAGE:-postgres:18-alpine}"
 TEMP_DIR="$(mktemp -d)"
 SOURCE_CONTAINER=""
 
+# postgres 官方镜像声明了数据目录卷（18.x 为 /var/lib/postgresql），psql 临时容器每次
+# 运行都会因此生成一个随机命名的匿名卷，容器被强删或脚本中断时就会残留在宿主机上。
+# 用 tmpfs 覆盖镜像声明的卷路径，从源头避免产生匿名卷。
+PSQL_TMPFS_ARGS=()
+while IFS= read -r volume_path; do
+    [[ -n "${volume_path}" ]] || continue
+    PSQL_TMPFS_ARGS+=(--tmpfs "${volume_path}")
+done < <(docker image inspect --format '{{range $path, $_ := .Config.Volumes}}{{println $path}}{{end}}' "${POSTGRES_IMAGE}" 2>/dev/null || true)
+if (( ${#PSQL_TMPFS_ARGS[@]} == 0 )); then
+    PSQL_TMPFS_ARGS=(--tmpfs /var/lib/postgresql)
+fi
+
 cleanup() {
     if [[ -n "${SOURCE_CONTAINER}" ]]; then
-        docker rm -f "${SOURCE_CONTAINER}" >/dev/null 2>&1 || true
+        docker rm -fv "${SOURCE_CONTAINER}" >/dev/null 2>&1 || true
     fi
     rm -rf "${TEMP_DIR}"
 }
@@ -20,14 +32,16 @@ trap cleanup EXIT
 psql_run() {
     docker run --rm -i \
         --network "${NETWORK}" \
+        "${PSQL_TMPFS_ARGS[@]}" \
         -e DATABASE_URL="${DATABASE_URL}" \
         "${POSTGRES_IMAGE}" \
         sh -c 'exec psql "$DATABASE_URL" "$@"' sh "$@"
 }
 
-SOURCE_CONTAINER="$(docker create --entrypoint /bin/true "${IMAGE}")"
+# 应用镜像同样声明了 VOLUME /data，用 tmpfs 覆盖以避免产生匿名卷。
+SOURCE_CONTAINER="$(docker create --tmpfs /data --entrypoint /bin/true "${IMAGE}")"
 docker cp "${SOURCE_CONTAINER}:/app/migrations/." "${TEMP_DIR}/"
-docker rm -f "${SOURCE_CONTAINER}" >/dev/null
+docker rm -fv "${SOURCE_CONTAINER}" >/dev/null
 SOURCE_CONTAINER=""
 
 psql_run -v ON_ERROR_STOP=1 -q -c '

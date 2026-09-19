@@ -83,6 +83,9 @@ func NewS3Backend(cfg S3Config) *S3Backend {
 
 func (b *S3Backend) Kind() string { return "s3" }
 
+// PresignEnabled 实现 blobstore 的直链就绪判定：配置完整即具备预签名直链能力。
+func (b *S3Backend) PresignEnabled() bool { return b.Configured() == nil }
+
 // Configured 校验配置完整性（Reload 时用于跳过未配置完善的后端）。
 func (b *S3Backend) Configured() error {
 	if strings.TrimSpace(b.cfg.Endpoint) == "" {

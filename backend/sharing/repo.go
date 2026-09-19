@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -149,27 +148,10 @@ type DownloadJobFileParam struct {
 }
 
 type CreateDownloadJobParams struct {
-	ShareID             int64
-	PackMode            string
-	DeliveryMode        string
-	ArtifactPath        *string
-	ArtifactName        *string
-	ArtifactContentType *string
-	ArtifactSHA256      *string
-	ArtifactTemporary   bool
-	TotalBytes          int64
-	ExpiresAt           time.Time
-	Files               []DownloadJobFileParam
-}
-
-type DownloadArtifact struct {
-	JobID       int64
-	Path        string
-	Name        string
-	ContentType string
-	SizeBytes   int64
-	Temporary   bool
-	SHA256      string
+	ShareID    int64
+	TotalBytes int64
+	ExpiresAt  time.Time
+	Files      []DownloadJobFileParam
 }
 
 type DownloadJobFile struct {
@@ -729,28 +711,6 @@ func (r *Repo) batchLinksByOwner(ctx context.Context, table string, ownerID int6
 	if count != len(ids) {
 		return ErrNotFound
 	}
-	var artifactPaths []string
-	if table == "shares" && action == "delete" {
-		rows, err := tx.Query(ctx, `SELECT j.artifact_path FROM share_download_jobs j
-			JOIN shares s ON s.id=j.share_id
-			WHERE s.owner_user_id=$1 AND s.id=ANY($2) AND j.artifact_temporary AND j.artifact_path IS NOT NULL`, ownerID, ids)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var path string
-			if err := rows.Scan(&path); err != nil {
-				rows.Close()
-				return err
-			}
-			artifactPaths = append(artifactPaths, path)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-	}
 	var command string
 	switch action {
 	case "enable":
@@ -767,9 +727,6 @@ func (r *Repo) batchLinksByOwner(ctx context.Context, table string, ownerID int6
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
-	}
-	for _, path := range artifactPaths {
-		_ = os.Remove(path)
 	}
 	return nil
 }
@@ -807,9 +764,9 @@ func (r *Repo) CompleteDirectDownload(ctx context.Context, id, bytes int64) (boo
 	return err == nil, err
 }
 
-// CreateDownloadJob 只创建短时下载任务；下载次数在任务完整取流后提交。
-// 返回任务 ID 与一次性 token：ID 用于统一交付会话的计数回调，token 用于
-// 制品模式的一次性下载地址。
+// CreateDownloadJob 创建一次下载操作对应的短时任务（有效期按明文总量分档）。
+// 下载次数在任务内所有文件都完整取数后才提交；返回任务 ID 与一次性 token，
+// token 用于逐文件取数地址（前端逐片/逐文件拉取时携带）。
 func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams) (int64, string, error) {
 	token, err := randomtoken.New(32)
 	if err != nil {
@@ -834,14 +791,9 @@ func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams)
 
 	var jobID int64
 	err = tx.QueryRow(ctx, `
-		INSERT INTO share_download_jobs (
-			token_hash, share_id, pack_mode, delivery_mode,
-			artifact_path, artifact_name, artifact_content_type, artifact_sha256, artifact_temporary,
-			total_bytes, expires_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		RETURNING id`, randomtoken.Hash(token), p.ShareID,
-		p.PackMode, p.DeliveryMode, p.ArtifactPath, p.ArtifactName,
-		p.ArtifactContentType, p.ArtifactSHA256, p.ArtifactTemporary, p.TotalBytes, p.ExpiresAt).Scan(&jobID)
+		INSERT INTO share_download_jobs (token_hash, share_id, total_bytes, expires_at)
+		VALUES ($1,$2,$3,$4)
+		RETURNING id`, randomtoken.Hash(token), p.ShareID, p.TotalBytes, p.ExpiresAt).Scan(&jobID)
 	if err != nil {
 		return 0, "", err
 	}
@@ -858,33 +810,16 @@ func (r *Repo) CreateDownloadJob(ctx context.Context, p CreateDownloadJobParams)
 	return jobID, token, nil
 }
 
-func (r *Repo) ClaimDownloadArtifact(ctx context.Context, token string) (DownloadArtifact, error) {
-	var item DownloadArtifact
-	// 复查分享封禁状态：短时任务凭证签发后管理员仍可能封禁，claim 时以最新状态为准。
-	// 同时复查分享内所有文件的可交付性：制品是签发时刻的内容快照，任一成员文件
-	// 此后被处置（回收站/拉黑/审核驳回）即不再可信，需重新发起下载按最新内容重打包。
-	err := r.pool.QueryRow(ctx, `
-		SELECT j.id, j.artifact_path, j.artifact_name, j.artifact_content_type,
-		       j.total_bytes, j.artifact_temporary, j.artifact_sha256
-		FROM share_download_jobs j
-		JOIN shares s ON s.id = j.share_id
-		WHERE j.token_hash = $1 AND j.pack_mode = 'backend' AND j.expires_at > NOW()
-		  AND NOT s.admin_blocked AND s.deleted_at IS NULL
-		  AND NOT EXISTS (SELECT 1 FROM users u2 WHERE u2.id = s.owner_user_id AND u2.is_disabled)
-		  AND NOT EXISTS (
-		      SELECT 1 FROM share_download_job_files f
-		      JOIN resources r2 ON r2.id = f.resource_id
-		      LEFT JOIN file_moderations m2 ON m2.resource_id = r2.id
-		      WHERE f.job_id = j.id
-		        AND (r2.trashed_at IS NOT NULL OR r2.purged_at IS NOT NULL OR r2.admin_blocked
-		             OR COALESCE(m2.status, 'approved') <> 'approved')
-		  )`, randomtoken.Hash(token)).Scan(
-		&item.JobID, &item.Path, &item.Name, &item.ContentType, &item.SizeBytes, &item.Temporary, &item.SHA256,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return DownloadArtifact{}, ErrNotFound
+// ConsumeJobFileOnce 标记任务内某个文件已开始取数；仅首次调用返回 true。
+// 用于 302 取数场景的"一次完整交付"结算（第三方传输服务端无法观测）。
+func (r *Repo) ConsumeJobFileOnce(ctx context.Context, jobID int64, resourceID string) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE share_download_job_files SET used_at=NOW()
+		WHERE job_id=$1 AND resource_id=$2 AND used_at IS NULL`, jobID, resourceID)
+	if err != nil {
+		return false, err
 	}
-	return item, err
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *Repo) ClaimDownloadJobFile(ctx context.Context, token, resourceID string) (DownloadJobFile, error) {
@@ -898,7 +833,7 @@ func (r *Repo) ClaimDownloadJobFile(ctx context.Context, token, resourceID strin
 		JOIN resources r ON r.id=f.resource_id
 		LEFT JOIN file_moderations m ON m.resource_id = r.id
 		WHERE f.job_id = j.id AND f.resource_id = r.id
-		  AND j.token_hash = $1 AND j.pack_mode = 'frontend'
+		  AND j.token_hash = $1
 		  AND j.expires_at > NOW() AND f.resource_id = $2
 		  AND NOT s.admin_blocked AND s.deleted_at IS NULL
 		  AND NOT EXISTS (SELECT 1 FROM users u2 WHERE u2.id = s.owner_user_id AND u2.is_disabled)
@@ -989,9 +924,8 @@ func (r *Repo) RecordDownloadRange(ctx context.Context, jobID int64, objectKey s
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var shareID, totalBytes int64
 	var completedAt *time.Time
-	var packMode string
-	err = tx.QueryRow(ctx, `SELECT share_id,total_bytes,pack_mode,completed_at FROM share_download_jobs
-		WHERE id=$1 AND reserved_at IS NOT NULL AND expires_at>NOW() FOR UPDATE`, jobID).Scan(&shareID, &totalBytes, &packMode, &completedAt)
+	err = tx.QueryRow(ctx, `SELECT share_id,total_bytes,completed_at FROM share_download_jobs
+		WHERE id=$1 AND reserved_at IS NOT NULL AND expires_at>NOW() FOR UPDATE`, jobID).Scan(&shareID, &totalBytes, &completedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -1036,29 +970,27 @@ func (r *Repo) RecordDownloadRange(ctx context.Context, jobID int64, objectKey s
 		}
 	}
 
-	expected := map[string]int64{"artifact": totalBytes}
-	if packMode == "frontend" {
-		expected = make(map[string]int64)
-		rows, queryErr := tx.Query(ctx, `SELECT f.resource_id,r.size_bytes FROM share_download_job_files f
-			JOIN resources r ON r.id=f.resource_id WHERE f.job_id=$1`, jobID)
-		if queryErr != nil {
-			return false, queryErr
-		}
-		for rows.Next() {
-			var key string
-			var size int64
-			if err := rows.Scan(&key, &size); err != nil {
-				rows.Close()
-				return false, err
-			}
-			expected[key] = size
-		}
-		if err := rows.Err(); err != nil {
+	// 任务内每个文件都必须从 0 到末字节无缺口覆盖；覆盖齐全才算任务完成。
+	expected := make(map[string]int64)
+	rows, queryErr := tx.Query(ctx, `SELECT f.resource_id,r.size_bytes FROM share_download_job_files f
+		JOIN resources r ON r.id=f.resource_id WHERE f.job_id=$1`, jobID)
+	if queryErr != nil {
+		return false, queryErr
+	}
+	for rows.Next() {
+		var key string
+		var size int64
+		if err := rows.Scan(&key, &size); err != nil {
 			rows.Close()
 			return false, err
 		}
-		rows.Close()
+		expected[key] = size
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	rows.Close()
 	ranges, err := tx.Query(ctx, `SELECT object_key,range_start,range_end FROM share_download_job_ranges WHERE job_id=$1 ORDER BY object_key,range_start,range_end`, jobID)
 	if err != nil {
 		return false, err
@@ -1101,7 +1033,7 @@ func (r *Repo) RecordDownloadRange(ctx context.Context, jobID int64, objectKey s
 	return true, tx.Commit(ctx)
 }
 
-// StartDownloadJobCleanup 清除已经过期的临时 ZIP 和任务进度。
+// StartDownloadJobCleanup 定期清理过期下载任务（区间进度随任务级联删除）。
 func (r *Repo) StartDownloadJobCleanup(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -1110,22 +1042,9 @@ func (r *Repo) StartDownloadJobCleanup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			rows, err := r.pool.Query(ctx, `
-				DELETE FROM share_download_jobs
-				WHERE expires_at <= NOW()
-				RETURNING artifact_path, artifact_temporary`)
-			if err != nil {
+			if _, err := r.pool.Exec(ctx, `DELETE FROM share_download_jobs WHERE expires_at <= NOW()`); err != nil {
 				log.Printf("清理过期下载任务失败：%v", err)
-				continue
 			}
-			for rows.Next() {
-				var path *string
-				var temporary bool
-				if err := rows.Scan(&path, &temporary); err == nil && temporary && path != nil {
-					_ = os.Remove(*path)
-				}
-			}
-			rows.Close()
 		}
 	}
 }

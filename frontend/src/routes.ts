@@ -2,6 +2,9 @@ export type IRoute = {
   name: string;
   key: string;
   adminPermissions?: string[];
+  // permissions 是用户组权限（userInfo.permissions，如 direct_link）：
+  // 未命中其中任何一项时不显示该入口，也不注册对应路由。
+  permissions?: string[];
 };
 
 export const hasManagementAccess = (userInfo) =>
@@ -9,8 +12,16 @@ export const hasManagementAccess = (userInfo) =>
 
 export const routes: IRoute[] = [
   { name: 'menu.files', key: 'files' },
-  { name: 'menu.shares', key: 'shares' },
-  { name: 'menu.directLinks', key: 'direct-links' },
+  {
+    name: 'menu.shares',
+    key: 'shares',
+    permissions: ['share', 'pickup_share'],
+  },
+  {
+    name: 'menu.directLinks',
+    key: 'direct-links',
+    permissions: ['direct_link'],
+  },
   { name: 'menu.trash', key: 'trash' },
 ];
 
@@ -59,16 +70,27 @@ export const getRoutesForUser = (
   adminMode = false
 ): [IRoute[], string] => {
   const adminPermissions = userInfo?.adminPermissions || [];
+  const permissions = userInfo?.permissions || [];
   const sourceRoutes =
     adminMode && hasManagementAccess(userInfo) ? adminRoutes : routes;
   const visibleRoutes = sourceRoutes.filter((route) => {
-    return !(
+    if (
       route.adminPermissions?.length &&
       !userInfo?.isSuperAdmin &&
       !route.adminPermissions.some((permission) =>
         adminPermissions.includes(permission)
       )
-    );
+    ) {
+      return false;
+    }
+    // 用户组权限：超管的 permissions 是全量授权，因此无需额外分支。
+    if (
+      route.permissions?.length &&
+      !route.permissions.some((permission) => permissions.includes(permission))
+    ) {
+      return false;
+    }
+    return true;
   });
 
   return [visibleRoutes, visibleRoutes[0]?.key || ''];

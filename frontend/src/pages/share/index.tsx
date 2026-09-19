@@ -32,14 +32,10 @@ import {
 import { GlobalContext } from '@/context';
 import SecureFileViewer from '@/components/SecureFileViewer';
 import logoUrl from '@/assets/logo.svg';
-import {
-  EncryptionMeta,
-  clientKeyHeaders,
-  decodeDelivery,
-} from '@/utils/fileCrypto';
+import { clientKeyHeaders, decodeDelivery } from '@/utils/fileCrypto';
+import { DownloadPlan, downloadPlan } from '@/utils/delivery';
 import { supportsFilePreview } from '@/utils/filePreview';
 import { formatBytes, formatTime } from '@/utils/format';
-import { downloadBlob } from '@/utils/download';
 import styles from './style/index.module.less';
 import uiText from '@/utils/uiText';
 interface ShareTreeItem {
@@ -75,31 +71,11 @@ interface ShareMetadata {
   };
   items?: ShareTreeItem[];
   downloadPolicy: {
-    folderPackMode: 'frontend' | 'backend';
-    shareDeliveryMode: 'blob' | 'temporary_link';
     shareRetrievalMode?: 'proxy' | 'redirect';
-    proxyRealtimeDecrypt?: boolean;
+    redirectFallback?: boolean;
     prepareUrl: string;
   };
 }
-interface PreparedDownload {
-  packMode: 'frontend' | 'backend';
-  /** redirect = 302 直跳第三方存储（加密对象由浏览器端解密）。 */
-  deliveryMode: 'blob' | 'temporary_link' | 'redirect';
-  url?: string;
-  fileName?: string;
-  archiveName?: string;
-  /** redirect 模式下的解密元数据（含用临时公钥包裹的密钥信封）。 */
-  encryption?: EncryptionMeta | null;
-  /** 内容的明文 SHA-256：下载/解密完成后由前端自行校验。 */
-  sha256?: string;
-  items?: Array<
-    ShareTreeItem & {
-      url?: string;
-    }
-  >;
-}
-
 export default function PublicSharePage({ pickupCode }: { pickupCode?: string }) {
   const { token } = useParams<{
     token: string;
@@ -265,104 +241,6 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       if (previewSequence.current === sequence) setPreviewing(false);
     }
   };
-  const downloadPreparedArtifact = async (
-    prepared: PreparedDownload,
-    pair: CryptoKeyPair | null
-  ) => {
-    if (!prepared.url) throw new Error(uiText('下载任务未返回有效地址'));
-    const url = new URL(prepared.url, window.location.origin).toString();
-    if (prepared.deliveryMode === 'temporary_link') {
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.click();
-      return;
-    }
-    if (prepared.deliveryMode === 'redirect') {
-      // 302 直跳第三方存储：明文对象的直链内容就是最终文件，浏览器一次跳转即
-      // 完成下载；加密对象不能直跳（跳转后拿不到密钥信封），改由前端 fetch 密文
-      // 并用准备响应下发的密钥信封解密。两种方式流量都不经过本服务器。
-      if (!prepared.encryption) {
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.click();
-        return;
-      }
-      const cipherResponse = await axios.get(url, {
-        responseType: 'arraybuffer',
-        onDownloadProgress: (event) => {
-          if (event.total) {
-            setDownloadProgress(Math.round((event.loaded * 100) / event.total));
-          }
-        },
-      });
-      // 密文来自第三方、响应头由第三方控制：密钥信封与校验值取自准备响应。
-      const plain = await decodeDelivery(
-        pair,
-        cipherResponse.headers,
-        cipherResponse.data,
-        {
-          meta: prepared.encryption,
-          expectedSHA256: prepared.sha256,
-          verifySHA256: true,
-        }
-      );
-      downloadBlob(plain, prepared.fileName || metadata?.name || 'download');
-      return;
-    }
-    const response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      onDownloadProgress: (event) => {
-        if (event.total) {
-          setDownloadProgress(Math.round((event.loaded * 100) / event.total));
-        }
-      },
-    });
-    const blob = await decodeDelivery(pair, response.headers, response.data, {
-      expectedSHA256: prepared.sha256,
-      verifySHA256: true,
-    });
-    downloadBlob(blob, prepared.fileName || metadata?.name || 'download');
-  };
-  const downloadFrontendArchive = async (
-    prepared: PreparedDownload,
-    pair: CryptoKeyPair | null,
-    keyHeaders: Record<string, string> = {}
-  ) => {
-    const { default: JSZip } = await import('jszip');
-    const zip = new JSZip();
-    const items = prepared.items || [];
-    const files = items.filter((item) => item.kind === 'file' && item.url);
-    items
-      .filter((item) => item.kind === 'folder')
-      .forEach((item) => zip.folder(item.relativePath));
-    for (let index = 0; index < files.length; index += 1) {
-      const item = files[index];
-      // 逐文件请求同样需要携带临时公钥：服务端在"浏览器端解密"路径下用它
-      // 封装该文件的密钥信封（否则返回 412）。
-      const response = await axios.get(item.url as string, {
-        responseType: 'arraybuffer',
-        headers: keyHeaders,
-      });
-      // 前端打包：加密文件逐文件解密后写入压缩包；每个文件按声明的
-      // 明文哈希做接收端校验。
-      const fileBlob = await decodeDelivery(pair, response.headers, response.data, {
-        expectedSHA256: item.sha256,
-        verifySHA256: true,
-      });
-      zip.file(item.relativePath, fileBlob);
-      setDownloadProgress(Math.round(((index + 1) * 80) / files.length));
-    }
-    const archive = await zip.generateAsync(
-      {
-        type: 'blob',
-      },
-      ({ percent }) => setDownloadProgress(80 + Math.round(percent * 0.2))
-    );
-    downloadBlob(
-      archive,
-      prepared.archiveName || `${metadata?.name || uiText('分享')}.zip`
-    );
-  };
   const download = async () => {
     if (!metadata || metadata.locked) return;
     setDownloading(true);
@@ -370,7 +248,7 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
     try {
       // 现场生成临时密钥对：服务端用它下发 DEK 信封（加密文件由浏览器解密）。
       const { pair, headers: keyHeaders } = await clientKeyHeaders();
-      const response = await axios.post<PreparedDownload>(
+      const response = await axios.post<DownloadPlan>(
         metadata.downloadPolicy.prepareUrl,
         {},
         {
@@ -380,18 +258,13 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
           },
         }
       );
-      if (response.data.packMode === 'frontend') {
-        await downloadFrontendArchive(response.data, pair, keyHeaders);
-      } else {
-        await downloadPreparedArtifact(response.data, pair);
-      }
+      // 前端接收：逐文件/逐片取数 → 解密 → 合并/打包 → 保存（全部在浏览器完成）。
+      await downloadPlan(response.data, pair, setDownloadProgress);
       Message.success(uiText('下载已开始'));
       // 静默刷新用量统计：不整页 loading、不把用户拉回根目录。
       loadMetadata(activePassword, false, true);
     } catch (requestError) {
-      Message.error(
-        apiErrorMessage(requestError, uiText('下载失败'))
-      );
+      Message.error(apiErrorMessage(requestError, uiText('下载失败')));
     } finally {
       setDownloading(false);
       setDownloadProgress(undefined);

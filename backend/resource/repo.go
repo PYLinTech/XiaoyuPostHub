@@ -1008,6 +1008,47 @@ func (r *Repo) UploadUsageSince(ctx context.Context, ownerID int64, since time.T
 	return count, bytes, err
 }
 
+// DownloadUsageSinceUser 统计自 since（含）起某登录用户的下载次数与字节数
+// （每日下载额度口径）。数据来自 download_usage_events：每次下载追加一条事件，
+// 只增不减，资源删除不会让当日额度回落（防刷）。
+// "自然日"口径由调用方传入本地时区的当天零点（见 startOfLocalDay）。
+func (r *Repo) DownloadUsageSinceUser(ctx context.Context, userID int64, since time.Time) (int64, int64, error) {
+	var count, bytes int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)::BIGINT
+		FROM download_usage_events
+		WHERE user_id = $1 AND created_at >= $2`, userID, since).Scan(&count, &bytes)
+	return count, bytes, err
+}
+
+// DownloadUsageSinceIP 统计自 since（含）起某来源 IP 的未登录下载次数与字节数。
+// 未登录访客按 IP 识别为一个"用户"，额度口径与登录用户一致。
+func (r *Repo) DownloadUsageSinceIP(ctx context.Context, clientIP string, since time.Time) (int64, int64, error) {
+	var count, bytes int64
+	err := r.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)::BIGINT
+		FROM download_usage_events
+		WHERE client_ip = $1 AND created_at >= $2`, clientIP, since).Scan(&count, &bytes)
+	return count, bytes, err
+}
+
+// RecordDownloadUsage 追加一条下载用量事件：userID 与 clientIP 二选一
+// （已登录记 userID，未登录记来源 IP）。source 仅用于追溯（share/pickup/direct/owned）。
+func (r *Repo) RecordDownloadUsage(ctx context.Context, userID *int64, clientIP string, sizeBytes int64, source string) error {
+	var user any
+	if userID != nil {
+		user = *userID
+	}
+	var ip any
+	if clientIP != "" {
+		ip = clientIP
+	}
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO download_usage_events (user_id, client_ip, size_bytes, source)
+		VALUES ($1, $2, $3, $4)`, user, ip, sizeBytes, source)
+	return err
+}
+
 func (r *Repo) validateParent(ctx context.Context, ownerID int64, parentID *string) error {
 	if parentID == nil || *parentID == "" {
 		return nil

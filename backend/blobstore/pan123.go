@@ -423,6 +423,10 @@ func (b *Pan123Backend) preferRedirect() bool {
 	return b.cfg.DeliveryPrefer == Pan123DeliveryRedirect
 }
 
+// PresignEnabled 实现 blobstore 的直链就绪判定：交付方式为「优先 302 直连」时
+// 才对外提供直链地址；否则交付层直接按本机中转处理。
+func (b *Pan123Backend) PresignEnabled() bool { return b.preferRedirect() }
+
 // NeedDirectLink 表示当前配置是否要用到 123 直链——交付方式选 302，或任一用途的
 // 额度偏好选了直链流量。加载后端时据此决定要不要为存储根目录启用平台侧直链空间
 // （幂等，只开不关）；不需要直链时不做任何平台调用。

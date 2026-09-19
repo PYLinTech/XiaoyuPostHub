@@ -1,6 +1,7 @@
 import { fetchAdminAudit, fetchFileReviews, fetchShareReviews, reviewResources, downloadReviewedFiles, fetchReviewedTrash, deleteReviewedTrashItem, emptyReviewedTrash } from '@/api/endpoints';
 import { apiErrorMessage } from '@/api/client';
-import { downloadBlob } from '@/utils/download';
+import { clientKeyHeaders } from '@/utils/fileCrypto';
+import { DownloadPlan, downloadPlan } from '@/utils/delivery';
 import React, { useContext, useEffect, useMemo, useState } from 'react';
 import ShareManage from './share-manage';
 import DOMPurify from 'dompurify';
@@ -370,24 +371,18 @@ function Audit() {
       return;
     }
     try {
-      // 用 arraybuffer 而非 blob：错误体也能被 apiErrorMessage 同步解码出服务端
-      // 本地化文案（blob 错误体会丢失 msg，只剩 axios 的通用英文串）。
-      const response = await downloadReviewedFiles({ resourceIds: ids },
-        { responseType: 'arraybuffer' }
+      // 现场生成临时密钥对：加密文件由浏览器端解密（与分享页/文件页一致）。
+      const { pair, headers: keyHeaders } = await clientKeyHeaders();
+      const response = await downloadReviewedFiles(
+        { resourceIds: ids },
+        { headers: keyHeaders }
       );
-      const disposition = response.headers['content-disposition'] || '';
-      const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
-      const name = encoded
-        ? decodeURIComponent(encoded)
-        : ids.length === 1
-        ? selectedFiles[0].name
-        : uiText('审核文件.zip');
-      downloadBlob(new Blob([response.data]), name);
+      // 前端接收：逐文件/逐片取数 → 解密 → 合并/打包 → 保存。
+      await downloadPlan(response.data as DownloadPlan, pair);
     } catch (error) {
       Message.error(apiErrorMessage(error, uiText('下载失败')));
     }
   };
-
   const loadTrash = async () => {
     try {
       const response = await fetchReviewedTrash();

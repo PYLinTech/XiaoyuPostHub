@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -12,20 +11,17 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/blobstore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
-	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 )
 
-// 加密交付策略（与冻结方案一致）：
+// 加密交付策略（前端接收定稿）：
 //
-//	明文对象                       → 直接交付；
-//	加密对象 + 服务器实时解密开启   → 服务器解密后输出明文；
-//	加密对象 + 服务器实时解密关闭   → 输出密文，解密元数据（含用浏览器临时
-//	                                公钥包裹的 DEK）随响应下发，浏览器端解密；
-//	直链                           → 始终服务器解密（forceServerDecrypt=true）。
+//	加密对象 + 浏览器请求（带临时公钥）：前端解密优先——下发的密文与解密元数据
+//	  由浏览器自行解密、合并；
+//	加密对象 + 无公钥请求（HTTP 部署 / 命令行工具）：服务器实时解密兜底输出明文；
+//	对外直链 /d/：始终服务器解密合并输出原文（唯一不受浏览器能力影响的入口）。
 //
 // 密钥非对称下发：浏览器每次请求现场生成临时 RSA-OAEP 密钥对，公钥通过
 // X-XPH-Client-Public-Key 请求头（base64(SPKI DER)）传入；服务端只下发用该
@@ -89,83 +85,21 @@ func clientEncryptionMetadata(r *http.Request, deps Deps, blob blobstore.Blob) (
 	}, nil
 }
 
-// needsClientDecryption 判断一次交付是否需要浏览器端解密。
-// forceServerDecrypt 用于直链（始终服务器解密，无浏览器参与）。
-func needsClientDecryption(blob blobstore.Blob, realtimeDecrypt, forceServerDecrypt bool) bool {
-	if blob.Encryption == nil || forceServerDecrypt {
-		return false
-	}
-	return !realtimeDecrypt
-}
-
-// presignBlob 尝试为对象生成第三方直链（302 交付）。任何不支持或失败都返回
-// ok=false，由调用方降级为本机中转——302 是优化路径，不应导致交付失败。
-//
-// purpose 决定走哪份额度：分享/文件页与站内直链可以分别配置（123 云盘的直链流量
-// 与自用下载流量是两份独立额度）。
-func presignBlob(ctx context.Context, deps Deps, blob blobstore.Blob, purpose blobstore.PresignPurpose) (string, bool) {
-	url, ok, err := deps.Blobs.Presign(ctx, blob, 10*time.Minute, purpose)
-	if err != nil || !ok {
-		return "", false
-	}
-	return url, true
-}
-
-// serveFileContent 按当前策略输出文件内容（下载与预览共用）：
-//   - 明文对象（或服务器实时解密）：直接流式输出——服务端不做交付前全量校验，
-//     完整性由上传时的流式哈希比对与接收端按 X-XPH-Content-SHA256 自行校验保证；
-//   - 浏览器端解密：输出密文并在响应头下发解密元数据；缺少客户端公钥时返回
-//     428，提示刷新页面后重试。
+// serveFileContent 输出文件内容供预览使用（分享页预览、文件页预览共用）：
+// 加密对象且请求方具备前端解密能力时下发密文 + 密钥信封；否则服务器解密输出
+// 明文（无公钥时的兜底）。
 func serveFileContent(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource, disposition string) {
-	serveFileContentWithOptions(w, r, deps, item, disposition, false)
-}
-
-// serveFileContentWithOptions 是 serveFileContent 的可配置版本。
-// allowRedirect 为真时（文件页下载），明文对象在「302 交付」配置下直接重定向到
-// 第三方直链；预览固定中转（需要 Range 与解密元数据），加密对象固定中转（密钥
-// 信封无法随第三方响应下发）。
-func serveFileContentWithOptions(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource, disposition string, allowRedirect bool) {
 	blob, err := resourceBlob(r.Context(), deps, item)
 	if err != nil {
 		writeBusinessError(w, http.StatusUnprocessableEntity, "文件不存在或已损坏")
 		return
 	}
-	settings, err := deps.SystemSettings.Get(r.Context())
-	if err != nil {
-		writeBusinessError(w, http.StatusInternalServerError, "读取交付策略失败")
-		return
-	}
-	if allowRedirect && blob.Encryption == nil && settings.ShareRetrievalMode == systemsetting.RetrievalRedirect {
-		// 先用廉价的 Stat 确认对象仍然存在，避免把用户跳到第三方的 404。
-		if availableErr := deps.Blobs.VerifyAvailable(r.Context(), blob); availableErr == nil {
-			// 文件页下载归入「分享」这一档额度偏好。
-			if redirectURL, ok := presignBlob(r.Context(), deps, blob, blobstore.PresignForShare); ok {
-				http.Redirect(w, r, redirectURL, http.StatusFound)
-				return
-			}
-		}
-	}
-	if needsClientDecryption(blob, settings.ProxyRealtimeDecrypt, false) {
-		meta, metaErr := clientEncryptionMetadata(r, deps, blob)
-		if metaErr != nil {
-			if errors.Is(metaErr, errClientKeyMissing) {
-				writeBusinessError(w, http.StatusPreconditionRequired, "该文件需要在浏览器端解密，请刷新页面后重试")
-				return
-			}
-			writeBusinessError(w, http.StatusInternalServerError, "准备解密信息失败")
-			return
-		}
-		if _, ok := deliverBlobContent(w, r, deps, blob, item.Name, blobContentType(item), disposition, true, meta, blobstore.PresignForShare); !ok {
-			return
-		}
-		return
-	}
-	// 明文对象 / 服务器实时解密：直接用已读到的 blob 元数据输出，不再二次查询。
-	if _, ok := deliverBlobContent(w, r, deps, blob, item.Name, blobContentType(item), disposition, false, nil, blobstore.PresignForShare); !ok {
+	if _, ok := deliverItemStream(w, r, deps, blob, item.Name, blobContentType(item), disposition, blobstore.PresignForShare); !ok {
 		return
 	}
 }
 
+// setEncryptionHeader 把解密元数据以 base64(JSON) 写入响应头。
 func setEncryptionHeader(w http.ResponseWriter, meta map[string]any) {
 	payload, err := json.Marshal(meta)
 	if err != nil {

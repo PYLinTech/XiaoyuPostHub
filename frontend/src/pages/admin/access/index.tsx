@@ -43,6 +43,8 @@ interface QuotaItem {
   singleFileBytesLimit?: number;
   dailyUploadBytesLimit?: number;
   dailyUploadCountLimit?: number;
+  dailyDownloadBytesLimit?: number;
+  dailyDownloadCountLimit?: number;
   activeShareCountLimit?: number;
   activeDirectLinkLimit?: number;
   isSystem: boolean;
@@ -71,6 +73,8 @@ interface QuotaDraft {
   singleFileMiB?: number;
   dailyUploadMiB?: number;
   dailyUploadCount?: number;
+  dailyDownloadMiB?: number;
+  dailyDownloadCount?: number;
   activeShares?: number;
   activeDirectLinks?: number;
 }
@@ -132,6 +136,11 @@ function toDraft(item: QuotaItem): QuotaDraft {
         ? undefined
         : item.dailyUploadBytesLimit / MiB,
     dailyUploadCount: item.dailyUploadCountLimit,
+    dailyDownloadMiB:
+      item.dailyDownloadBytesLimit == null
+        ? undefined
+        : item.dailyDownloadBytesLimit / MiB,
+    dailyDownloadCount: item.dailyDownloadCountLimit,
     activeShares: item.activeShareCountLimit,
     activeDirectLinks: item.activeDirectLinkLimit,
   };
@@ -146,6 +155,8 @@ function quotaPayload(draft: QuotaDraft) {
     singleFileBytesLimit: bytes(draft.singleFileMiB),
     dailyUploadBytesLimit: bytes(draft.dailyUploadMiB),
     dailyUploadCountLimit: draft.dailyUploadCount ?? null,
+    dailyDownloadBytesLimit: bytes(draft.dailyDownloadMiB),
+    dailyDownloadCountLimit: draft.dailyDownloadCount ?? null,
     activeShareCountLimit: draft.activeShares ?? null,
     activeDirectLinkLimit: draft.activeDirectLinks ?? null,
   };
@@ -473,6 +484,16 @@ function Access() {
       render: formatLimit,
     },
     {
+      title: uiText('每日下载'),
+      dataIndex: 'dailyDownloadBytesLimit',
+      render: (value) => (value == null ? uiText('不限') : formatBytes(value)),
+    },
+    {
+      title: uiText('每日下载次数'),
+      dataIndex: 'dailyDownloadCountLimit',
+      render: formatLimit,
+    },
+    {
       title: uiText('分享 / 直链'),
       render: (_, record: QuotaItem) =>
         `${formatLimit(record.activeShareCountLimit)} / ${formatLimit(
@@ -794,7 +815,7 @@ function Access() {
               data={quotas}
               pagination={false}
               scroll={{
-                x: 1020,
+                x: 1180,
               }}
             />
               </>
@@ -977,6 +998,8 @@ function Access() {
             ['singleFileMiB', uiText('单文件大小'), 'MiB'],
             ['dailyUploadMiB', uiText('每日上传流量'), 'MiB'],
             ['dailyUploadCount', uiText('每日上传次数'), uiText('次')],
+            ['dailyDownloadMiB', uiText('每日下载流量'), 'MiB'],
+            ['dailyDownloadCount', uiText('每日下载次数'), uiText('次')],
             ['activeShares', uiText('有效分享数量'), uiText('个')],
             ['activeDirectLinks', uiText('有效直链数量'), uiText('个')],
           ].map(([key, label, suffix]) => (
@@ -1003,7 +1026,7 @@ function Access() {
           className={styles['config-description']}
         >
           {uiText(
-            '存储空间包含回收站中的文件（彻底删除或保留期到期后释放）；每日上传流量/次数按自然日（服务器本地时区）统计。'
+            '存储空间包含回收站中的文件（彻底删除或保留期到期后释放）；每日上传流量/次数按自然日（服务器本地时区）统计。每日下载流量/次数限制下载者（登录用户按账号，未登录访问按来源 IP 各自计算，使用「未登录访客」用户组绑定的配额）。'
           )}
         </Typography.Text>
       </Modal>

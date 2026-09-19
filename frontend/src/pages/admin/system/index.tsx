@@ -53,6 +53,7 @@ function SystemConfig() {
     pickupAllowPermanent: (data.pickupAllowPermanent as boolean | undefined) ?? true,
     invitationValidDays: (data.invitationValidDays as number | undefined) ?? 90,
     crossUserDedupe: (data.crossUserDedupe as boolean | undefined) ?? true,
+    redirectFallback: (data.redirectFallback as boolean | undefined) ?? true,
     uploadMaxFileGB:
       ((data.uploadMaxFileBytes as number) || 100 * 1024 ** 3) / 1024 ** 3,
     uploadChunkSizeMB:
@@ -688,43 +689,11 @@ function SystemConfig() {
                 </div>
                 <Text type="secondary" className={styles['config-description']}>
                   {uiText(
-                    '前端打包适合小型目录，后端打包对大目录更稳定；临时链接可交给浏览器直接下载。'
+                    '所有交付（分享页、文件页、管理端审核）均由浏览器接收：取数、解密、合并与打包在前端完成，服务端只负责鉴权、发地址与计数。'
                   )}
                 </Text>
                 <FormItem
-                  label={uiText('文件夹打包位置')}
-                  field="folderPackMode"
-                  rules={[
-                    {
-                      required: true,
-                    },
-                  ]}
-                >
-                  <Radio.Group type="button">
-                    <Radio value="backend">
-                      {uiText('后端校验并打包 ZIP')}
-                    </Radio>
-                    <Radio value="frontend">{uiText('前端逐文件打包')}</Radio>
-                  </Radio.Group>
-                </FormItem>
-                <FormItem
-                  label={uiText('分享页文件交付')}
-                  field="shareDeliveryMode"
-                  rules={[
-                    {
-                      required: true,
-                    },
-                  ]}
-                >
-                  <Radio.Group type="button">
-                    <Radio value="blob">{uiText('前端读取 Blob 流')}</Radio>
-                    <Radio value="temporary_link">
-                      {uiText('一次性临时链接')}
-                    </Radio>
-                  </Radio.Group>
-                </FormItem>
-                <FormItem
-                  label={uiText('分享页交付方式')}
+                  label={uiText('分享取数方式')}
                   field="shareRetrievalMode"
                   rules={[
                     {
@@ -733,27 +702,25 @@ function SystemConfig() {
                   ]}
                 >
                   <Radio.Group type="button">
-                    <Radio value="proxy">{uiText('本机中转')}</Radio>
-                    <Radio value="redirect">
-                      {uiText('302 直跳第三方')}
-                    </Radio>
+                    <Radio value="redirect">{uiText('302 优先')}</Radio>
+                    <Radio value="proxy">{uiText('中转优先')}</Radio>
                   </Radio.Group>
                 </FormItem>
                 <Text type="secondary" className={styles['config-description']}>
                   {uiText(
-                    '选择 302 时，文件由浏览器直连存储后端下载：明文文件无需处理，浏览器一次跳转即可下载；加密文件先下发密钥信封，再由浏览器拉取密文并解密（服务器不承担流量）。预览与文件夹打包固定走本机中转。302 模式下实时解密开关不生效。'
+                    '302 优先（默认）：浏览器逐片直连第三方存储逐片取数并自行解密合并，流量不过服务器（需存储后端启用直链）。中转优先：一律经由本机中转，由前端解密或服务器兜底解密。'
                   )}
                 </Text>
                 <FormItem
-                  label={uiText('服务器实时解密')}
-                  field="proxyRealtimeDecrypt"
+                  label={uiText('302 不可用时自动降级中转')}
+                  field="redirectFallback"
                   triggerPropName="checked"
                 >
                   <Switch />
                 </FormItem>
                 <Text type="secondary" className={styles['config-description']}>
                   {uiText(
-                    '开启后，本机中转交付的加密文件由服务器解密后输出明文；关闭后改由浏览器端解密（密钥实时非对称下发，仅 HTTPS 部署可用），"一次性临时链接"会自动降级为"前端读取 Blob 流"以保证可解密。直链始终由服务器解密，不受此开关影响。'
+                    '开启后：302 不可用（存储后端未启用直链、或浏览器无法完成解密）时自动改走本机中转；关闭后直接提示下载失败（不展示内部原因）。'
                   )}
                 </Text>
               </div>

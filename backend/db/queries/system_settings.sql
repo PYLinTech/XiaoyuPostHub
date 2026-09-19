@@ -14,8 +14,6 @@ WHERE id=1 RETURNING *;
 UPDATE system_settings SET
     site_name=sqlc.arg(site_name),
     storage_path=sqlc.arg(storage_path),
-    folder_pack_mode=sqlc.arg(folder_pack_mode),
-    share_delivery_mode=sqlc.arg(share_delivery_mode),
     invitation_length=sqlc.arg(invitation_length),
     invitation_case_sensitive=sqlc.arg(invitation_case_sensitive),
     invitation_include_letters=sqlc.arg(invitation_include_letters),
@@ -37,7 +35,6 @@ UPDATE system_settings SET
     upload_user_task_concurrency=sqlc.arg(upload_user_task_concurrency),
     trash_retention_days=sqlc.arg(trash_retention_days),
     encrypt_new_files=sqlc.arg(encrypt_new_files),
-    proxy_realtime_decrypt=sqlc.arg(proxy_realtime_decrypt),
     share_retrieval_mode=sqlc.arg(share_retrieval_mode),
     storage_chunk_size_bytes=sqlc.arg(storage_chunk_size_bytes),
     updated_at=NOW()

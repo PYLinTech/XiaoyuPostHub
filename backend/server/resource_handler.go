@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub/backend/blobstore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -87,8 +89,11 @@ func resourceListHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
-// serveOwnedResourcesDownload 将所有者选择的单个文件直接返回；多文件或文件夹
-// 统一映射到临时虚拟目录后打包，原资源的位置和层级不会被修改。
+// serveOwnedResourcesDownload 生成文件下载计划：前端逐文件取数（解密、合并、
+// 打包均在浏览器完成）。单文件同样按「分片列表」处理，不存在单分片特殊路径。
+//
+// 取数方式与分享页一致：302 优先且可用时逐片直连第三方；否则按降级开关决定
+// 本机中转（密文 + 密钥信封，或服务器解密兜底）或按下载失败处理。
 func serveOwnedResourcesDownload(w http.ResponseWriter, r *http.Request, deps Deps) {
 	u, ok := requireUser(w, r, deps)
 	if !ok {
@@ -120,10 +125,17 @@ func serveOwnedResourcesDownload(w http.ResponseWriter, r *http.Request, deps De
 		}
 		items = append(items, item)
 	}
-	if len(items) == 1 && items[0].Kind == resource.KindFile {
-		serveOwnedFile(w, r, deps, items[0])
+	settings, err := deps.SystemSettings.Get(r.Context())
+	if err != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
 		return
 	}
+	knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+	if knobErr != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
+		return
+	}
+	singleFile := len(items) == 1 && items[0].Kind == resource.KindFile
 	virtualRoot := resource.Resource{
 		ID: fmt.Sprintf("owner-download-%d", time.Now().UnixNano()), OwnerUserID: u.ID,
 		Kind: resource.KindFolder, Name: "下载文件", CreatedAt: time.Now(), UpdatedAt: time.Now(),
@@ -133,15 +145,70 @@ func serveOwnedResourcesDownload(w http.ResponseWriter, r *http.Request, deps De
 		writeDownloadPreparationError(w, err)
 		return
 	}
-	path, size, err := buildZip(r.Context(), deps, tree)
-	if path != "" {
-		defer os.Remove(path) //nolint:errcheck
+	blobByID := make(map[string]blobstore.Blob, len(tree))
+	blobs := make([]blobstore.Blob, 0, len(tree))
+	var totalBytes int64
+	for _, entry := range tree {
+		if entry.Resource.Kind != resource.KindFile {
+			continue
+		}
+		blob, blobErr := resourceBlob(r.Context(), deps, entry.Resource)
+		if blobErr != nil {
+			writeDownloadPreparationError(w, blobErr)
+			return
+		}
+		blobByID[entry.Resource.ID] = blob
+		blobs = append(blobs, blob)
+		totalBytes += entry.Resource.SizeBytes
 	}
-	if err != nil {
-		writeDownloadPreparationError(w, err)
+	if len(blobs) == 0 {
+		writeBusinessError(w, http.StatusUnprocessableEntity, "所选内容不可下载")
 		return
 	}
-	serveLocalArtifact(w, r, path, size, tree[0].Name+".zip", "application/zip")
+	// 多文件/文件夹固定 302 优先，只有 302 不可用且开启自动降级时才回落本机中转。
+	source, sourceErr := resolveDeliverySource(r, deps, settings, knobs, blobs, !singleFile)
+	if sourceErr != nil {
+		writeDeliveryFailure(w)
+		return
+	}
+	const streamBase = "/api/resources/"
+	planItems := make([]deliveryItem, 0, len(tree))
+	for _, entry := range tree {
+		if entry.Resource.Kind == resource.KindFolder {
+			planItems = append(planItems, deliveryItem{
+				Kind: resource.KindFolder, ResourceID: entry.ID, Name: entry.Name,
+				RelativePath: filepath.ToSlash(entry.RelativePath),
+			})
+			continue
+		}
+		blob := blobByID[entry.Resource.ID]
+		streamURL, partURL := "", ""
+		if source == deliverySourceProxy {
+			streamURL = streamBase + entry.ID + "/content"
+		} else {
+			partURL = streamBase + entry.ID + "/parts/"
+		}
+		planItem, itemErr := buildDeliveryItem(r, deps, entry.Resource, blob, streamURL, partURL)
+		if itemErr != nil {
+			log.Printf("构建下载计划失败 resource=%s：%v", entry.Resource.ID, itemErr)
+			writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+			return
+		}
+		planItem.RelativePath = filepath.ToSlash(entry.RelativePath)
+		planItems = append(planItems, planItem)
+	}
+	// 下载方向配额：计划创建即视为该次下载发生（登录用户按账号，超管豁免）。
+	if err := guardPlannedDownload(r, deps, totalBytes, "owned"); err != nil {
+		writeDownloadQuotaFailure(w, err)
+		return
+	}
+	response := map[string]any{
+		"status": "ok", "dataSource": source, "totalBytes": totalBytes, "items": planItems,
+	}
+	if !singleFile {
+		response["archiveName"] = tree[0].Name + ".zip"
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func resourceItemHandler(deps Deps) http.HandlerFunc {
@@ -149,6 +216,14 @@ func resourceItemHandler(deps Deps) http.HandlerFunc {
 		pathParts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/resources/"), "/"), "/")
 		if len(pathParts) == 2 && pathParts[1] == "preview" {
 			serveResourcePreview(w, r, deps, pathParts[0])
+			return
+		}
+		if len(pathParts) == 2 && pathParts[1] == "content" {
+			serveOwnedFileContent(w, r, deps, pathParts[0])
+			return
+		}
+		if len(pathParts) == 3 && pathParts[1] == "parts" {
+			serveOwnedFilePart(w, r, deps, pathParts[0], pathParts[2])
 			return
 		}
 		if len(pathParts) != 1 {
@@ -220,24 +295,75 @@ func requireApprovedFile(w http.ResponseWriter, r *http.Request, deps Deps, reso
 	return true
 }
 
-func serveOwnedFile(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource) {
-	// 交付策略：明文直接输出（302 配置且后端支持直链时重定向到第三方）；
-	// 加密文件按"服务器实时解密"开关决定由服务器解密输出明文，或输出密文并在
-	// 响应头下发解密元数据（浏览器端解密）。
-	serveFileContentWithOptions(w, r, deps, item, "attachment", true)
-}
-
-// serveOwnedFileDecrypted 始终由服务器解密并校验后输出明文，用于管理员审核
-// 下载等内部场景（管理员必须能直接看到内容，与交付开关无关）。
-func serveOwnedFileDecrypted(w http.ResponseWriter, r *http.Request, deps Deps, item resource.Resource) {
-	reader, blob, err := blobReader(r.Context(), deps, item)
-	if err != nil {
-		log.Printf("打开文件失败 id=%s: %v", item.ID, err)
-		writeBusinessError(w, http.StatusUnprocessableEntity, "文件不存在或已损坏")
+// serveOwnedFileContent 输出单个文件内容（文件页本机中转取数）：加密对象且请求方
+// 具备前端解密能力时下发密文 + 密钥信封，否则服务器解密兜底输出明文。
+func serveOwnedFileContent(w http.ResponseWriter, r *http.Request, deps Deps, id string) {
+	u, ok := requireUser(w, r, deps)
+	if !ok {
 		return
 	}
-	setContentSHA256Header(w, blob.SHA256)
-	serveBlobStream(w, r, reader, blob.SizeBytes, item.Name, blobContentType(item))
+	if !u.HasPermission(permission.Download) {
+		writeBusinessError(w, http.StatusForbidden, "没有下载资源权限")
+		return
+	}
+	item, err := deps.ResourceRepo.GetOwned(r.Context(), u.ID, strings.TrimSpace(id))
+	if err != nil || item.Kind != resource.KindFile {
+		writeBusinessError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if !requireApprovedFile(w, r, deps, item.ID) {
+		return
+	}
+	blob, blobErr := resourceBlob(r.Context(), deps, item)
+	if blobErr != nil {
+		writeDownloadPreparationError(w, blobErr)
+		return
+	}
+	if _, ok := deliverItemStream(w, r, deps, blob, item.Name, blobContentType(item),
+		"attachment", blobstore.PresignForShare); !ok {
+		return
+	}
+}
+
+// serveOwnedFilePart 为文件页 302 取数逐片发放第三方直链（前端按需逐片请求）。
+func serveOwnedFilePart(w http.ResponseWriter, r *http.Request, deps Deps, id, rawIndex string) {
+	u, ok := requireUser(w, r, deps)
+	if !ok {
+		return
+	}
+	if !u.HasPermission(permission.Download) {
+		writeBusinessError(w, http.StatusForbidden, "没有下载资源权限")
+		return
+	}
+	index, err := strconv.ParseInt(rawIndex, 10, 32)
+	if err != nil || index < 0 {
+		writeBusinessError(w, http.StatusNotFound, "下载地址不存在")
+		return
+	}
+	item, err := deps.ResourceRepo.GetOwned(r.Context(), u.ID, strings.TrimSpace(id))
+	if err != nil || item.Kind != resource.KindFile {
+		writeBusinessError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if !requireApprovedFile(w, r, deps, item.ID) {
+		return
+	}
+	blob, blobErr := resourceBlob(r.Context(), deps, item)
+	if blobErr != nil {
+		writeDownloadPreparationError(w, blobErr)
+		return
+	}
+	url, presignErr := presignItemPart(r, deps, blob, int32(index), blobstore.PresignForShare)
+	if presignErr != nil {
+		if errors.Is(presignErr, errDeliveryUnavailable) {
+			writeDeliveryFailure(w)
+			return
+		}
+		log.Printf("准备直链失败 resource=%s：%v", item.ID, presignErr)
+		writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "url": url})
 }
 
 // serveResourcePreview 只向资源所有者返回文件内容。每次读取前都会重新计算

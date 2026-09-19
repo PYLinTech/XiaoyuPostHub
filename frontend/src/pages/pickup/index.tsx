@@ -6,6 +6,7 @@ import { IconDownload } from '@arco-design/web-react/icon';
 import { GlobalContext } from '@/context';
 import PublicSharePage from '@/pages/share';
 import uiText from '@/utils/uiText';
+import { formatPickupLifetime } from '@/utils/format';
 import shareStyles from '@/pages/share/style/index.module.less';
 import styles from './index.module.less';
 
@@ -17,19 +18,6 @@ export default function PickupPage() {
   const [lifetimeSeconds, setLifetimeSeconds] = useState<number | null>(3600);
   const [checking, setChecking] = useState(false);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
-
-  const lifetimeText = () => {
-    if (lifetimeSeconds == null) return uiText('当前系统配置取件码：永久有效');
-    const days = Math.floor(lifetimeSeconds / 86400);
-    const remainingHours = (lifetimeSeconds % 86400) / 3600;
-    const hours = Number.isInteger(remainingHours)
-      ? remainingHours
-      : Number(remainingHours.toFixed(2));
-    const duration = days > 0
-      ? `${days} ${uiText('天')}${hours > 0 ? ` ${hours} ${uiText('小时')}` : ''}`
-      : `${hours} ${uiText('小时')}`;
-    return `${uiText('取件码生成后')} ${duration} ${uiText('内有效')}`;
-  };
 
   useEffect(() => {
     document.title = `${siteName || 'XiaoyuPostHub'}-${uiText('取件码')}`;
@@ -83,7 +71,9 @@ export default function PickupPage() {
         <Card className={`${shareStyles['password-card']} ${styles.card}`}>
           <IconDownload className={shareStyles['lock-icon']} />
           <Typography.Title heading={4}>{uiText('输入取件码')}</Typography.Title>
-          <Typography.Text type="secondary">{lifetimeText()}</Typography.Text>
+          <Typography.Text type="secondary">
+            {formatPickupLifetime(lifetimeSeconds)}
+          </Typography.Text>
           <div className={styles.code} style={{ gridTemplateColumns: `repeat(${Math.min(length, 12)}, minmax(36px, 44px))` }}>
             {characters.map((character, index) => (
               <input

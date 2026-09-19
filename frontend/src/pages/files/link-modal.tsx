@@ -1,4 +1,4 @@
-import { createShare, createDirectLink } from '@/api/endpoints';
+import { createShare, createDirectLink, fetchSiteConfig } from '@/api/endpoints';
 import { apiErrorMessage } from '@/api/client';
 import React, { useEffect, useState } from 'react';
 import {
@@ -17,6 +17,7 @@ import { ResourceItem } from '../storage/shared';
 import styles from '../storage/style/index.module.less';
 import uiText from '@/utils/uiText';
 import writeClipboard from '@/utils/clipboard';
+import { formatPickupLifetime } from '@/utils/format';
 type Mode = 'share' | 'direct';
 interface Props {
   mode: Mode;
@@ -57,6 +58,7 @@ export default function LinkModal({
   const resourceKey = resources.map((item) => item.id).join(',');
   const [expiry, setExpiry] = useState('86400');
   const [shareType, setShareType] = useState<'link' | 'pickup'>('link');
+  const [pickupLifetime, setPickupLifetime] = useState<number | null>();
   const [downloadLimit, setDownloadLimit] = useState<number>();
   const [trafficGB, setTrafficGB] = useState<number>();
   const [passwordMode, setPasswordMode] = useState('random');
@@ -83,6 +85,18 @@ export default function LinkModal({
     setDescriptionFormat('markdown');
     setDescription('');
     setResult(undefined);
+    // 取件码有效期由系统设置决定：读取后只读展示，创建时不再自选。
+    setPickupLifetime(undefined);
+    let alive = true;
+    fetchSiteConfig()
+      .then((response) => {
+        if (alive) setPickupLifetime(response.data.pickupMaxLifetimeSeconds ?? null);
+      })
+      // 读取失败时保持"未加载"状态（界面显示 '-'），不阻断创建流程。
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
   }, [visible, resourceKey, mode, allowLinkShare, allowPickupShare]);
   const create = async () => {
     if (!resource) return;
@@ -100,8 +114,10 @@ export default function LinkModal({
     setLoading(true);
     try {
       const common = {
-        // 取件码同样支持自选有效期（0 = 永久，是否允许由管理端开关决定）。
-        expiresInSeconds: Number(expiry),
+        // 取件码有效期由系统设置决定：不提交自选值，后端按系统配置签发。
+        ...(mode === 'share' && shareType === 'pickup'
+          ? {}
+          : { expiresInSeconds: Number(expiry) }),
         downloadLimit: downloadLimit ?? null,
         trafficLimitBytes:
           trafficGB == null ? null : Math.round(trafficGB * 1024 * 1024 * 1024),
@@ -264,14 +280,26 @@ export default function LinkModal({
               <Typography.Text bold>{resource?.name}</Typography.Text>
             </div>
           )}
-          <div className={styles['modal-field']}>
-            <Typography.Text>{uiText('有效期')}</Typography.Text>
-            <Select
-              value={expiry}
-              options={expiryOptions()}
-              onChange={setExpiry}
-            />
-          </div>
+          {mode === 'share' && shareType === 'pickup' ? (
+            <div className={`${styles['modal-field']} ${styles.wide}`}>
+              <Typography.Text>{uiText('取件码有效期')}</Typography.Text>
+              <Typography.Text type="secondary">
+                {formatPickupLifetime(pickupLifetime)}
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {uiText('取件码有效期由系统设置决定，创建后不可修改')}
+              </Typography.Text>
+            </div>
+          ) : (
+            <div className={styles['modal-field']}>
+              <Typography.Text>{uiText('有效期')}</Typography.Text>
+              <Select
+                value={expiry}
+                options={expiryOptions()}
+                onChange={setExpiry}
+              />
+            </div>
+          )}
           <div className={styles['modal-field']}>
             <Typography.Text>{uiText('下载次数限制')}</Typography.Text>
             <InputNumber

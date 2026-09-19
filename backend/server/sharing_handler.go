@@ -8,19 +8,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/blobstore"
-	"github.com/PYLinTech/XiaoyuPostHub/backend/filestore"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/randomtoken"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/resource"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/sharing"
-	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -714,12 +711,15 @@ func shareMetadata(w http.ResponseWriter, r *http.Request, deps Deps, token stri
 		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
 		return
 	}
+	knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+	if knobErr != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
+		return
+	}
 	response["downloadPolicy"] = map[string]any{
-		"folderPackMode":       settings.FolderPackMode,
-		"shareDeliveryMode":    settings.ShareDeliveryMode,
-		"shareRetrievalMode":   settings.ShareRetrievalMode,
-		"proxyRealtimeDecrypt": settings.ProxyRealtimeDecrypt,
-		"prepareUrl":           "/api/shares/" + token + "/downloads",
+		"shareRetrievalMode": settings.ShareRetrievalMode,
+		"redirectFallback":   knobs.RedirectFallback,
+		"prepareUrl":         "/api/shares/" + token + "/downloads",
 	}
 	if pickupCode := r.Header.Get("X-Internal-Pickup-Code"); pickupCode != "" {
 		response["downloadPolicy"].(map[string]any)["prepareUrl"] = "/api/pickups/" + pickupCode + "/downloads"
@@ -748,8 +748,16 @@ func shareMetadata(w http.ResponseWriter, r *http.Request, deps Deps, token stri
 	writeJSON(w, http.StatusOK, response)
 }
 
-// createShareDownloadJob 创建五分钟有效的下载任务。任务完整取流后才计数；
-// 同一任务的并行 Range、重试和中断请求由服务端按覆盖区间归并。
+// createShareDownloadJob 创建一次下载操作对应的短时任务，并返回前端接收所需的
+// 下载计划：每个文件项都带分片元数据，前端一律逐片处理（解密、合并、打包均在
+// 浏览器完成，服务端只负责鉴权、发地址与计数）。
+//
+// 取数方式：
+//   - redirect（302 优先且可用）：前端逐片按需取址后直连第三方，流量不过我们；
+//   - proxy（中转优先，或 302 不可用且开启自动降级）：前端从本机中转拉取——
+//     加密对象下发密文 + 密钥信封（前端解密），请求方无法前端解密时由服务器
+//     实时解密兜底输出明文；
+//   - 302 不可用且关闭自动降级：按下载失败处理（不暴露内部原因）。
 func createShareDownloadJob(w http.ResponseWriter, r *http.Request, deps Deps, shareToken string) {
 	item, status, err := loadUsableShare(r, deps, shareToken)
 	if err != nil {
@@ -773,241 +781,104 @@ func createShareDownloadJob(w http.ResponseWriter, r *http.Request, deps Deps, s
 		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
 		return
 	}
-	expiresAt := time.Now().Add(5 * time.Minute)
-
-	// 单文件分享：不落制品，直接创建统一交付会话（/dl/<id>）；
-	// 会话在交付时完成"预扣额度 → 传输 → 记录区间"的既有计数流程。
-	if isSingleFileShare(item) {
-		sharedFile := item.Resources[0]
-		if !requireDeliverableFile(w, r, deps, sharedFile.ID) {
-			return
+	knobs, knobErr := deps.SystemSettings.GetKnobs(r.Context())
+	if knobErr != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "读取下载策略失败")
+		return
+	}
+	tree, err := buildShareTree(r, deps, item)
+	if err != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "读取分享内容失败")
+		return
+	}
+	if len(tree) == 0 {
+		writeBusinessError(w, http.StatusUnprocessableEntity, "分享内容不可交付")
+		return
+	}
+	blobByID := make(map[string]blobstore.Blob, len(tree))
+	blobs := make([]blobstore.Blob, 0, len(tree))
+	var totalBytes int64
+	jobFiles := make([]sharing.DownloadJobFileParam, 0, len(tree))
+	for _, entry := range tree {
+		if entry.Resource.Kind != resource.KindFile {
+			continue
 		}
-		blob, blobErr := resourceBlob(r.Context(), deps, sharedFile)
+		blob, blobErr := resourceBlob(r.Context(), deps, entry.Resource)
 		if blobErr != nil {
 			writeDownloadPreparationError(w, blobErr)
 			return
 		}
-		if availableErr := deps.Blobs.VerifyAvailable(r.Context(), blob); availableErr != nil {
-			writeDownloadPreparationError(w, availableErr)
-			return
-		}
-		// 302 交付：管理员选择 redirect 且对象后端支持直链时，直接下发第三方
-		// 直链（流量不经过我们）。明文对象可由浏览器直跳；加密对象必须由浏览器
-		// 端解密，因此同时下发密钥信封（缺公钥的旧客户端返回 428）。
-		if settings.ShareRetrievalMode == systemsetting.RetrievalRedirect {
-			if redirectURL, ok := presignBlob(r.Context(), deps, blob, blobstore.PresignForShare); ok {
-				var redirectEncryption map[string]any
-				if blob.Encryption != nil {
-					meta, metaErr := clientEncryptionMetadata(r, deps, blob)
-					if metaErr != nil {
-						if errors.Is(metaErr, errClientKeyMissing) {
-							writeBusinessError(w, http.StatusPreconditionRequired, "请在浏览器中打开此页面后重试")
-							return
-						}
-						writeBusinessError(w, http.StatusInternalServerError, "准备解密信息失败")
-						return
-					}
-					redirectEncryption = meta
-				}
-				jobID, _, createErr := deps.SharingRepo.CreateDownloadJob(r.Context(), sharing.CreateDownloadJobParams{
-					ShareID:  item.ID,
-					PackMode: systemsetting.PackBackend, DeliveryMode: systemsetting.DeliveryBlob,
-					ArtifactName: strPtr(sharedFile.Name), ArtifactContentType: strPtr(blobContentType(sharedFile)),
-					ArtifactSHA256: strPtr(blob.SHA256), TotalBytes: blob.SizeBytes, ExpiresAt: expiresAt,
-				})
-				if createErr != nil {
-					writeCreateDownloadJobError(w, createErr)
-					return
-				}
-				// 302 交付由浏览器直连第三方，服务端无法观测传输：按一次完整交付
-				// 结算（预扣额度 + 完整区间），保证下载次数与流量统计可用。
-				activated, reserveErr := deps.SharingRepo.ReserveDownloadJob(r.Context(), jobID)
-				if reserveErr != nil {
-					writeBusinessError(w, http.StatusInternalServerError, "更新分享用量失败")
-					return
-				}
-				if !activated {
-					writeBusinessError(w, http.StatusTooManyRequests, "分享已过期或达到下载限制")
-					return
-				}
-				settleEnd := blob.SizeBytes - 1
-				if settleEnd < 0 {
-					settleEnd = 0
-				}
-				if _, err := deps.SharingRepo.RecordDownloadRange(r.Context(), jobID, "artifact", 0, settleEnd); err != nil {
-					log.Printf("302 交付结算失败：%v", err)
-				}
-				writeJSON(w, http.StatusCreated, map[string]any{
-					"status": "ok", "packMode": systemsetting.PackBackend,
-					"deliveryMode": "redirect",
-					"expiresAt":    expiresAt, "url": redirectURL,
-					// sizeBytes 统一为明文口径（前端展示与进度）；密文长度由
-					// encryption.wireSize 提供；sha256 供接收端自行校验。
-					"fileName": sharedFile.Name, "sizeBytes": blob.SizeBytes,
-					"sha256":     blob.SHA256,
-					"encryption": redirectEncryption,
-				})
-				return
-			}
-		}
-		// 加密文件 + 服务器实时解密关：由浏览器端解密（响应下发密钥信封）。
-		// 「一次性临时链接」由浏览器直接跳转消费地址、拿不到密钥信封，因此降级为
-		// 「前端读取 Blob 流」，由前端拉取密文后解密。
-		clientDecrypt := needsClientDecryption(blob, settings.ProxyRealtimeDecrypt, false)
-		var encryptionMeta map[string]any
-		deliveryMode := settings.ShareDeliveryMode
-		if clientDecrypt {
-			meta, metaErr := clientEncryptionMetadata(r, deps, blob)
-			if metaErr != nil {
-				if errors.Is(metaErr, errClientKeyMissing) {
-					writeBusinessError(w, http.StatusPreconditionRequired, "请在浏览器中打开此页面后重试")
-					return
-				}
-				writeBusinessError(w, http.StatusInternalServerError, "准备解密信息失败")
-				return
-			}
-			encryptionMeta = meta
-			deliveryMode = systemsetting.DeliveryBlob
-		}
-		jobID, _, createErr := deps.SharingRepo.CreateDownloadJob(r.Context(), sharing.CreateDownloadJobParams{
-			ShareID:  item.ID,
-			PackMode: systemsetting.PackBackend, DeliveryMode: settings.ShareDeliveryMode,
-			ArtifactName: strPtr(sharedFile.Name), ArtifactContentType: strPtr(blobContentType(sharedFile)),
-			ArtifactSHA256: strPtr(blob.SHA256), TotalBytes: blob.SizeBytes, ExpiresAt: expiresAt,
+		blobByID[entry.Resource.ID] = blob
+		blobs = append(blobs, blob)
+		totalBytes += entry.Resource.SizeBytes
+		jobFiles = append(jobFiles, sharing.DownloadJobFileParam{
+			ResourceID: entry.ID, RelativePath: filepath.ToSlash(entry.RelativePath),
 		})
-		if createErr != nil {
-			writeCreateDownloadJobError(w, createErr)
-			return
-		}
-		sessionID, sessionErr := deps.Deliveries.create(&deliverySession{
-			BlobID: blob.ID, Name: sharedFile.Name, ContentType: blobContentType(sharedFile),
-			SizeBytes:      blob.SizeBytes,
-			Purpose:        blobstore.PresignForShare,
-			SHA256:         blob.SHA256,
-			ClientDecrypt:  clientDecrypt,
-			EncryptionMeta: encryptionMeta,
-			OnStart: func(ctx context.Context) (bool, error) {
-				return deps.SharingRepo.ReserveDownloadJob(ctx, jobID)
-			},
-			OnComplete: func(ctx context.Context, start, end int64, complete bool) {
-				if !complete {
-					return
-				}
-				// 单文件会话等价于旧的"后端制品"模式：以 artifact 作为对象标识，
-				// 完整取流后提交下载次数与流量。
-				if _, err := deps.SharingRepo.RecordDownloadRange(ctx, jobID, "artifact", start, end); err != nil {
-					log.Printf("记录分享下载完成区间失败：%v", err)
-				}
-			},
-		})
-		if sessionErr != nil {
-			writeBusinessError(w, http.StatusInternalServerError, "创建下载任务失败")
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"status": "ok", "packMode": systemsetting.PackBackend,
-			"deliveryMode": deliveryMode,
-			"expiresAt":    expiresAt, "url": "/dl/" + sessionID,
-			"fileName": sharedFile.Name, "sizeBytes": blob.SizeBytes,
-			"sha256":     blob.SHA256,
-			"encryption": encryptionMeta,
-		})
+	}
+	if len(blobs) == 0 {
+		writeBusinessError(w, http.StatusUnprocessableEntity, "分享内容不可交付")
 		return
 	}
-
-	// 文件夹后端打包：生成 ZIP 制品并登记下载任务（制品仅存在于本机，交付固定中转）。
-	if settings.FolderPackMode == systemsetting.PackBackend {
-		path, size, name, contentType, zipFiles, cleanup, prepErr := prepareShareZip(r, deps, item)
-		if prepErr != nil {
-			if cleanup != nil {
-				cleanup()
-			}
-			writeDownloadPreparationError(w, prepErr)
-			return
-		}
-		checksum, diskSize, checksumErr := filestore.ChecksumFile(path)
-		if checksumErr != nil || diskSize != size {
-			if cleanup != nil {
-				cleanup()
-			}
-			writeBusinessError(w, http.StatusUnprocessableEntity, "下载制品完整性校验失败")
-			return
-		}
-		_, jobToken, createErr := deps.SharingRepo.CreateDownloadJob(r.Context(), sharing.CreateDownloadJobParams{
-			ShareID:  item.ID,
-			PackMode: systemsetting.PackBackend, DeliveryMode: settings.ShareDeliveryMode,
-			ArtifactPath: strPtr(path), ArtifactName: strPtr(name),
-			ArtifactContentType: strPtr(contentType), ArtifactSHA256: strPtr(checksum),
-			ArtifactTemporary: true,
-			TotalBytes:        size, ExpiresAt: expiresAt,
-			// 后端模式计数只认 "artifact" 区间（不读文件清单），登记文件集合
-			// 仅用于 claim 时的可交付性复核。
-			Files: zipFiles,
-		})
-		if createErr != nil {
-			if cleanup != nil {
-				cleanup()
-			}
-			writeCreateDownloadJobError(w, createErr)
-			return
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{
-			"status": "ok", "packMode": systemsetting.PackBackend,
-			"deliveryMode": settings.ShareDeliveryMode,
-			"expiresAt":    expiresAt, "url": "/api/share-downloads/" + jobToken,
-			"fileName": name, "sizeBytes": size,
-		})
+	// 多文件/文件夹固定 302 优先（forceRedirect），只有 302 不可用且开启自动
+	// 降级时才回落到本机中转；单文件跟随系统取数方式。
+	source, sourceErr := resolveDeliverySource(r, deps, settings, knobs, blobs, !isSingleFileShare(item))
+	if sourceErr != nil {
+		writeDeliveryFailure(w)
 		return
 	}
-
-	tree, err := buildShareTree(r, deps, item)
-	if err != nil {
-		writeBusinessError(w, http.StatusInternalServerError, "读取文件夹失败")
+	expiresAt := time.Now().Add(downloadJobTTL(totalBytes))
+	_, jobToken, createErr := deps.SharingRepo.CreateDownloadJob(r.Context(), sharing.CreateDownloadJobParams{
+		ShareID: item.ID, TotalBytes: totalBytes, ExpiresAt: expiresAt, Files: jobFiles,
+	})
+	if createErr != nil {
+		writeCreateDownloadJobError(w, createErr)
 		return
 	}
-	var totalBytes int64
-	files := make([]sharing.DownloadJobFileParam, 0)
-	manifest := make([]map[string]any, 0, len(tree))
+	// 下载方向配额：登录按账号、未登录按来源 IP（guest 组配额），计划创建即记账。
+	// 放在任务创建成功之后：分享自身的下载次数/流量限额不满足时不会消耗下载者额度。
+	downloadSource := "share"
+	if r.Header.Get("X-Internal-Pickup-Code") != "" {
+		downloadSource = "pickup"
+	}
+	if err := guardPlannedDownload(r, deps, totalBytes, downloadSource); err != nil {
+		writeDownloadQuotaFailure(w, err)
+		return
+	}
+	streamBase := "/api/share-downloads/" + jobToken + "/files/"
+	planItems := make([]deliveryItem, 0, len(tree))
 	for _, entry := range tree {
-		manifestItem := map[string]any{
-			"resourceId": entry.ID, "kind": entry.Kind,
-			"relativePath": filepath.ToSlash(entry.RelativePath), "sizeBytes": entry.SizeBytes,
-		}
-		if entry.Kind == resource.KindFile {
-			blob, blobErr := resourceBlob(r.Context(), deps, entry.Resource)
-			if blobErr != nil {
-				writeDownloadPreparationError(w, blobErr)
-				return
-			}
-			// 下发明文哈希供前端逐文件校验（服务端不做交付前校验）。
-			manifestItem["sha256"] = blob.SHA256
-			totalBytes += entry.SizeBytes
-			files = append(files, sharing.DownloadJobFileParam{
-				ResourceID: entry.ID, RelativePath: filepath.ToSlash(entry.RelativePath),
+		if entry.Resource.Kind == resource.KindFolder {
+			// 文件夹项只用于前端还原空目录结构。
+			planItems = append(planItems, deliveryItem{
+				Kind: resource.KindFolder, ResourceID: entry.ID, Name: entry.Name,
+				RelativePath: filepath.ToSlash(entry.RelativePath),
 			})
+			continue
 		}
-		manifest = append(manifest, manifestItem)
-	}
-	_, jobToken, err := deps.SharingRepo.CreateDownloadJob(r.Context(), sharing.CreateDownloadJobParams{
-		ShareID:  item.ID,
-		PackMode: systemsetting.PackFrontend, DeliveryMode: settings.ShareDeliveryMode,
-		TotalBytes: totalBytes, ExpiresAt: expiresAt, Files: files,
-	})
-	if err != nil {
-		writeCreateDownloadJobError(w, err)
-		return
-	}
-	for _, manifestItem := range manifest {
-		if manifestItem["kind"] == resource.KindFile {
-			manifestItem["url"] = "/api/share-downloads/" + jobToken + "/files/" + manifestItem["resourceId"].(string)
+		blob := blobByID[entry.Resource.ID]
+		streamURL, partURL := "", ""
+		if source == deliverySourceProxy {
+			streamURL = streamBase + entry.ID
+		} else {
+			partURL = streamBase + entry.ID + "/parts/"
 		}
+		planItem, itemErr := buildDeliveryItem(r, deps, entry.Resource, blob, streamURL, partURL)
+		if itemErr != nil {
+			log.Printf("构建下载计划失败 resource=%s：%v", entry.Resource.ID, itemErr)
+			writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+			return
+		}
+		planItem.RelativePath = filepath.ToSlash(entry.RelativePath)
+		planItems = append(planItems, planItem)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"status": "ok", "packMode": systemsetting.PackFrontend,
-		"deliveryMode": settings.ShareDeliveryMode, "expiresAt": expiresAt,
-		"archiveName": tree[0].Name + ".zip", "totalBytes": totalBytes,
-		"items": manifest,
-	})
+	response := map[string]any{
+		"status": "ok", "dataSource": source, "totalBytes": totalBytes,
+		"expiresAt": expiresAt, "items": planItems,
+	}
+	if !isSingleFileShare(item) {
+		response["archiveName"] = tree[0].Name + ".zip"
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func shareDownloadJobHandler(deps Deps) http.HandlerFunc {
@@ -1017,143 +888,112 @@ func shareDownloadJobHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/share-downloads/"), "/")
-		if len(parts) == 1 && parts[0] != "" {
-			artifact, err := deps.SharingRepo.ClaimDownloadArtifact(r.Context(), parts[0])
-			if errors.Is(err, sharing.ErrNotFound) {
-				writeBusinessError(w, http.StatusGone, "下载地址已失效或已使用")
-				return
-			}
-			if err != nil {
-				log.Printf("读取分享下载制品失败：%v", err)
-				writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
-				return
-			}
-			checksum, size, err := filestore.ChecksumFile(artifact.Path)
-			if err != nil || checksum != artifact.SHA256 || size != artifact.SizeBytes {
-				writeBusinessError(w, http.StatusUnprocessableEntity, "下载制品完整性校验失败")
-				return
-			}
-			activated, err := deps.SharingRepo.ReserveDownloadJob(r.Context(), artifact.JobID)
-			if err != nil {
-				writeBusinessError(w, http.StatusInternalServerError, "更新分享用量失败")
-				return
-			}
-			if !activated {
-				writeBusinessError(w, http.StatusTooManyRequests, "分享已过期或达到下载限制")
-				return
-			}
-			delivery := serveLocalArtifact(w, r, artifact.Path, artifact.SizeBytes, artifact.Name, artifact.ContentType)
-			if delivery.complete {
-				commitCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-				defer cancel()
-				if _, err := deps.SharingRepo.RecordDownloadRange(commitCtx, artifact.JobID, "artifact", delivery.start, delivery.end); err != nil {
-					log.Printf("记录分享下载完成区间失败：%v", err)
-				}
-			}
+		// /api/share-downloads/<jobToken>/files/<resourceId>：本机中转交付。
+		if len(parts) == 3 && parts[0] != "" && parts[1] == "files" && parts[2] != "" {
+			serveShareJobFileStream(w, r, deps, parts[0], parts[2])
 			return
 		}
-		if len(parts) == 3 && parts[0] != "" && parts[1] == "files" && parts[2] != "" {
-			file, err := deps.SharingRepo.ClaimDownloadJobFile(r.Context(), parts[0], parts[2])
-			if errors.Is(err, sharing.ErrNotFound) {
-				writeBusinessError(w, http.StatusGone, "文件下载地址已失效或已使用")
-				return
-			}
-			if err != nil {
-				log.Printf("读取分享下载文件失败：%v", err)
-				writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
-				return
-			}
-			blob, blobErr := resourceBlob(r.Context(), deps, file.Resource)
-			if blobErr != nil {
-				writeDownloadPreparationError(w, blobErr)
-				return
-			}
-			settings, settingsErr := deps.SystemSettings.Get(r.Context())
-			if settingsErr != nil {
-				writeBusinessError(w, http.StatusInternalServerError, "读取交付策略失败")
-				return
-			}
-			// 302 交付（仅明文）：直接重定向到第三方直链——流量不经过我们，第三方
-			// 响应无法携带解密元数据，因此加密文件固定走中转。第三方同样无法观测
-			// 传输，按一次完整交付结算（管理员选择 302 即接受该口径）。
-			if blob.Encryption == nil && settings.ShareRetrievalMode == systemsetting.RetrievalRedirect {
-				if availableErr := deps.Blobs.VerifyAvailable(r.Context(), blob); availableErr == nil {
-					if redirectURL, ok := presignBlob(r.Context(), deps, blob, blobstore.PresignForShare); ok {
-						activated, reserveErr := deps.SharingRepo.ReserveDownloadJob(r.Context(), file.JobID)
-						if reserveErr != nil {
-							writeBusinessError(w, http.StatusInternalServerError, "更新分享用量失败")
-							return
-						}
-						if !activated {
-							writeBusinessError(w, http.StatusTooManyRequests, "分享已过期或达到下载限制")
-							return
-						}
-						settleEnd := blob.SizeBytes - 1
-						if settleEnd < 0 {
-							settleEnd = 0
-						}
-						if _, err := deps.SharingRepo.RecordDownloadRange(r.Context(), file.JobID, file.Resource.ID, 0, settleEnd); err != nil {
-							log.Printf("302 交付结算失败：%v", err)
-						}
-						http.Redirect(w, r, redirectURL, http.StatusFound)
-						return
-					}
-				}
-			}
-			activated, err := deps.SharingRepo.ReserveDownloadJob(r.Context(), file.JobID)
-			if err != nil {
-				writeBusinessError(w, http.StatusInternalServerError, "更新分享用量失败")
-				return
-			}
-			if !activated {
-				writeBusinessError(w, http.StatusTooManyRequests, "分享已过期或达到下载限制")
-				return
-			}
-			// 加密文件在"服务器实时解密关"时输出密文 + 解密元数据（前端逐文件解密）。
-			if needsClientDecryption(blob, settings.ProxyRealtimeDecrypt, false) {
-				meta, metaErr := clientEncryptionMetadata(r, deps, blob)
-				if metaErr != nil {
-					if errors.Is(metaErr, errClientKeyMissing) {
-						writeBusinessError(w, http.StatusPreconditionRequired, "请在浏览器中打开此页面后重试")
-						return
-					}
-					writeBusinessError(w, http.StatusInternalServerError, "准备解密信息失败")
-					return
-				}
-				delivery, ok := deliverBlobContent(w, r, deps, blob, file.Resource.Name,
-					blobContentType(file.Resource), "", true, meta, blobstore.PresignForShare)
-				if !ok {
-					return
-				}
-				if delivery.complete {
-					// 计数换算回明文坐标：与任务登记的明文总量同坐标系，
-					// 防止构造"明文长度的密文 Range"提前触发完整下载判定。
-					plainStart, plainEnd := plainRangeForWireRange(delivery.start, delivery.end,
-						blobstore.EncryptionChunkSize, blob.SizeBytes)
-					commitCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-					defer cancel()
-					if _, err := deps.SharingRepo.RecordDownloadRange(commitCtx, file.JobID, file.Resource.ID, plainStart, plainEnd); err != nil {
-						log.Printf("记录分享文件下载完成区间失败：%v", err)
-					}
-				}
-				return
-			}
-			delivery, ok := deliverBlobContent(w, r, deps, blob, file.Resource.Name,
-				blobContentType(file.Resource), "", false, nil, blobstore.PresignForShare)
-			if !ok {
-				return
-			}
-			if delivery.complete {
-				commitCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-				defer cancel()
-				if _, err := deps.SharingRepo.RecordDownloadRange(commitCtx, file.JobID, file.Resource.ID, delivery.start, delivery.end); err != nil {
-					log.Printf("记录分享文件下载完成区间失败：%v", err)
-				}
-			}
+		// /api/share-downloads/<jobToken>/files/<resourceId>/parts/<index>：302 逐片取址。
+		if len(parts) == 5 && parts[0] != "" && parts[1] == "files" && parts[2] != "" && parts[3] == "parts" && parts[4] != "" {
+			serveShareJobFilePart(w, r, deps, parts[0], parts[2], parts[4])
 			return
 		}
 		writeBusinessError(w, http.StatusNotFound, "下载地址不存在")
 	}
+}
+
+// claimShareJobFile 载入任务内单个文件对象并完成首次预扣（Reserve 只生效一次）；
+// 出错时已写出错误响应，调用方直接返回。
+func claimShareJobFile(w http.ResponseWriter, r *http.Request, deps Deps, jobToken, resourceID string) (sharing.DownloadJobFile, blobstore.Blob, bool) {
+	file, err := deps.SharingRepo.ClaimDownloadJobFile(r.Context(), jobToken, resourceID)
+	if errors.Is(err, sharing.ErrNotFound) {
+		writeBusinessError(w, http.StatusGone, "下载地址已失效或已使用")
+		return sharing.DownloadJobFile{}, blobstore.Blob{}, false
+	}
+	if err != nil {
+		log.Printf("读取分享下载文件失败：%v", err)
+		writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+		return sharing.DownloadJobFile{}, blobstore.Blob{}, false
+	}
+	blob, blobErr := resourceBlob(r.Context(), deps, file.Resource)
+	if blobErr != nil {
+		writeDownloadPreparationError(w, blobErr)
+		return sharing.DownloadJobFile{}, blobstore.Blob{}, false
+	}
+	activated, reserveErr := deps.SharingRepo.ReserveDownloadJob(r.Context(), file.JobID)
+	if reserveErr != nil {
+		writeBusinessError(w, http.StatusInternalServerError, "更新分享用量失败")
+		return sharing.DownloadJobFile{}, blobstore.Blob{}, false
+	}
+	if !activated {
+		writeBusinessError(w, http.StatusTooManyRequests, "分享已过期或达到下载限制")
+		return sharing.DownloadJobFile{}, blobstore.Blob{}, false
+	}
+	return file, blob, true
+}
+
+// serveShareJobFileStream 本机中转交付单文件：加密对象下发密文 + 密钥信封（前端
+// 解密合并），请求方无法前端解密（无公钥）时由服务器实时解密兜底输出明文。
+func serveShareJobFileStream(w http.ResponseWriter, r *http.Request, deps Deps, jobToken, resourceID string) {
+	file, blob, ok := claimShareJobFile(w, r, deps, jobToken, resourceID)
+	if !ok {
+		return
+	}
+	delivery, delivered := deliverItemStream(w, r, deps, blob, file.Resource.Name,
+		blobContentType(file.Resource), "attachment", blobstore.PresignForShare)
+	if !delivered || !delivery.complete {
+		return
+	}
+	// 密文坐标换算回明文坐标（与任务登记的明文总量同坐标系）。
+	plainStart, plainEnd := delivery.start, delivery.end
+	if blob.Encryption != nil && clientCanDecrypt(r) {
+		plainStart, plainEnd = plainRangeForWireRange(delivery.start, delivery.end,
+			blobstore.EncryptionChunkSize, blob.SizeBytes)
+	}
+	commitCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	if _, err := deps.SharingRepo.RecordDownloadRange(commitCtx, file.JobID, file.Resource.ID, plainStart, plainEnd); err != nil {
+		log.Printf("记录分享文件下载完成区间失败：%v", err)
+	}
+}
+
+// serveShareJobFilePart 302 取数：为指定分片即时取第三方直链（前端逐片按需请求）。
+// 第三方传输服务端无法观测：该文件首次取址即视为开始下载，按一次完整交付结算
+// （任务内所有文件都完成取数后统一计一次下载）。
+func serveShareJobFilePart(w http.ResponseWriter, r *http.Request, deps Deps, jobToken, resourceID, rawIndex string) {
+	index, err := strconv.ParseInt(rawIndex, 10, 32)
+	if err != nil || index < 0 {
+		writeBusinessError(w, http.StatusNotFound, "下载地址不存在")
+		return
+	}
+	file, blob, ok := claimShareJobFile(w, r, deps, jobToken, resourceID)
+	if !ok {
+		return
+	}
+	url, presignErr := presignItemPart(r, deps, blob, int32(index), blobstore.PresignForShare)
+	if presignErr != nil {
+		if errors.Is(presignErr, errDeliveryUnavailable) {
+			writeDeliveryFailure(w)
+			return
+		}
+		log.Printf("准备直链失败 resource=%s：%v", file.Resource.ID, presignErr)
+		writeBusinessError(w, http.StatusInternalServerError, "准备下载失败")
+		return
+	}
+	first, consumeErr := deps.SharingRepo.ConsumeJobFileOnce(r.Context(), file.JobID, file.Resource.ID)
+	if consumeErr != nil {
+		log.Printf("标记分享下载开始失败：%v", consumeErr)
+	}
+	if first {
+		end := blob.SizeBytes - 1
+		if end < 0 {
+			end = 0
+		}
+		if _, err := deps.SharingRepo.RecordDownloadRange(r.Context(), file.JobID, file.Resource.ID, 0, end); err != nil {
+			log.Printf("302 交付结算失败：%v", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "url": url})
 }
 
 func writeCreateDownloadJobError(w http.ResponseWriter, err error) {
@@ -1219,38 +1059,33 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		// 直链交付不做交付前全量校验：生成直链时已展示 SHA-256，并由
-		// X-XPH-Content-SHA256 响应头下发，使用者可自行核对；交付走统一实现，
-		// 完整下载后计入直链次数与流量。
+		// 对外直链是本系统唯一对外承诺的「真直链」：固定本机中转 + 服务器解密
+		// 合并输出原文（curl 可直接下载），不受取数方式与前端解密策略影响。
+		// 完整读到文件末尾才计入一次下载（只取中段的探测请求不计数）。
 		blob, blobErr := resourceBlob(r.Context(), deps, item.Resource)
 		if blobErr != nil {
 			writeDownloadPreparationError(w, blobErr)
 			return
 		}
 		size := blob.SizeBytes
-		// 直链始终由本机中转交付：对外只提供一个固定地址、且必须交给用户可用的
-		// 明文内容（第三方地址是临时的、加密对象在其上还是密文），因此不做 302。
-		// 「直链优先使用」只影响服务端从 123 取内容时消耗哪份额度（直链流量 /
-		// 自用下载流量），两条通道都经本机中转、交付的字节完全相同。
-		serveDeliverySession(w, r, deps, &deliverySession{
-			Purpose: blobstore.PresignForDirect,
-			BlobID:  blob.ID, Name: item.Resource.Name, ContentType: blobContentType(item.Resource),
-			SizeBytes: size, SHA256: blob.SHA256,
-			OnComplete: func(ctx context.Context, start, end int64, complete bool) {
-				// 只在"取到文件末尾"时计数：直链没有任务级的区间归并（不同于分享
-				// 下载），若额外要求 start==0，客户端只要把一次下载拆成多段 Range
-				// （下载器/断点续传的常态）就永远不满足完整下载条件，次数与流量
-				// 限制会被完全绕过。以 end==size-1 为准：取完整文件的客户端必然
-				// 命中一次；只取中段的探测请求不计数。
-				_ = start
-				if !complete || end != size-1 {
-					return
-				}
-				if _, err := deps.SharingRepo.CompleteDirectDownload(ctx, item.ID, size); err != nil {
-					log.Printf("记录直链完整下载失败：%v", err)
-				}
-			},
-		})
+		// 下载方向配额：登录按账号 / 未登录按 IP；先校验，完整取流后再记账
+		// （只取中段的探测请求不计数，与直链自身下载次数结算口径一致）。
+		subject := resolveDownloadSubject(r, deps)
+		if err := checkDownloadQuota(r.Context(), deps, subject, size); err != nil {
+			writeDownloadQuotaFailure(w, err)
+			return
+		}
+		delivery, ok := deliverBlobContent(w, r, deps, blob, item.Resource.Name,
+			blobContentType(item.Resource), "attachment", false, nil, blobstore.PresignForDirect)
+		if !ok || !delivery.complete || delivery.end != size-1 {
+			return
+		}
+		doneCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		recordDownloadUsage(doneCtx, deps, subject, size, "direct")
+		if _, err := deps.SharingRepo.CompleteDirectDownload(doneCtx, item.ID, size); err != nil {
+			log.Printf("记录直链完整下载失败：%v", err)
+		}
 	}
 }
 
@@ -1478,33 +1313,6 @@ func uniqueVirtualName(name string, used map[string]int) string {
 			return candidate
 		}
 	}
-}
-
-// prepareShareZip 为文件夹分享生成后端 ZIP 制品。单文件分享不再落制品，
-// 由统一交付会话直接流式输出。
-func prepareShareZip(r *http.Request, deps Deps, item sharing.Share) (string, int64, string, string, []sharing.DownloadJobFileParam, func(), error) {
-	tree, err := buildShareTree(r, deps, item)
-	if err != nil {
-		return "", 0, "", "", nil, nil, err
-	}
-	// 记录制品实际打包的文件集合：claim 时按该集合复核可交付性，任一成员文件
-	// 此后被处置（回收站/拉黑/审核不通过）即拒绝旧制品，需重新打包。
-	files := make([]sharing.DownloadJobFileParam, 0, len(tree))
-	for _, entry := range tree {
-		if entry.Kind == resource.KindFile {
-			files = append(files, sharing.DownloadJobFileParam{
-				ResourceID:   entry.ID,
-				RelativePath: filepath.ToSlash(entry.RelativePath),
-			})
-		}
-	}
-	path, size, err := buildZip(r.Context(), deps, tree)
-	cleanup := func() {
-		if path != "" {
-			_ = os.Remove(path)
-		}
-	}
-	return path, size, tree[0].Name + ".zip", "application/zip", files, cleanup, err
 }
 
 type downloadDelivery struct {

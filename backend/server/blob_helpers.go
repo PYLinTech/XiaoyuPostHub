@@ -6,7 +6,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -118,17 +117,6 @@ func serveBlobStreamWith(w http.ResponseWriter, r *http.Request, reader io.ReadS
 	http.ServeContent(counter, r, name, time.Time{}, reader)
 	statusOK := counter.status == http.StatusOK || counter.status == http.StatusPartialContent
 	return downloadDelivery{start: start, end: end, complete: trackable && statusOK && counter.written == end-start+1}
-}
-
-// serveLocalArtifact 交付本地临时制品（ZIP 等）：与 serveBlobStream 相同的
-// Range/ServeContent 行为，用于无法表示为存储对象的即时打包产物。
-func serveLocalArtifact(w http.ResponseWriter, r *http.Request, path string, size int64, name, contentType string) downloadDelivery {
-	f, err := os.Open(path)
-	if err != nil {
-		writeBusinessError(w, http.StatusInternalServerError, "打开下载文件失败")
-		return downloadDelivery{}
-	}
-	return serveBlobStream(w, r, f, size, name, contentType)
 }
 
 // blobContentType 根据资源的 MIME 与文件名推导响应类型。

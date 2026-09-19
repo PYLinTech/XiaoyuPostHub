@@ -186,13 +186,39 @@ func (s *Service) DefaultBackendAvailable() bool {
 	return s.defaultID != 0
 }
 
-// Presign 返回对象的第三方直链（若其后端支持且已启用直链）。ok=false 表示
-// 该后端/对象不支持 302，交付层应降级为本机中转。
-// 分片对象不参与 302：单个直链只能表达一个物理对象，否则会静默截断。
-func (s *Service) Presign(ctx context.Context, blob Blob, ttl time.Duration, purpose PresignPurpose) (string, bool, error) {
-	if blob.PartCount > 1 {
-		return "", false, nil
+// presignEnabled 由后端声明「直链能力当前是否可用」（123=交付方式选了 302 直连；
+// S3=配置完整）。未实现该接口时，只要后端实现了 Presigner 即视为可用。
+type presignEnabled interface{ PresignEnabled() bool }
+
+// PresignReady 判断对象是否具备 302 直链能力：后端支持直链且当前可用。
+// 分片对象同样支持——每个分片是后端上的独立对象，逐片取址由调用方完成
+// （前端逐片拉取后自行解密/拼接）。
+func (s *Service) PresignReady(blob Blob) bool {
+	backend, err := s.backend(blob.BackendID)
+	if err != nil {
+		return false
 	}
+	if _, ok := backend.(Presigner); !ok {
+		return false
+	}
+	if gate, ok := backend.(presignEnabled); ok {
+		return gate.PresignEnabled()
+	}
+	return true
+}
+
+// Parts 返回对象的物理分片清单（片大小按明文口径 + 后端定位符）。单对象返回
+// 单元素列表，调用方无需区分「是否分片」：前端一律按分片列表逐片取数。
+func (s *Service) Parts(ctx context.Context, blob Blob) ([]Part, error) {
+	if blob.PartCount <= 1 {
+		return []Part{{Index: 0, SizeBytes: blob.SizeBytes, ObjectRef: blob.ObjectRef}}, nil
+	}
+	return s.listParts(ctx, blob.ID)
+}
+
+// PresignPart 为单个分片生成第三方直链。ok=false 表示该分片不支持/未启用直链
+// （例如 123 后端交付方式为「优先本机中转」），交付层按降级策略处理。
+func (s *Service) PresignPart(ctx context.Context, blob Blob, part Part, ttl time.Duration, purpose PresignPurpose) (string, bool, error) {
 	backend, err := s.backend(blob.BackendID)
 	if err != nil {
 		return "", false, err
@@ -201,7 +227,16 @@ func (s *Service) Presign(ctx context.Context, blob Blob, ttl time.Duration, pur
 	if !ok {
 		return "", false, nil
 	}
-	return presigner.Presign(ctx, blob.ObjectRef, ttl, purpose)
+	return presigner.Presign(ctx, part.ObjectRef, ttl, purpose)
+}
+
+// PartWireSize 返回一个分片在存储层的密文字节数（未加密即明文大小）。
+func (blob Blob) PartWireSize(part Part) int64 {
+	cryptoChunk := int64(0)
+	if blob.Encryption != nil {
+		cryptoChunk = EncryptionChunkSize
+	}
+	return wireSize(part.SizeBytes, cryptoChunk)
 }
 
 // LoadedBackends 返回当前已成功加载的后端 ID 集合（管理界面用于展示

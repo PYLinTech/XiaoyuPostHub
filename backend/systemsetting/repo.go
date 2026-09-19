@@ -16,12 +16,8 @@ import (
 const (
 	DefaultSiteName    = "XiaoyuPostHub"
 	DefaultStoragePath = "/data/uploads"
-	PackBackend        = "backend"
-	PackFrontend       = "frontend"
-	DeliveryBlob       = "blob"
-	DeliveryTemporary  = "temporary_link"
-	// RetrievalProxy 表示分享页交付走本机中转；RetrievalRedirect 表示 302 直跳
-	// 第三方（对象存储/云盘）。需要解密的场景强制中转。
+	// RetrievalProxy 表示分享取数走本机中转优先；RetrievalRedirect 表示 302 优先
+	// （浏览器直连第三方存储/云盘，默认）。302 不可用时的行为由 RedirectFallback 决定。
 	RetrievalProxy    = "proxy"
 	RetrievalRedirect = "redirect"
 )
@@ -34,7 +30,6 @@ var (
 	ErrUploadChunkSize    = errors.New("systemsetting: 分片大小必须在 1M 到 64M 之间")
 	ErrUploadConcurrency  = errors.New("systemsetting: 上传并发数必须在 1 到 8 之间")
 	ErrTrashRetention     = errors.New("systemsetting: 回收期限必须在 1 到 3650 天之间")
-	ErrDownloadMode       = errors.New("systemsetting: 下载策略无效")
 	ErrPickupLifetime     = errors.New("systemsetting: 取件码有效期上限无效")
 	ErrInvitationValidity = errors.New("systemsetting: 邀请码有效期必须在 0（永久）到 3650 天之间")
 	ErrUploadMaxFileBytes = errors.New("systemsetting: 单文件上限必须在 16MiB 到 1TiB 之间")
@@ -45,8 +40,6 @@ var (
 type Config struct {
 	SiteName                   string
 	StoragePath                string
-	FolderPackMode             string
-	ShareDeliveryMode          string
 	InvitationLength           int16
 	InvitationCaseSensitive    bool
 	InvitationIncludeLetters   bool
@@ -69,10 +62,7 @@ type Config struct {
 	TrashRetentionDays         int16
 	// EncryptNewFiles 开启后新上传文件使用分块 AES-256-GCM 加密存储。
 	EncryptNewFiles bool
-	// ProxyRealtimeDecrypt 控制本机中转交付加密文件时是否由服务器实时解密；
-	// 关闭后由浏览器端解密（密钥实时非对称下发）。直链始终服务器解密。
-	ProxyRealtimeDecrypt bool
-	// ShareRetrievalMode 是分享页交付方式（proxy / redirect）。
+	// ShareRetrievalMode 是分享取数方式：redirect=302 优先（默认），proxy=本机中转优先。
 	ShareRetrievalMode string
 	// StorageChunkSizeBytes 是新上传对象的分片粒度（0 = 不分片）；必须为
 	// 加密块（4MiB）的整数倍，保证加密后分片仍可独立随机读取。
@@ -83,6 +73,8 @@ type Config struct {
 	InvitationValidDays int32
 	// UploadMaxFileBytes 单文件系统硬上限（独立于用户组配额的安全上限）。
 	UploadMaxFileBytes int64
+	// RedirectFallback 表示 302 取数不可用时是否自动降级本机中转（默认开启）。
+	RedirectFallback bool
 	// CrossUserDedupe 秒传是否允许跨用户复用物理对象（false = 只复用本人对象）。
 	CrossUserDedupe bool
 }
@@ -118,13 +110,17 @@ type Knobs struct {
 	// TRUE：任何用户凭 sha256+精确大小即可复用他人对象（省存储，但知道哈希即可
 	// 取得他人私有文件内容）；FALSE：只复用自己已有引用的对象。
 	CrossUserDedupe bool
+	// RedirectFallback 表示 302 取数不可用（后端无直链能力 / 请求方无法前端解密）
+	// 时是否自动降级为本机中转；关闭时按下载失败处理（不向用户暴露内部原因）。
+	RedirectFallback bool
 }
 
-// DefaultKnobs 返回新开关的出厂默认值（与迁移 034/035 的列默认值一致）。
+// DefaultKnobs 返回新开关的出厂默认值（与迁移 034/035/037 的列默认值一致）。
 func DefaultKnobs() Knobs {
 	return Knobs{
 		PickupAllowPermanent: true, InvitationValidDays: 90,
 		UploadMaxFileBytes: DefaultUploadMaxFileBytes, CrossUserDedupe: true,
+		RedirectFallback: true,
 	}
 }
 
@@ -135,9 +131,11 @@ func (r *Repo) GetKnobs(ctx context.Context) (Knobs, error) {
 	}
 	out := DefaultKnobs()
 	if err := r.pool.QueryRow(ctx, `
-		SELECT pickup_allow_permanent, invitation_valid_days, upload_max_file_bytes, cross_user_dedupe
+		SELECT pickup_allow_permanent, invitation_valid_days, upload_max_file_bytes, cross_user_dedupe,
+		       redirect_fallback
 		FROM system_settings WHERE id=1`).
-		Scan(&out.PickupAllowPermanent, &out.InvitationValidDays, &out.UploadMaxFileBytes, &out.CrossUserDedupe); err != nil {
+		Scan(&out.PickupAllowPermanent, &out.InvitationValidDays, &out.UploadMaxFileBytes,
+			&out.CrossUserDedupe, &out.RedirectFallback); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Knobs{}, ErrNotInitialized
 		}
@@ -161,11 +159,14 @@ func (r *Repo) UpdateKnobs(ctx context.Context, k Knobs) (Knobs, error) {
 	if err := r.pool.QueryRow(ctx, `
 		UPDATE system_settings
 		SET pickup_allow_permanent=$1, invitation_valid_days=$2, upload_max_file_bytes=$3,
-		    cross_user_dedupe=$4, updated_at=NOW()
+		    cross_user_dedupe=$4, redirect_fallback=$5, updated_at=NOW()
 		WHERE id=1
-		RETURNING pickup_allow_permanent, invitation_valid_days, upload_max_file_bytes, cross_user_dedupe`,
-		k.PickupAllowPermanent, k.InvitationValidDays, k.UploadMaxFileBytes, k.CrossUserDedupe).
-		Scan(&out.PickupAllowPermanent, &out.InvitationValidDays, &out.UploadMaxFileBytes, &out.CrossUserDedupe); err != nil {
+		RETURNING pickup_allow_permanent, invitation_valid_days, upload_max_file_bytes,
+		          cross_user_dedupe, redirect_fallback`,
+		k.PickupAllowPermanent, k.InvitationValidDays, k.UploadMaxFileBytes, k.CrossUserDedupe,
+		k.RedirectFallback).
+		Scan(&out.PickupAllowPermanent, &out.InvitationValidDays, &out.UploadMaxFileBytes,
+			&out.CrossUserDedupe, &out.RedirectFallback); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Knobs{}, ErrNotInitialized
 		}
@@ -188,9 +189,6 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 	siteName, storagePath, err := validateIdentity(config.SiteName, config.StoragePath)
 	if err != nil {
 		return sqlcgen.SystemSetting{}, err
-	}
-	if !ValidDownloadMode(config.FolderPackMode, config.ShareDeliveryMode) {
-		return sqlcgen.SystemSetting{}, ErrDownloadMode
 	}
 	if !validCodeConfig(config.InvitationLength, config.InvitationIncludeLetters, config.InvitationIncludeNumbers) ||
 		!validCodeConfig(config.ShareLength, config.ShareIncludeLetters, config.ShareIncludeNumbers) ||
@@ -216,12 +214,13 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 	if !ValidStorageChunkSize(config.StorageChunkSizeBytes) {
 		return sqlcgen.SystemSetting{}, ErrStorageChunkSize
 	}
-	// 后加的三项开关先校验（避免主配置已写入而开关无效的半成功状态）。
+	// 后加的四项开关先校验（避免主配置已写入而开关无效的半成功状态）。
 	knobs := Knobs{
 		PickupAllowPermanent: config.PickupAllowPermanent,
 		InvitationValidDays:  config.InvitationValidDays,
 		UploadMaxFileBytes:   config.UploadMaxFileBytes,
 		CrossUserDedupe:      config.CrossUserDedupe,
+		RedirectFallback:     config.RedirectFallback,
 	}
 	if knobs.InvitationValidDays < 0 || knobs.InvitationValidDays > 3650 {
 		return sqlcgen.SystemSetting{}, ErrInvitationValidity
@@ -231,7 +230,6 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 	}
 	settings, err := r.q.UpdateAllSystemSettings(ctx, sqlcgen.UpdateAllSystemSettingsParams{
 		SiteName: siteName, StoragePath: storagePath,
-		FolderPackMode: config.FolderPackMode, ShareDeliveryMode: config.ShareDeliveryMode,
 		InvitationLength: config.InvitationLength, InvitationCaseSensitive: config.InvitationCaseSensitive,
 		InvitationIncludeLetters: config.InvitationIncludeLetters, InvitationIncludeNumbers: config.InvitationIncludeNumbers,
 		ShareLength: config.ShareLength, ShareCaseSensitive: config.ShareCaseSensitive,
@@ -246,7 +244,6 @@ func (r *Repo) UpdateAll(ctx context.Context, config Config) (sqlcgen.SystemSett
 		UploadUserTaskConcurrency:  config.UploadUserTaskConcurrency,
 		TrashRetentionDays:         config.TrashRetentionDays,
 		EncryptNewFiles:            config.EncryptNewFiles,
-		ProxyRealtimeDecrypt:       config.ProxyRealtimeDecrypt,
 		ShareRetrievalMode:         config.ShareRetrievalMode,
 		StorageChunkSizeBytes:      config.StorageChunkSizeBytes,
 	})
@@ -287,11 +284,6 @@ func validateIdentity(siteName, storagePath string) (string, string, error) {
 		return "", "", ErrStoragePathInvalid
 	}
 	return siteName, filepath.Clean(storagePath), nil
-}
-
-func ValidDownloadMode(packMode, deliveryMode string) bool {
-	return (packMode == PackBackend || packMode == PackFrontend) &&
-		(deliveryMode == DeliveryBlob || deliveryMode == DeliveryTemporary)
 }
 
 func validCodeConfig(length int16, letters, numbers bool) bool {

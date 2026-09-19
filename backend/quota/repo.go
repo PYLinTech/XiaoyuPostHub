@@ -41,18 +41,22 @@ func (r *Repo) CreateQuotaProfile(
 	singleFileBytesLimit *int64,
 	dailyUploadBytesLimit *int64,
 	dailyUploadCountLimit *int64,
+	dailyDownloadBytesLimit *int64,
+	dailyDownloadCountLimit *int64,
 	activeShareCountLimit *int64,
 	activeDirectLinkLimit *int64,
 ) (sqlcgen.QuotaProfile, error) {
 	return r.q.CreateQuotaProfile(ctx, sqlcgen.CreateQuotaProfileParams{
-		Name:                  name,
-		Description:           strToText(description),
-		StorageBytesLimit:     int64PtrToPgtype(storageBytesLimit),
-		SingleFileBytesLimit:  int64PtrToPgtype(singleFileBytesLimit),
-		DailyUploadBytesLimit: int64PtrToPgtype(dailyUploadBytesLimit),
-		DailyUploadCountLimit: int64PtrToPgtype(dailyUploadCountLimit),
-		ActiveShareCountLimit: int64PtrToPgtype(activeShareCountLimit),
-		ActiveDirectLinkLimit: int64PtrToPgtype(activeDirectLinkLimit),
+		Name:                    name,
+		Description:             strToText(description),
+		StorageBytesLimit:       int64PtrToPgtype(storageBytesLimit),
+		SingleFileBytesLimit:    int64PtrToPgtype(singleFileBytesLimit),
+		DailyUploadBytesLimit:   int64PtrToPgtype(dailyUploadBytesLimit),
+		DailyUploadCountLimit:   int64PtrToPgtype(dailyUploadCountLimit),
+		DailyDownloadBytesLimit: int64PtrToPgtype(dailyDownloadBytesLimit),
+		DailyDownloadCountLimit: int64PtrToPgtype(dailyDownloadCountLimit),
+		ActiveShareCountLimit:   int64PtrToPgtype(activeShareCountLimit),
+		ActiveDirectLinkLimit:   int64PtrToPgtype(activeDirectLinkLimit),
 	})
 }
 
@@ -66,6 +70,8 @@ func (r *Repo) UpdateQuotaProfile(
 	singleFileBytesLimit *int64,
 	dailyUploadBytesLimit *int64,
 	dailyUploadCountLimit *int64,
+	dailyDownloadBytesLimit *int64,
+	dailyDownloadCountLimit *int64,
 	activeShareCountLimit *int64,
 	activeDirectLinkLimit *int64,
 ) error {
@@ -74,14 +80,16 @@ func (r *Repo) UpdateQuotaProfile(
 		return err
 	}
 	if _, err := r.q.UpdateQuotaProfile(ctx, sqlcgen.UpdateQuotaProfileParams{
-		ID:                    id,
-		Description:           strToText(description),
-		StorageBytesLimit:     int64PtrToPgtype(storageBytesLimit),
-		SingleFileBytesLimit:  int64PtrToPgtype(singleFileBytesLimit),
-		DailyUploadBytesLimit: int64PtrToPgtype(dailyUploadBytesLimit),
-		DailyUploadCountLimit: int64PtrToPgtype(dailyUploadCountLimit),
-		ActiveShareCountLimit: int64PtrToPgtype(activeShareCountLimit),
-		ActiveDirectLinkLimit: int64PtrToPgtype(activeDirectLinkLimit),
+		ID:                      id,
+		Description:             strToText(description),
+		StorageBytesLimit:       int64PtrToPgtype(storageBytesLimit),
+		SingleFileBytesLimit:    int64PtrToPgtype(singleFileBytesLimit),
+		DailyUploadBytesLimit:   int64PtrToPgtype(dailyUploadBytesLimit),
+		DailyUploadCountLimit:   int64PtrToPgtype(dailyUploadCountLimit),
+		DailyDownloadBytesLimit: int64PtrToPgtype(dailyDownloadBytesLimit),
+		DailyDownloadCountLimit: int64PtrToPgtype(dailyDownloadCountLimit),
+		ActiveShareCountLimit:   int64PtrToPgtype(activeShareCountLimit),
+		ActiveDirectLinkLimit:   int64PtrToPgtype(activeDirectLinkLimit),
 	}); err != nil {
 		return err
 	}
@@ -113,6 +121,16 @@ func (r *Repo) GetEffectiveQuotaByUser(ctx context.Context, userID int64) (sqlcg
 	qp, err := r.q.GetEffectiveQuotaByUser(ctx, userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sqlcgen.QuotaProfile{}, fmt.Errorf("%w: user=%d 无任何可用 quota profile", ErrQuotaProfileNotFound, userID)
+	}
+	return qp, err
+}
+
+// GetGuestQuota 返回未登录访客的有效配额：guest 系统用户组绑定的方案。
+// guest 组由迁移 038 预置且不可删除；管理员改绑其它方案后这里立即生效。
+func (r *Repo) GetGuestQuota(ctx context.Context) (sqlcgen.QuotaProfile, error) {
+	qp, err := r.q.GetGuestQuotaProfile(ctx, NameGuest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return sqlcgen.QuotaProfile{}, fmt.Errorf("%w: 缺少 %s 用户组", ErrQuotaProfileNotFound, NameGuest)
 	}
 	return qp, err
 }

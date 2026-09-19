@@ -8,3 +8,8 @@ package quota
 
 // NameDefaultUser 系统默认 quota profile：所有 user 的兜底。
 const NameDefaultUser = "default_user"
+
+// NameGuest 是未登录访客（guest）系统 quota profile / 用户组的名字。
+// 未登录访问不匹配任何用户组成员身份，统一按 guest 组绑定的方案限流，每个 IP
+// 视为一个独立用户（见 server 层的下载配额校验）。
+const NameGuest = "guest"
