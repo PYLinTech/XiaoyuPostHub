@@ -332,9 +332,29 @@ func saveStorageBackend(w http.ResponseWriter, r *http.Request, deps Deps, u use
 				req.Settings["direct_link_auth_key"] = existing
 			}
 		}
-		if boolSetting(req.Settings, "direct_link_auth") && stringSetting(req.Settings, "direct_link_auth_key") == "" {
-			writeBusinessError(w, http.StatusBadRequest, "启用直链鉴权必须填写鉴权密钥（在 123 云盘直链管理的「鉴权管理」中开启并复制密钥）")
-			return
+		if boolSetting(req.Settings, "direct_link_auth") {
+			if stringSetting(req.Settings, "direct_link_auth_key") == "" {
+				writeBusinessError(w, http.StatusBadRequest, "启用直链鉴权必须填写鉴权密钥（在 123 云盘直链管理的「鉴权管理」中开启并复制密钥）")
+				return
+			}
+			// 账号 ID 是官方签名规则里的 uid，只能由管理员填写：它无法从直链地址
+			// 推断（自定义直链域名下域名首段是站点自己的前缀），填错会让云盘 CDN
+			// 判定签名不符并拒绝访问（403）。
+			uid := stringSetting(req.Settings, "direct_link_uid")
+			if uid == "" {
+				if numeric, ok := req.Settings["direct_link_uid"].(float64); ok {
+					uid = strconv.FormatInt(int64(numeric), 10)
+				}
+			}
+			if uid == "" {
+				writeBusinessError(w, http.StatusBadRequest, "启用直链鉴权必须填写 123 云盘账号 ID（个人中心可见）")
+				return
+			}
+			if _, err := strconv.ParseUint(uid, 10, 64); err != nil {
+				writeBusinessError(w, http.StatusBadRequest, "123 云盘账号 ID 应为数字（个人中心可见）")
+				return
+			}
+			req.Settings["direct_link_uid"] = uid
 		}
 	case "s3":
 		if !deps.Blobs.S3Configured() {

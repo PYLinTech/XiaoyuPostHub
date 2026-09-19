@@ -39,6 +39,11 @@ type pan123Mock struct {
 	trashCalls    int  // trash 调用次数（验证批量分批）
 	trashIDs      [][]int64
 	directLink    bool
+	// cdnForbidden 为真时直链通道（/cdn/）返回 403，模拟"直链鉴权签名不被接受"
+	// 或直链空间被停用：用于覆盖中转上游走直链被拒的降级路径。
+	cdnForbidden bool
+	// cdnAuthKeys 记录直链通道请求携带的 auth_key（验证重开流会重新签名）。
+	cdnAuthKeys []string
 	// downloadInfoFail 为真时 download_info（自用下载通道）返回失败，
 	// 用于验证"异常时通道互相切换"与严格模式。
 	downloadInfoFail bool
@@ -174,6 +179,11 @@ func (m *pan123Mock) dispatch(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/cdn/"):
 		// 直链通道（direct-link）：取到的字节与自用下载通道完全一致，只是消耗
 		// 另一份额度——mock 用同一份内容模拟，便于断言通道选择。
+		m.cdnAuthKeys = append(m.cdnAuthKeys, r.URL.Query().Get("auth_key"))
+		if m.cdnForbidden {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		fileID, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/cdn/"), 10, 64)
 		m.handleDownload(w, r, fileID)
 	case r.URL.Path == "/api/v1/file/trash":
@@ -684,13 +694,63 @@ func TestPan123DirectLinkAuthGolden(t *testing.T) {
 		t.Fatalf("auth_key 与官方示例不一致：got=%s want=%s", got, wantAuth)
 	}
 	signed, err := signDirectLinkURL(
-		"http://13.cdn.123clouddisk.com/13/files/1.txt", privateKey, time.Unix(expiry, 0), randStr)
+		"http://13.cdn.123clouddisk.com/13/files/1.txt", privateKey, uid, time.Unix(expiry, 0), randStr)
 	if err != nil {
 		t.Fatalf("签名失败：%v", err)
 	}
 	wantURL := "http://13.cdn.123clouddisk.com/13/files/1.txt?auth_key=" + wantAuth
 	if signed != wantURL {
 		t.Fatalf("签名后的直链不符：\n got=%s\nwant=%s", signed, wantURL)
+	}
+}
+
+// TestPan123DirectLinkAuthUidAndPath 验证签名用「配置的账号 ID + 解码后的路径」：
+// 官方四个示例都显式传入账号 ID（Go/Java/PHP 均为 29，直链域名是 vip.123pan.com
+// ——域名首段不是 uid），且 URI 取 rawurldecode/decodeURIComponent 后的原文；
+// 项目早期实现从域名首段猜 uid，遇到自定义域名（如 cdn.pylin.cn）必然签名不符 403。
+func TestPan123DirectLinkAuthUidAndPath(t *testing.T) {
+	const (
+		privateKey = "289ds32418bxdba"
+		uid        = "29"
+		randStr    = "a910d2269a7e9432"
+		expiry     = int64(1789837436)
+	)
+	// 自定义直链域名：域名首段是站点自己的前缀，签名里必须是账号 ID。
+	signed, err := signDirectLinkURL(
+		"https://cdn.pylin.cn/XiaoyuPostHub/blob.p0", privateKey, uid, time.Unix(expiry, 0), randStr)
+	if err != nil {
+		t.Fatalf("签名失败：%v", err)
+	}
+	parsed, err := url.Parse(signed)
+	if err != nil {
+		t.Fatalf("签名地址无法解析：%v", err)
+	}
+	parts := strings.Split(parsed.Query().Get("auth_key"), "-")
+	if len(parts) != 4 || parts[2] != uid {
+		t.Fatalf("auth_key 的 uid 段应为配置的账号 ID（%s）：%s", uid, signed)
+	}
+	if want := directLinkAuthValue("/XiaoyuPostHub/blob.p0", uid, randStr, expiry, privateKey); parts[3] != want[len(want)-32:] {
+		t.Fatalf("md5 段与官方算法不符：got=%s want=%s", parts[3], want)
+	}
+
+	// 含中文与空格的路径：参与签名的是解码后的原文（官方 rawurldecode）。
+	raw := "http://vip.123pan.com/29/%E9%9F%B3%E4%B9%90/02.%E4%B8%80%E5%8D%83%E9%9B%B6%E4%B8%80%E5%A4%9C.wma"
+	signed, err = signDirectLinkURL(raw, privateKey, uid, time.Unix(expiry, 0), randStr)
+	if err != nil {
+		t.Fatalf("签名失败：%v", err)
+	}
+	parsed, err = url.Parse(signed)
+	if err != nil {
+		t.Fatalf("签名地址无法解析：%v", err)
+	}
+	wantSigned := directLinkAuthValue("/29/音乐/02.一千零一夜.wma", uid, randStr, expiry, privateKey)
+	if got := parsed.Query().Get("auth_key"); got != wantSigned {
+		t.Fatalf("中文路径应按解码原文签名：\n got=%s\nwant=%s", got, wantSigned)
+	}
+
+	// 未配置账号 ID：拒绝生成注定被拒的地址。
+	if _, err := signDirectLinkURL(raw, privateKey, "", time.Unix(expiry, 0), randStr); !errors.Is(err, ErrPan123AuthUID) {
+		t.Fatalf("缺少账号 ID 应返回 ErrPan123AuthUID，实际 %v", err)
 	}
 }
 
@@ -701,10 +761,18 @@ func TestPan123PresignWithAuth(t *testing.T) {
 	backend := newPan123TestBackend(mock)
 	backend.cfg.DirectLinkAuth = true
 	backend.cfg.DirectLinkAuthKey = "289ds32418bxdba"
+	backend.cfg.DirectLinkUID = "29"
 	// 交付方式=优先 302 直连（默认是优先本机中转，不会走 302）。
 	backend.cfg.DeliveryPrefer = Pan123DeliveryRedirect
 
 	ttl := 10 * time.Minute
+	// 未配置账号 ID：不生成注定被 CDN 拒绝的签名地址，而是明确报错。
+	backend.cfg.DirectLinkUID = ""
+	if _, ok, err := backend.Presign(context.Background(), "123456", ttl, PresignForDirect); err == nil || ok {
+		t.Fatalf("缺少账号 ID 应报错（ok=%v err=%v）", ok, err)
+	}
+	backend.cfg.DirectLinkUID = "29"
+
 	// 302 交付：返回带鉴权签名的直链地址。
 	got, ok, err := backend.Presign(context.Background(), "123456", ttl, PresignForDirect)
 	if err != nil || !ok {
@@ -724,6 +792,9 @@ func TestPan123PresignWithAuth(t *testing.T) {
 	}
 	if strings.Contains(parts[1], "-") {
 		t.Fatalf("随机数不能包含中划线：%s", parts[1])
+	}
+	if parts[2] != "29" {
+		t.Fatalf("auth_key 的 uid 段应为配置的账号 ID：%s", authKey)
 	}
 	expiry, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
@@ -831,6 +902,123 @@ func TestPan123OpenChannelByPurpose(t *testing.T) {
 		t.Fatal("关闭切换后直链取址失败应直接报错，而不是改用自用通道")
 	} else {
 		t.Logf("严格模式（直链失败）：%v", err)
+	}
+}
+
+// TestPan123RelayDirectLinkRejectedFallsBack 覆盖「直链坏掉把本机中转一起带走」：
+// 中转上游走直链流量时，CDN 在读取阶段拒绝（401/403，例如鉴权签名不被接受、直链
+// 空间被停用）——
+//   - 开启「异常时互相切换」：改用自用下载通道重试，下载不中断；
+//   - 关闭（严格模式）：不消耗另一份额度，把错误交给上层（交付层判定下载失败）。
+func TestPan123RelayDirectLinkRejectedFallsBack(t *testing.T) {
+	mock := newPan123Mock(t)
+	backend := newPan123TestBackend(mock)
+	backend.cfg.SharePrefer = Pan123PreferDirect
+	backend.cfg.DirectLinkAuth = true
+	backend.cfg.DirectLinkAuthKey = "289ds32418bxdba"
+	backend.cfg.DirectLinkUID = "29"
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("relay-fallback-"), 32)
+	mock.mu.Lock()
+	mock.nextFileID++
+	fileID := mock.nextFileID
+	mock.content[fileID] = payload
+	mock.cdnForbidden = true
+	mock.mu.Unlock()
+	ref := strconv.FormatInt(fileID, 10)
+
+	backend.cfg.ChannelSwitch = true
+	reader, err := backend.OpenWithPurpose(ctx, ref, PresignForShare)
+	if err != nil {
+		t.Fatalf("打开失败：%v", err)
+	}
+	remote, ok := reader.(*remoteReadSeeker)
+	if !ok {
+		t.Fatalf("reader 类型不符：%T", reader)
+	}
+	got, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if readErr != nil {
+		t.Fatalf("读取失败：%v", readErr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("切换通道后内容不一致：读到 %d 字节", len(got))
+	}
+	if !strings.Contains(remote.url, "/fake-download/") {
+		t.Fatalf("直链被拒后应改用自用下载通道，实际 url=%s", remote.url)
+	}
+
+	backend.cfg.ChannelSwitch = false
+	strictReader, err := backend.OpenWithPurpose(ctx, ref, PresignForShare)
+	if err != nil {
+		t.Fatalf("严格模式取址应成功（直链接口本身可用）：%v", err)
+	}
+	_, strictErr := io.ReadAll(strictReader)
+	_ = strictReader.Close()
+	if strictErr == nil || !strings.Contains(strictErr.Error(), "403") {
+		t.Fatalf("严格模式应把 403 交给上层，实际 %v", strictErr)
+	}
+}
+
+// TestPan123RelayResignsPerRequest 验证服务端读取每次重开流都会重新签名：长下载与
+// 断点续传跨过签名有效期后不会因签名过期而被拒。
+func TestPan123RelayResignsPerRequest(t *testing.T) {
+	mock := newPan123Mock(t)
+	backend := newPan123TestBackend(mock)
+	backend.cfg.SharePrefer = Pan123PreferDirect
+	backend.cfg.DirectLinkAuth = true
+	backend.cfg.DirectLinkAuthKey = "289ds32418bxdba"
+	backend.cfg.DirectLinkUID = "29"
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("relay-resign-"), 16)
+	mock.mu.Lock()
+	mock.nextFileID++
+	fileID := mock.nextFileID
+	mock.content[fileID] = payload
+	mock.mu.Unlock()
+
+	reader, err := backend.OpenWithPurpose(ctx, strconv.FormatInt(fileID, 10), PresignForShare)
+	if err != nil {
+		t.Fatalf("打开失败：%v", err)
+	}
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		t.Fatalf("首次读取失败：%v", err)
+	}
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("Seek 失败：%v", err)
+	}
+	if _, err := io.ReadFull(reader, buf); err != nil {
+		t.Fatalf("重开流后读取失败：%v", err)
+	}
+	_ = reader.Close()
+
+	mock.mu.Lock()
+	keys := append([]string(nil), mock.cdnAuthKeys...)
+	mock.mu.Unlock()
+	if len(keys) < 2 {
+		t.Fatalf("应发起两次直链请求，实际 %d 次", len(keys))
+	}
+	if keys[0] == "" || keys[0] == keys[1] {
+		t.Fatalf("重开流应重新签名（auth_key 需变化）：%v", keys)
+	}
+}
+
+// TestPan123BackendSettingsDirectLinkUID 验证账号 ID 从存储设置读入（字符串与数字
+// 两种 JSON 形式都接受）。
+func TestPan123BackendSettingsDirectLinkUID(t *testing.T) {
+	service := NewService(nil, nil, ServiceOptions{
+		Pan123: Pan123Credentials{ClientID: "client-id", ClientSecret: "client-secret"},
+	})
+	cases := map[string]string{
+		`{"parent_file_id":123,"direct_link_uid":"29"}`: "29",
+		`{"parent_file_id":123,"direct_link_uid":29}`:   "29",
+	}
+	for raw, want := range cases {
+		backend := service.newPan123Backend([]byte(raw))
+		if backend.cfg.DirectLinkUID != want {
+			t.Fatalf("账号 ID 解析不符：设置=%s got=%q want=%q", raw, backend.cfg.DirectLinkUID, want)
+		}
 	}
 }
 

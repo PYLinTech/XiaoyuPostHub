@@ -61,6 +61,11 @@ type deliveryItem struct {
 	MimeType     string         `json:"mimeType,omitempty"`
 	Parts        []deliveryPart `json:"parts,omitempty"`
 	Encryption   map[string]any `json:"encryption,omitempty"`
+	// ContentForm 声明该文件项的取数形态（plaintext | ciphertext），是前后端固定
+	// 的契约字段：302 取数时第三方响应头不受我们控制，前端只能按它决定逐片解密
+	// 还是直接拼接；本机中转时以响应头 X-XPH-Content-Form 为准，两者不一致前端
+	// 会明确报错而不是静默产出坏文件。
+	ContentForm string `json:"contentForm,omitempty"`
 	// StreamURL 仅本机中转取数：密文流（带信封）或明文流（兜底）。
 	StreamURL string `json:"streamUrl,omitempty"`
 	// PartURL 仅 302 取数：逐片取址模板，前端拼 <partUrl><index>。
@@ -150,11 +155,26 @@ func buildDeliveryItem(r *http.Request, deps Deps, item resource.Resource, blob 
 		Kind: resource.KindFile, ResourceID: item.ID, Name: item.Name,
 		SizeBytes: blob.SizeBytes, SHA256: blob.SHA256,
 		Parts: planParts, Encryption: meta, StreamURL: streamURL, PartURL: partURL,
+		ContentForm: deliveryContentForm(r, blob, streamURL != ""),
 	}
 	if item.MimeType != nil {
 		itemPlan.MimeType = strings.TrimSpace(*item.MimeType)
 	}
 	return itemPlan, nil
+}
+
+// deliveryContentForm 声明该文件项在本次取数中实际传输的形态，是前后端固定的
+// 契约字段（与响应头 X-XPH-Content-Form 同源规则）：
+//
+//	302 取数（proxy=false）：取到的是存储层原样字节——加密对象即密文；
+//	本机中转（proxy=true）：请求方带临时公钥才下发密文，否则服务器解密兜底输出明文。
+//
+// 判定必须与 deliverBlobContent 的实际行为一致，否则前端会按错误的形态处理字节。
+func deliveryContentForm(r *http.Request, blob blobstore.Blob, proxy bool) string {
+	if blob.Encryption != nil && (!proxy || clientCanDecrypt(r)) {
+		return contentFormCiphertext
+	}
+	return contentFormPlaintext
 }
 
 // presignItemPart 为某文件的指定分片取第三方直链（按需取址：前端逐片请求）。

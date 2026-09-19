@@ -19,6 +19,15 @@ type remoteReadSeeker struct {
 	pos     int64
 	active  io.ReadCloser
 	prepare func(req *http.Request) error
+	// resign 在每次发起读取请求前调用（可选）：返回新的取数地址，空串表示沿用
+	// 当前地址。用于给带有效期的第三方签名地址按当前时间重新签名——长下载与
+	// 断点续传重开流时不会因签名过期而中断。
+	resign func() (string, error)
+	// switchChannel 在读取请求被远端拒绝（401/403：签名不被接受、直链空间被停用
+	// 等）时调用一次：返回另一条通道的地址用于原位置重试一次；ok=false 表示不切换
+	// （严格模式），由调用方把错误交给上层。没有它时「优先通道坏掉」会直接表现为
+	// 下载中断（响应头已发出，连错误提示都给不出去）。
+	switchChannel func() (string, bool)
 }
 
 func (r *remoteReadSeeker) Read(p []byte) (int, error) {
@@ -46,6 +55,21 @@ func (r *remoteReadSeeker) Read(p []byte) (int, error) {
 }
 
 func (r *remoteReadSeeker) openAt(pos int64) error {
+	return r.open(pos, true)
+}
+
+// open 发起一次远端读取请求；allowSwitch 为真时，被 401/403 拒绝会尝试换通道
+// 重试一次（switchChannel 由后端提供，最多切换一次）。
+func (r *remoteReadSeeker) open(pos int64, allowSwitch bool) error {
+	if r.resign != nil {
+		next, err := r.resign()
+		if err != nil {
+			return err
+		}
+		if next != "" {
+			r.url = next
+		}
+	}
 	request, err := http.NewRequestWithContext(r.ctx, http.MethodGet, r.url, nil)
 	if err != nil {
 		return err
@@ -79,6 +103,13 @@ func (r *remoteReadSeeker) openAt(pos int64) error {
 	default:
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
 		response.Body.Close()
+		if allowSwitch && r.switchChannel != nil &&
+			(response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+			if next, ok := r.switchChannel(); ok && next != "" && next != r.url {
+				r.url = next
+				return r.open(pos, false)
+			}
+		}
 		return fmt.Errorf("blobstore: 远端下载失败（HTTP %d：%s）",
 			response.StatusCode, bodyTail(body))
 	}

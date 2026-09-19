@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -353,6 +354,9 @@ func (s *Service) newPan123Backend(rawSettings []byte) *Pan123Backend {
 		// 额度偏好推导（NeedDirectLink），此处不再解析。
 		DirectLinkAuth    bool   `json:"direct_link_auth"`
 		DirectLinkAuthKey string `json:"direct_link_auth_key"`
+		// DirectLinkUID 是 123 云盘账号 ID（官方签名规则里的 uid），管理员手动填写；
+		// 前端可能提交字符串或数字，两种都接受。
+		DirectLinkUID any `json:"direct_link_uid"`
 		// 额度偏好（仅本机中转时生效）：share_prefer 用于分享页/文件页下载，
 		// direct_prefer 用于站内直链；取值 download（自用下载流量，默认）或
 		// direct（直链流量）。交付方式 delivery_prefer：proxy（优先本机中转，默认）
@@ -379,11 +383,26 @@ func (s *Service) newPan123Backend(rawSettings []byte) *Pan123Backend {
 		ParentFileID:      settings.ParentFileID,
 		DirectLinkAuth:    settings.DirectLinkAuth,
 		DirectLinkAuthKey: settings.DirectLinkAuthKey,
+		DirectLinkUID:     settingString(settings.DirectLinkUID),
 		SharePrefer:       settings.SharePrefer,
 		DirectPrefer:      settings.DirectPrefer,
 		DeliveryPrefer:    settings.DeliveryPrefer,
 		ChannelSwitch:     channelSwitch,
 	})
+}
+
+// settingString 容错读取字符串型设置：前端提交的数字（如账号 ID）可能被序列化成
+// JSON 数字，两种形式都按十进制字符串归一。
+func settingString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case float64:
+		return strconv.FormatInt(int64(typed), 10)
+	case json.Number:
+		return typed.String()
+	}
+	return ""
 }
 
 // newS3Backend 从 storage_backends.settings 构造 S3 兼容对象存储后端。

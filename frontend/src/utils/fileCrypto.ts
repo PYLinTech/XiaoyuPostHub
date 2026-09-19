@@ -35,6 +35,40 @@ export const CLIENT_PUBLIC_KEY_HEADER = 'X-XPH-Client-Public-Key';
 export const CONTENT_SHA256_HEADER = 'x-xph-content-sha256';
 
 /**
+ * 交付响应头：本次下发字节的形态（plaintext | ciphertext），服务端每次内容交付
+ * 都会设置。它是前后端固定的显式契约——不再靠"有没有加密元数据头"隐式推断，
+ * 否则服务器解密兜底输出明文时会被误当密文解密。
+ */
+export const CONTENT_FORM_HEADER = 'x-xph-content-form';
+
+export type ContentForm = 'plaintext' | 'ciphertext';
+
+/**
+ * 解析本次交付的形态：以固定响应头为准；头缺失（旧服务端）时按是否带加密元数据
+ * 推断，保证向后兼容。
+ */
+export function contentFormOf(
+  headers: Record<string, unknown>,
+  meta: EncryptionMeta | null
+): ContentForm {
+  const raw = String(headers[CONTENT_FORM_HEADER] ?? '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'ciphertext') return 'ciphertext';
+  if (raw === 'plaintext') return 'plaintext';
+  return meta ? 'ciphertext' : 'plaintext';
+}
+
+/**
+ * 抛出交付错误：用户可见文案保持中性（不出现密文/元数据/协议字段等实现细节），
+ * 技术原因只写控制台，便于排查又不打扰使用者。
+ */
+export function failDelivery(message: string, detail?: string): never {
+  if (detail) console.warn('[delivery]', detail);
+  throw new Error(uiText(message));
+}
+
+/**
  * 接收端校验：比对下载内容的明文 SHA-256。
  * expected 为空（例如明文对象以外的兜底路径）时跳过；不一致时抛错，调用方应
  * 拒绝保存并提示用户重试。
@@ -47,7 +81,7 @@ export async function verifyContentSHA256(
   if (!target) return;
   const actual = await blobSHA256(blob);
   if (actual !== target) {
-    throw new Error(uiText('文件校验失败：内容与服务器记录不一致，请重试'));
+    failDelivery('文件校验失败，请重新下载', `sha256 mismatch: got=${actual} want=${target}`);
   }
 }
 
@@ -114,7 +148,7 @@ export function parseEncryptionHeader(
     const json = new TextDecoder().decode(base64ToBytes(header));
     meta = JSON.parse(json) as EncryptionMeta;
   } catch {
-    throw new Error(uiText('加密元数据无法解析，请刷新页面后重试'));
+    failDelivery('下载失败，请刷新页面后重试', 'malformed encryption metadata');
   }
   if (
     !meta ||
@@ -124,7 +158,7 @@ export function parseEncryptionHeader(
     typeof meta.chunkSize !== 'number' ||
     typeof meta.sizeBytes !== 'number'
   ) {
-    throw new Error(uiText('加密元数据不完整，请刷新页面后重试'));
+    failDelivery('下载失败，请刷新页面后重试', 'incomplete encryption metadata');
   }
   return meta;
 }
@@ -138,10 +172,13 @@ export async function importDeliveryKey(
   meta: EncryptionMeta
 ): Promise<CryptoKey> {
   if (!pair) {
-    throw new Error(uiText('该文件需要在浏览器端解密，但当前环境不支持'));
+    failDelivery(
+      '当前浏览器无法下载该文件，请更换浏览器或联系管理员',
+      'client key pair unavailable'
+    );
   }
   if (meta.sizeBytes < 0) {
-    throw new Error(uiText('加密元数据的明文长度无效'));
+    failDelivery('下载失败，请刷新页面后重试', `invalid plaintext size: ${meta.sizeBytes}`);
   }
   const dek = await crypto.subtle.decrypt(
     { name: 'RSA-OAEP' },
@@ -198,7 +235,10 @@ export async function decryptChunked(
   const chunkSize = meta.chunkSize || DEFAULT_CHUNK_SIZE;
   const wire = new Uint8Array(cipher);
   if (meta.wireSize && wire.byteLength < meta.wireSize) {
-    throw new Error(uiText('密文长度与元数据不符，文件可能不完整'));
+    failDelivery(
+      '文件下载不完整，请重试',
+      `truncated delivery: got=${wire.byteLength} want=${meta.wireSize}`
+    );
   }
   const blocks = await decryptWireRange(
     key,
@@ -277,9 +317,15 @@ export async function decodeDelivery(
   const meta =
     options?.meta ??
     parseEncryptionHeader(headers[ENCRYPTION_META_HEADER] as string | undefined);
-  const blob = meta
-    ? await decryptWithMeta(pair, meta, data, contentType)
-    : new Blob([data], { type: contentType });
+  const form = contentFormOf(headers, meta);
+  if (form === 'ciphertext' && !meta) {
+    // 声明密文却没给解密元数据：绝不能按明文保存（会把密文写成坏文件）。
+    failDelivery('下载失败，请刷新页面后重试', 'ciphertext declared without key envelope');
+  }
+  const blob =
+    form === 'ciphertext'
+      ? await decryptWithMeta(pair, meta as EncryptionMeta, data, contentType)
+      : new Blob([data], { type: contentType });
   if (options?.verifySHA256) {
     const expected =
       options.expectedSHA256 ||

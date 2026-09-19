@@ -83,6 +83,11 @@ type Pan123Config struct {
 	// DirectLinkAuthKey 是直链鉴权密钥（私有密钥）。只保存在服务端配置中，不回传
 	// 浏览器、不写日志。
 	DirectLinkAuthKey string
+	// DirectLinkUID 是 123 云盘账号 ID（个人中心可见），即官方签名规则里的 uid，
+	// 必须由管理员手动填写。它无法从地址推断：官方示例的直链是 vip.123pan.com
+	// （域名首段是 vip），自定义直链域名下域名首段更是站点自己的前缀——猜错会被
+	// CDN 判为签名不符并直接返回 403。
+	DirectLinkUID string
 	// SharePrefer / DirectPrefer 指定本机中转时服务端取内容优先走哪条通道：
 	// Pan123PreferDownload（自用下载流量，download_info）或 Pan123PreferDirect
 	// （直链流量，direct-link）。空值按默认：两者都用自用下载流量。
@@ -133,7 +138,14 @@ var (
 	ErrPan123Config = errors.New("blobstore: 123 云盘配置不完整")
 	// ErrPan123TooLarge 表示文件超过平台单文件上限（10GB）。
 	ErrPan123TooLarge = errors.New("blobstore: 文件超过 123 云盘单文件上限（10GB）")
+	// ErrPan123AuthUID 表示开启了直链鉴权却没配置账号 ID：签名规则中的 uid 只能
+	// 由管理员填写，猜不出来，因此宁可明确报错也不生成注定被拒的地址。
+	ErrPan123AuthUID = errors.New("blobstore: 123 云盘直链鉴权未配置账号 ID（个人中心可见，需手动填写）")
 )
+
+// directLinkServerTTL 是服务端读取（本机中转上游）所用直链签名的有效期：服务端
+// 读取是即时请求，且每次重开流都会按当前时间重新签名，给足 1 小时即可。
+const directLinkServerTTL = time.Hour
 
 // pan123Error 是平台返回的业务错误（code != 0），保留 x-traceID 便于上报。
 type pan123Error struct {
@@ -250,7 +262,8 @@ func (b *Pan123Backend) Open(ctx context.Context, ref string) (io.ReadSeekCloser
 // direct-link/url（消耗直链额度），否则走 download_info（自用下载流量）。
 //
 // 两条通道取到的是同一份字节、都支持 Range，服务端是否中转与选择哪份额度无关
-// （对外始终只有一个地址）。直链取址失败时退回自用通道，不阻断交付。
+// （对外始终只有一个地址）。在「异常时互相切换」开启时，取址失败与取数被拒
+// （401/403）都会改用另一条通道，不阻断交付；关闭时按严格模式直接报错。
 func (b *Pan123Backend) OpenWithPurpose(ctx context.Context, ref string, purpose PresignPurpose) (io.ReadSeekCloser, error) {
 	fileID, err := parsePan123FileID(ref)
 	if err != nil {
@@ -261,34 +274,52 @@ func (b *Pan123Backend) OpenWithPurpose(ctx context.Context, ref string, purpose
 		return nil, err
 	}
 	preferDirect := b.preferDirectLink(purpose)
-	fetchURL, preferErr := b.fetchURLForChannel(ctx, fileID, preferDirect)
-	if preferErr != nil || fetchURL == "" {
+	raw, fetchURL, preferErr := b.openChannelURL(ctx, fileID, preferDirect)
+	if preferErr != nil {
 		// 优先通道不可用：按开关决定是否改用另一条通道。关闭开关时"优先"即"始终"，
 		// 宁可失败也不消耗另一份额度（管理员据此判断额度是否用完）。
 		if !b.cfg.ChannelSwitch {
-			if preferErr != nil {
-				return nil, fmt.Errorf("blobstore: 123 云盘%s不可用（已关闭异常时切换）：%w",
-					pan123ChannelName(preferDirect), preferErr)
-			}
-			return nil, fmt.Errorf("blobstore: 123 云盘%s不可用（已关闭异常时切换）", pan123ChannelName(preferDirect))
+			return nil, fmt.Errorf("blobstore: 123 云盘%s不可用（已关闭异常时切换）：%w",
+				pan123ChannelName(preferDirect), preferErr)
 		}
-		other, otherErr := b.fetchURLForChannel(ctx, fileID, !preferDirect)
-		if otherErr != nil || other == "" {
-			if preferErr != nil {
-				return nil, preferErr
-			}
-			if otherErr != nil {
-				return nil, otherErr
-			}
-			return nil, errors.New("blobstore: 123 云盘两条读取通道都不可用")
+		otherRaw, otherURL, otherErr := b.openChannelURL(ctx, fileID, !preferDirect)
+		if otherErr != nil {
+			return nil, errors.Join(preferErr, otherErr)
 		}
 		log.Printf("blobstore: 123 云盘%s不可用，本次改用%s",
 			pan123ChannelName(preferDirect), pan123ChannelName(!preferDirect))
-		fetchURL = other
+		raw, fetchURL = otherRaw, otherURL
 	}
-	return &remoteReadSeeker{
+	reader := &remoteReadSeeker{
 		ctx: ctx, client: b.httpClient, url: fetchURL, size: size,
-	}, nil
+	}
+	// 签名带有效期：每次发起读取前按当前时间重新签名（原始地址不变），
+	// 长下载与断点续传跨过签名有效期也不会被拒。
+	if b.cfg.DirectLinkAuth {
+		reader.resign = func() (string, error) { return b.signFetchURL(raw) }
+	}
+	// 读取阶段被拒（401/403：签名不被接受、直链空间被停用等）时，同样按「异常时
+	// 互相切换」改用另一条通道重试一次——否则直链坏掉会把本机中转一起带走。
+	if b.cfg.ChannelSwitch {
+		switched := false
+		reader.switchChannel = func() (string, bool) {
+			if switched {
+				return "", false
+			}
+			switched = true
+			otherRaw, otherURL, otherErr := b.openChannelURL(ctx, fileID, !preferDirect)
+			if otherErr != nil {
+				log.Printf("blobstore: 123 云盘%s读取被拒，改用%s也失败：%v",
+					pan123ChannelName(preferDirect), pan123ChannelName(!preferDirect), otherErr)
+				return "", false
+			}
+			raw = otherRaw
+			log.Printf("blobstore: 123 云盘%s读取被拒，本次改用%s",
+				pan123ChannelName(preferDirect), pan123ChannelName(!preferDirect))
+			return otherURL, true
+		}
+	}
+	return reader, nil
 }
 
 // pan123ChannelName 返回读取通道的中文名（日志与错误文案共用）。
@@ -299,13 +330,55 @@ func pan123ChannelName(direct bool) string {
 	return "自用下载通道"
 }
 
-// fetchURLForChannel 按通道取内容地址：direct=true 走直链（启用鉴权时自动签名），
-// false 走自用下载（download_info）。直链是否可用由配置推导（NeedDirectLink）。
-func (b *Pan123Backend) fetchURLForChannel(ctx context.Context, fileID int64, direct bool) (string, error) {
+// rawFetchURLForChannel 取未签名的内容地址。服务端读取需要保留原始地址：签名带
+// 有效期，长下载/断点续传重开流时要按当前时间重新签名。
+func (b *Pan123Backend) rawFetchURLForChannel(ctx context.Context, fileID int64, direct bool) (string, error) {
 	if direct {
-		return b.directLinkFetchURL(ctx, fileID)
+		return b.directLinkURL(ctx, fileID)
 	}
 	return b.downloadURL(ctx, fileID)
+}
+
+// openChannelURL 取某条通道的「未签名地址 + 可直接使用的地址」；通道不可用时
+// 直接返回错误，由调用方按「异常时互相切换」开关决定是否改用另一条通道。
+func (b *Pan123Backend) openChannelURL(ctx context.Context, fileID int64, direct bool) (string, string, error) {
+	raw, err := b.rawFetchURLForChannel(ctx, fileID, direct)
+	if err != nil {
+		return "", "", err
+	}
+	if raw == "" {
+		return "", "", fmt.Errorf("blobstore: 123 云盘%s未返回地址", pan123ChannelName(direct))
+	}
+	signed, err := b.signFetchURL(raw)
+	if err != nil {
+		return "", "", err
+	}
+	return raw, signed, nil
+}
+
+// signFetchURL 为内容地址追加直链鉴权签名（未开启鉴权时原样返回）。
+// 服务端读取与对外 302 共用：签名规则里的 uid 取配置的账号 ID，URI 取请求路径。
+func (b *Pan123Backend) signFetchURL(raw string) (string, error) {
+	return b.signFetchURLFor(raw, directLinkServerTTL)
+}
+
+// signFetchURLFor 与 signFetchURL 相同，但指定签名有效期（对外直链与交付层传入
+// 的直链有效期同口径）。签名失败不能退回未签名地址——鉴权开启后未签名请求会被
+// 云盘直接拒绝，静默降级只会掩盖配置错误。
+func (b *Pan123Backend) signFetchURLFor(raw string, ttl time.Duration) (string, error) {
+	if strings.TrimSpace(raw) == "" ||
+		!b.cfg.DirectLinkAuth || strings.TrimSpace(b.cfg.DirectLinkAuthKey) == "" {
+		return raw, nil
+	}
+	uid := strings.TrimSpace(b.cfg.DirectLinkUID)
+	if uid == "" {
+		return "", ErrPan123AuthUID
+	}
+	randStr, err := pan123AuthRand()
+	if err != nil {
+		return "", err
+	}
+	return signDirectLinkURL(raw, b.cfg.DirectLinkAuthKey, uid, time.Now().Add(ttl), randStr)
 }
 
 // directLinkURL 获取直链地址（GET /api/v1/direct-link/url）。
@@ -318,24 +391,6 @@ func (b *Pan123Backend) directLinkURL(ctx context.Context, fileID int64) (string
 		return "", err
 	}
 	return strings.TrimSpace(data.URL), nil
-}
-
-// directLinkFetchURL 返回可直接取内容的直链地址（启用直链鉴权时自动签名）。
-// 已开启鉴权的账号下未签名地址会被平台拒绝，因此服务端侧读取也必须用签名地址；
-// 服务端读取是即时请求，签名有效期给足 1 小时，避免长下载中途过期。
-func (b *Pan123Backend) directLinkFetchURL(ctx context.Context, fileID int64) (string, error) {
-	raw, err := b.directLinkURL(ctx, fileID)
-	if err != nil || raw == "" {
-		return raw, err
-	}
-	if !b.cfg.DirectLinkAuth || strings.TrimSpace(b.cfg.DirectLinkAuthKey) == "" {
-		return raw, nil
-	}
-	randStr, err := pan123AuthRand()
-	if err != nil {
-		return "", err
-	}
-	return signDirectLinkURL(raw, b.cfg.DirectLinkAuthKey, time.Now().Add(time.Hour), randStr)
 }
 
 func (b *Pan123Backend) Stat(ctx context.Context, ref string) (int64, error) {
@@ -452,53 +507,50 @@ func (b *Pan123Backend) Presign(ctx context.Context, ref string, ttl time.Durati
 	if err != nil {
 		return "", false, err
 	}
-	raw, err := b.directLinkURL(ctx, fileID)
+	raw, err := b.rawFetchURLForChannel(ctx, fileID, true)
 	if err != nil {
 		return "", false, err
 	}
 	if raw == "" {
 		return "", false, nil
 	}
-	if !b.cfg.DirectLinkAuth || strings.TrimSpace(b.cfg.DirectLinkAuthKey) == "" {
-		return raw, true, nil
-	}
 	// 直链 URL 鉴权：签名有效期与直链有效期一致（交付层传 10 分钟，与云盘临时
-	// 地址同口径）。签名失败不能退回未签名地址——鉴权开启后未签名请求会被云盘
-	// 直接拒绝，静默降级只会掩盖配置错误。
-	randStr, err := pan123AuthRand()
-	if err != nil {
-		return "", false, err
-	}
-	signed, err := signDirectLinkURL(raw, b.cfg.DirectLinkAuthKey, time.Now().Add(ttl), randStr)
+	// 地址同口径）。
+	signed, err := b.signFetchURLFor(raw, ttl)
 	if err != nil {
 		return "", false, err
 	}
 	return signed, true, nil
 }
 
-// signDirectLinkURL 按 123 云盘 URL 鉴权规则为直链追加 auth_key 参数。
+// signDirectLinkURL 按 123 云盘官方直链签名规则为地址追加 auth_key 参数。
 //
-// 规则（官方直链鉴权文档）：
+// 规则（官方开发指引 example/sign.go|sign.js|sign.java|sign.php 一致）：
 //
-//		$uid.cdn.123clouddisk.com/$path?auth_key=$timestamp-$rand-$uid-$md5hash
+//		$domain/$path?auth_key=$timestamp-$rand-$uid-$md5hash
 //		$md5hash = md5(URI-timestamp-rand-uid-PrivateKey)
 //
-//	  - URI 是请求对象的相对地址：只含路径、不含参数，取直链自身的路径（含 $uid
-//	    前缀，与原样请求的地址一致）；
-//	  - uid 是云盘用户 UID，直链域名首段即 UID（如 13.cdn.123clouddisk.com）；
+//	  - URI 是请求对象的相对地址：官方四个示例都取「解码后的路径」——PHP 明确
+//	    rawurldecode、JS decodeURIComponent、Go 用 objURL.Path（Go 的 Path 本身就是
+//	    解码形式），因此这里也必须用 parsed.Path，而不是 EscapedPath；
+//	  - uid 是「123 云盘个人中心可见的账号 ID」，由调用方显式传入：官方示例的直链
+//	    是 vip.123pan.com（域名首段 vip），自定义域名下域名首段是站点自己的前缀，
+//	    从地址推断必然签名不符（CDN 返回 403）；
 //	  - rand 为随机串，规则要求不能包含中划线，这里用无符号十六进制随机串；
 //	  - timestamp 为过期时刻的 Unix 秒（10 位整型）。
-func signDirectLinkURL(rawURL, privateKey string, expiry time.Time, randStr string) (string, error) {
+func signDirectLinkURL(rawURL, privateKey, uid string, expiry time.Time, randStr string) (string, error) {
+	if strings.TrimSpace(uid) == "" {
+		return "", ErrPan123AuthUID
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return "", fmt.Errorf("blobstore: 直链地址无法解析：%w", err)
 	}
-	uid, _, _ := strings.Cut(parsed.Hostname(), ".")
-	if uid == "" || parsed.Path == "" {
-		return "", fmt.Errorf("blobstore: 直链地址缺少 UID 或路径，无法签名：%s", rawURL)
+	if parsed.Path == "" {
+		return "", fmt.Errorf("blobstore: 直链地址缺少路径，无法签名：%s", rawURL)
 	}
 	query := parsed.Query()
-	query.Set("auth_key", directLinkAuthValue(parsed.EscapedPath(), uid, randStr, expiry.Unix(), privateKey))
+	query.Set("auth_key", directLinkAuthValue(parsed.Path, uid, randStr, expiry.Unix(), privateKey))
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

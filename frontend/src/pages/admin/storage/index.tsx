@@ -312,6 +312,7 @@ export default function StorageConfig() {
       channelSwitch: false,
       directLinkAuth: false,
       directLinkAuthKey: '',
+      directLinkUid: '',
       isEnabled: true,
       isDefault: false,
       parentFileId: undefined,
@@ -338,6 +339,11 @@ export default function StorageConfig() {
       directLinkAuth: Boolean(item.settings?.direct_link_auth),
       // 鉴权密钥不回传浏览器：编辑时留空即沿用已保存的密钥。
       directLinkAuthKey: '',
+      // 账号 ID 是非敏感配置，正常回显（签名规则里的 uid，与直链域名无关）。
+      directLinkUid:
+        item.settings?.direct_link_uid == null
+          ? ''
+          : String(item.settings.direct_link_uid),
       isEnabled: item.isEnabled,
       isDefault: item.isDefault,
       parentFileId: item.settings?.parent_file_id,
@@ -364,6 +370,9 @@ export default function StorageConfig() {
           values.deliveryPrefer === 'redirect' ? 'redirect' : 'proxy';
         settings.channel_switch = values.channelSwitch === true;
         settings.direct_link_auth = Boolean(values.directLinkAuth);
+        // 账号 ID 是官方签名规则里的 uid（个人中心可见）：只能手填，服务端不再从
+        // 直链域名推断，因此这里始终提交（开启鉴权时必填，由服务端校验）。
+        settings.direct_link_uid = String(values.directLinkUid || '').trim();
         // 密钥留空表示沿用已保存的密钥（服务端自己取回），不发送空值覆盖。
         const authKey = String(values.directLinkAuthKey || '').trim();
         if (authKey) {
@@ -919,7 +928,7 @@ export default function StorageConfig() {
                       field="channelSwitch"
                       triggerPropName="checked"
                       extra={uiText(
-                        '开启（默认）：所选通道不可用时自动改用另一条通道，下载不中断。关闭：严格使用所选通道（上面两项的「优先」即「始终」），不可用时直接报错，不会消耗另一份额度——便于判断额度是否用完。'
+                        '关闭（默认）：严格使用所选通道（上面两项的「优先」即「始终」），不可用时直接报错，不会消耗另一份额度——便于判断额度是否用完。开启：所选通道取址失败、或取数被云盘拒绝（401/403，例如直链鉴权签名不被接受）时自动改用另一条通道，下载不中断——避免直链坏掉把本机中转一起带走。'
                       )}
                     >
                       <Switch />
@@ -929,7 +938,7 @@ export default function StorageConfig() {
                       field="directLinkAuth"
                       triggerPropName="checked"
                       extra={uiText(
-                        '需先在 123 云盘直链管理的「鉴权管理」中开启并配置同一密钥；开启后下载地址会带签名，防止直链被他人盗用。'
+                        '需先在 123 云盘直链管理的「鉴权管理」中开启并配置同一密钥与账号 ID；开启后下载地址会带签名，防止直链被他人盗用。'
                       )}
                     >
                       <Switch />
@@ -942,24 +951,35 @@ export default function StorageConfig() {
                     >
                       {(values) =>
                         values?.directLinkAuth ? (
-                          <Form.Item
-                            label={uiText('鉴权密钥')}
-                            field="directLinkAuthKey"
-                            extra={uiText(
-                              '只保存在服务端，不会回显；留空表示沿用已保存的密钥。'
-                            )}
-                          >
-                            <Input.Password
-                              placeholder={
-                                Boolean(
-                                  editing?.settings
-                                    ?.direct_link_auth_key_set
-                                )
-                                  ? uiText('已保存（留空不修改）')
-                                  : uiText('粘贴 123 云盘「鉴权管理」中的密钥')
-                              }
-                            />
-                          </Form.Item>
+                          <>
+                            <Form.Item
+                              label={uiText('账号 ID')}
+                              field="directLinkUid"
+                              extra={uiText(
+                                '123 云盘个人中心可见的数字账号 ID：签名规则用它计算 auth_key，不能从直链域名推断（自定义域名下必错，会被云盘 CDN 判为签名不符而拒绝）。'
+                              )}
+                            >
+                              <Input placeholder={uiText('例如 29')} />
+                            </Form.Item>
+                            <Form.Item
+                              label={uiText('鉴权密钥')}
+                              field="directLinkAuthKey"
+                              extra={uiText(
+                                '只保存在服务端，不会回显；留空表示沿用已保存的密钥。'
+                              )}
+                            >
+                              <Input.Password
+                                placeholder={
+                                  Boolean(
+                                    editing?.settings
+                                      ?.direct_link_auth_key_set
+                                  )
+                                    ? uiText('已保存（留空不修改）')
+                                    : uiText('粘贴 123 云盘「鉴权管理」中的密钥')
+                                }
+                              />
+                            </Form.Item>
+                          </>
                         ) : null
                       }
                     </Form.Item>

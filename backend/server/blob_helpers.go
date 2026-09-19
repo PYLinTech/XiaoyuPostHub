@@ -33,6 +33,28 @@ func setContentSHA256Header(w http.ResponseWriter, sum string) {
 	}
 }
 
+// 交付形态契约（前后端固定的显式字段，双方都按它决定"要不要解密"）：
+//   - 响应头 contentFormHeader 每次内容交付都会设置，描述本次下发的字节是明文
+//     还是密文；「没有该头就按明文处理」这种隐式推断不再作为依据（曾导致把服务器
+//     解密兜底的明文当密文解密）。
+//   - 302 取数由浏览器直连第三方、响应头不受我们控制：形态在准备响应的
+//     deliveryItem.contentForm 里声明，前端据此逐片解密或直接拼接。
+//
+// 前端两侧声明不一致时必须明确报错：把密文当明文保存会产出坏文件，比直接失败更糟。
+const (
+	contentFormHeader     = "X-XPH-Content-Form"
+	contentFormPlaintext  = "plaintext"
+	contentFormCiphertext = "ciphertext"
+)
+
+// setContentFormHeader 声明本次交付的内容形态。
+func setContentFormHeader(w http.ResponseWriter, form string) {
+	if form == "" {
+		return
+	}
+	w.Header().Set(contentFormHeader, form)
+}
+
 // blobReader 打开对象的明文读取流。
 //
 // 交付路径不做服务端全量校验：完整读取一遍再回放等于把文件读两遍，对远端
@@ -73,6 +95,7 @@ func deliverBlobContent(w http.ResponseWriter, r *http.Request, deps Deps, blob 
 			setEncryptionHeader(w, meta)
 		}
 		setContentSHA256Header(w, blob.SHA256)
+		setContentFormHeader(w, contentFormCiphertext)
 		reader, err := deps.Blobs.OpenRawWithPurpose(r.Context(), blob, purpose)
 		if err != nil {
 			writeBusinessError(w, http.StatusInternalServerError, "打开下载文件失败")
@@ -81,6 +104,7 @@ func deliverBlobContent(w http.ResponseWriter, r *http.Request, deps Deps, blob 
 		return serveBlobStreamWith(w, r, reader, blob.WireSize(), name, contentType, disposition), true
 	}
 	setContentSHA256Header(w, blob.SHA256)
+	setContentFormHeader(w, contentFormPlaintext)
 	reader, err := deps.Blobs.OpenWithPurpose(r.Context(), blob, purpose)
 	if err != nil {
 		writeBusinessError(w, http.StatusInternalServerError, "打开下载文件失败")
