@@ -117,6 +117,29 @@ func (r *Repo) ListGroupIDsByUser(ctx context.Context, userID int64) ([]int64, e
 	return r.q.ListGroupIDsByUser(ctx, userID)
 }
 
+// PermissionSetByName 返回指定名称用户组当前被授予的权限集合。
+//
+// 未登录访客的消费侧权限（preview / download）按 guest 系统用户组读取：
+// 该组不接受成员，无法走 ListEffectivePermissionsByUser。组不存在时返回
+// ErrGroupNotFound，调用方按"配置不可用"处理（fail-closed）。
+func (r *Repo) PermissionSetByName(ctx context.Context, name string) (map[string]bool, error) {
+	if _, err := r.q.GetUserGroupByName(ctx, name); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: name=%s", ErrGroupNotFound, name)
+		}
+		return nil, fmt.Errorf("读取用户组 %s 失败：%w", name, err)
+	}
+	perms, err := r.q.ListPermissionsByGroupName(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("读取用户组 %s 权限失败：%w", name, err)
+	}
+	set := make(map[string]bool, len(perms))
+	for _, code := range perms {
+		set[code] = true
+	}
+	return set, nil
+}
+
 // ---------- 工具函数 ----------
 
 func strToText(s string) pgtype.Text {

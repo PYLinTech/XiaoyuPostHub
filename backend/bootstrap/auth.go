@@ -69,7 +69,11 @@ func seedGuestQuotaProfile(ctx context.Context, q *sqlcgen.Queries) error {
 }
 
 // seedGuestUserGroup 保证 guest 系统用户组存在（不可删除、不接受成员）。
-// 未登录请求不匹配任何成员身份，统一按该组绑定的配额方案限流。
+// 未登录请求不匹配任何成员身份，统一按该组绑定的配额方案限流、按该组当前
+// 被授予的权限校验分享消费动作（preview / download）。
+//
+// 新建时补种默认的 preview + download（与迁移 040 对存量库的补齐口径一致），
+// 已存在的组不重新授予权限：管理员在「权限与配额」里的收紧结果必须保持。
 func seedGuestUserGroup(ctx context.Context, q *sqlcgen.Queries) error {
 	quotaRow, err := q.GetQuotaProfileByName(ctx, quota.NameGuest)
 	if err != nil {
@@ -83,7 +87,15 @@ func seedGuestUserGroup(ctx context.Context, q *sqlcgen.Queries) error {
 		}); err != nil {
 			return fmt.Errorf("创建访客用户组: %w", err)
 		}
-		log.Printf("INFO: 已创建未登录访客用户组 %q", quota.NameGuest)
+		defaults := []string{permission.Preview, permission.Download}
+		for _, code := range defaults {
+			if err := q.InsertDefaultGroupPermissionIfMissing(ctx, sqlcgen.InsertDefaultGroupPermissionIfMissingParams{
+				Name: quota.NameGuest, Permission: code,
+			}); err != nil {
+				return fmt.Errorf("写入访客用户组权限 %s: %w", code, err)
+			}
+		}
+		log.Printf("INFO: 已创建未登录访客用户组 %q 并授予默认预览/下载权限", quota.NameGuest)
 		return nil
 	}
 	if err != nil {

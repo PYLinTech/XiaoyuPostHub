@@ -11,6 +11,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/randomtoken"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -256,6 +257,18 @@ func (r *Repo) Register(ctx context.Context, name, password, invitationCode stri
 		}
 		if err != nil {
 			return User{}, err
+		}
+		// guest 组不接受成员：历史遗留的 guest 组邀请码在这里视为无效，不写入
+		// 成员关系（发码侧已拒绝 guest 目标，这里是不依赖发码侧的兜底）。
+		if invitationGroupID.Valid {
+			var guestGroupID int64
+			guestErr := tx.QueryRow(ctx, `SELECT id FROM user_groups WHERE name=$1`, quota.NameGuest).Scan(&guestGroupID)
+			if guestErr != nil && !errors.Is(guestErr, pgx.ErrNoRows) {
+				return User{}, guestErr
+			}
+			if guestErr == nil && guestGroupID == invitationGroupID.Int64 {
+				return User{}, ErrInvitationInvalid
+			}
 		}
 	}
 

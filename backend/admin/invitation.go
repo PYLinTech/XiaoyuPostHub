@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/inbox"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/quota"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/randomtoken"
 )
 
@@ -141,6 +142,20 @@ func (r *Repo) IssueInvitationCodes(ctx context.Context, actorID int64, targetTy
 	var exists bool
 	if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE id=$1)`, table), targetID).Scan(&exists); err != nil || !exists {
 		return 0, ErrInvitationTargetInvalid
+	}
+	// guest 组不接受成员（它是未登录流量按 IP 识别的配额/权限主体），不能作为
+	// 邀请目标：否则注册路径会把新账号写入 guest 成员关系，破坏「guest 无成员」
+	// 不变量，并让其有效配额被解析成 guest 方案（绕过所属用户组的配额）。
+	// Register 侧对历史遗留的 guest 邀请码另有兜底。
+	if targetType == "group" {
+		var isGuest bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM user_groups WHERE id=$1 AND name=$2)`, targetID, quota.NameGuest).Scan(&isGuest); err != nil {
+			return 0, err
+		}
+		if isGuest {
+			return 0, ErrInvitationTargetInvalid
+		}
 	}
 	codes := make([]string, 0, quantity)
 	var codeOptions randomtoken.CodeOptions

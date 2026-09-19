@@ -12,6 +12,7 @@ import (
 
 	"github.com/PYLinTech/XiaoyuPostHub/backend/admin"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/db/generated"
+	"github.com/PYLinTech/XiaoyuPostHub/backend/group"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/permission"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/systemsetting"
 	"github.com/PYLinTech/XiaoyuPostHub/backend/user"
@@ -370,6 +371,13 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 			if !requireAdminPermission(w, actor, permission.ManagePermissions) {
 				return
 			}
+			// 只能配置"权限不超过自身"的组：否则持有 ManagePermissions 的管理员
+			// 可以借删减权限把高权限组降权（清空 default_user 的管理权限、关闭
+			// guest 的匿名预览/下载），与成员、邀请码的覆盖校验口径一致。
+			if status, msg := ensureActorCoversGroup(r.Context(), deps, actor, groupID); msg != "" {
+				writeBusinessError(w, status, msg)
+				return
+			}
 			var req adminGroupPermissionsRequest
 			if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Permissions) > len(permission.All) {
 				writeBusinessError(w, http.StatusBadRequest, "权限配置无效")
@@ -393,13 +401,15 @@ func handleAdminAccess(w http.ResponseWriter, r *http.Request, deps Deps, actor 
 					codes = append(codes, code)
 				}
 			}
-			// 系统用户组必须保留登录权限：default_user 是全站兜底组，移除 login
-			// 会让仅依赖该组的用户（可能包括操作者本人）立即无法登录。
+			// default_user 必须保留登录权限：它是全站兜底组，移除 login 会让仅
+			// 依赖该组的用户（可能包括操作者本人）立即无法登录。guest 等其它
+			// 系统用户组不受此约束——guest 的权限用于匿名消费侧校验，
+			// login 对其没有意义（见 permission 包与 consumer_access.go）。
 			if info, infoErr := deps.GroupRepo.GetByID(r.Context(), groupID); infoErr != nil {
 				writeBusinessError(w, http.StatusBadRequest, "用户组不存在")
 				return
-			} else if info.IsSystem && !containsCode(codes, permission.Login) {
-				writeBusinessError(w, http.StatusBadRequest, "系统用户组必须保留登录权限")
+			} else if info.IsSystem && info.Name == group.NameDefaultUser && !containsCode(codes, permission.Login) {
+				writeBusinessError(w, http.StatusBadRequest, "默认用户组必须保留登录权限")
 				return
 			}
 			if err := deps.AdminRepo.SetGroupPermissions(r.Context(), groupID, codes); err != nil {
@@ -778,6 +788,12 @@ func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, ac
 	}
 	switch r.Method {
 	case http.MethodPut:
+		// 与成员、邀请码、权限配置同一约束：非超级管理员只能维护"权限不超过
+		// 自身"的用户组。
+		if status, msg := ensureActorCoversGroup(r.Context(), deps, actor, groupID); msg != "" {
+			writeBusinessError(w, status, msg)
+			return
+		}
 		var req adminCreateGroupRequest
 		if err := decodeSmallJSON(w, r, &req); err != nil || len(req.Name) > 32 || len(req.Description) > 500 {
 			writeBusinessError(w, http.StatusBadRequest, "用户组参数无效")
@@ -803,6 +819,11 @@ func handleAdminUserGroups(w http.ResponseWriter, r *http.Request, deps Deps, ac
 		_ = deps.AdminRepo.WriteAudit(r.Context(), actor.ID, actor.Username, "user_group.update", "user_group", item.Name, map[string]any{"id": item.ID}, net.ParseIP(clientIP(r)))
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "group": item})
 	case http.MethodDelete:
+		// 删除用户组会连带移除其权限，不能让低权限管理员删除高权限组。
+		if status, msg := ensureActorCoversGroup(r.Context(), deps, actor, groupID); msg != "" {
+			writeBusinessError(w, status, msg)
+			return
+		}
 		name, err := deps.AdminRepo.DeleteUserGroup(r.Context(), groupID)
 		if errors.Is(err, admin.ErrGroupNotFound) {
 			writeBusinessError(w, http.StatusNotFound, err.Error())
@@ -834,8 +855,8 @@ func groupPermissionIndex(ctx context.Context, deps Deps) (map[int64][]string, e
 		return nil, err
 	}
 	index := make(map[int64][]string, len(groups))
-	for _, group := range groups {
-		index[group.ID] = group.Permissions
+	for _, item := range groups {
+		index[item.ID] = item.Permissions
 	}
 	return index, nil
 }

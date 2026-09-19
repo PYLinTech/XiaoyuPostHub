@@ -70,6 +70,15 @@ JOIN group_permissions gp ON gp.group_id = membership.group_id
 WHERE membership.user_id = $1
 ORDER BY gp.permission;
 
+-- name: ListPermissionsByGroupName :many
+-- 按用户组名读取权限集合：匿名请求按 guest 系统用户组校验消费侧权限
+-- （preview / download）时使用。guest 组不接受成员，无法走上一条 SQL。
+SELECT gp.permission
+FROM user_groups g
+JOIN group_permissions gp ON gp.group_id = g.id
+WHERE g.name = $1
+ORDER BY gp.permission;
+
 -- name: GetEffectiveStorageBackendByUser :one
 -- 用户的有效存储后端：所属组中 priority 最高且已绑定后端的组（与配额方案的
 -- 选择规则一致）。未绑定任何后端时返回 sql.ErrNoRows，调用方回退全局默认。

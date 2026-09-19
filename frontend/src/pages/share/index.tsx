@@ -231,7 +231,8 @@ export default function PublicSharePage({ pickupCode }: { pickupCode?: string })
       // 加载失败与"格式不支持"要区分提示：403/412 等应告知真实原因（审核中、
       // 需要刷新页面），静默降级会误导用户以为文件格式有问题。
       const status = (error as { response?: { status?: number } })?.response?.status;
-      if (status === 403 || status === 412 || status === 404 || status === 422) {
+      // 503：访客权限/配额配置不可用（fail-closed），需展示后端的真实原因。
+      if (status === 403 || status === 412 || status === 404 || status === 422 || status === 503) {
         Message.error(apiErrorMessage(error, uiText('预览加载失败')));
       }
       setPreviewUnsupported(true);

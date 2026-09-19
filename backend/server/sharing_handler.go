@@ -659,6 +659,10 @@ func publicPickupHandler(deps Deps) http.HandlerFunc {
 }
 
 func sharePreview(w http.ResponseWriter, r *http.Request, deps Deps, token string) {
+	// 消费侧权限：登录看自身用户组、匿名看 guest 组（fail-closed）。
+	if !requireShareConsumePermission(w, r, deps, permission.Preview) {
+		return
+	}
 	item, status, err := loadUsableShare(r, deps, token)
 	if err != nil {
 		writeBusinessError(w, status, err.Error())
@@ -759,6 +763,10 @@ func shareMetadata(w http.ResponseWriter, r *http.Request, deps Deps, token stri
 //     实时解密兜底输出明文；
 //   - 302 不可用且关闭自动降级：按下载失败处理（不暴露内部原因）。
 func createShareDownloadJob(w http.ResponseWriter, r *http.Request, deps Deps, shareToken string) {
+	// 消费侧权限：登录看自身用户组、匿名看 guest 组（fail-closed）。
+	if !requireShareConsumePermission(w, r, deps, permission.Download) {
+		return
+	}
 	item, status, err := loadUsableShare(r, deps, shareToken)
 	if err != nil {
 		writeBusinessError(w, status, err.Error())
@@ -1018,6 +1026,12 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 			writeBusinessError(w, http.StatusNotFound, "直链不存在")
 			return
 		}
+		// 消费侧权限：登录看自身用户组、匿名看 guest 组（fail-closed）。
+		// 放在 token 合法性之后、直链装载之前：无效 token 保持统一 404，
+		// 不在权限校验失败时向外部暴露直链是否存在。
+		if !requireShareConsumePermission(w, r, deps, permission.Download) {
+			return
+		}
 		item, err := deps.SharingRepo.GetDirectLinkByToken(r.Context(), token)
 		if errors.Is(err, sharing.ErrAdminBlocked) {
 			writeBusinessError(w, http.StatusForbidden, "该直链已被管理员封禁")
@@ -1070,7 +1084,11 @@ func directDownloadHandler(deps Deps) http.HandlerFunc {
 		size := blob.SizeBytes
 		// 下载方向配额：登录按账号 / 未登录按 IP；先校验，完整取流后再记账
 		// （只取中段的探测请求不计数，与直链自身下载次数结算口径一致）。
-		subject := resolveDownloadSubject(r, deps)
+		subject, subjectErr := resolveDownloadSubject(r, deps)
+		if subjectErr != nil {
+			writeDownloadQuotaFailure(w, subjectErr)
+			return
+		}
 		if err := checkDownloadQuota(r.Context(), deps, subject, size); err != nil {
 			writeDownloadQuotaFailure(w, err)
 			return

@@ -14,10 +14,11 @@ const (
 	// 认证
 	Login = "login" // 登录系统
 
-	// 资源（自己名下）
+	// 资源（自己名下）+ 分享消费：download / preview 同时约束分享、取件、
+	// 直链的消费动作（登录看自身用户组，匿名看 guest 组，见 server 包）。
 	Upload    = "upload"     // 上传
-	Download  = "download"   // 下载（资源管理界面内）
-	Preview   = "preview"    // 预览
+	Download  = "download"   // 下载（资源页与分享/取件/直链消费侧）
+	Preview   = "preview"    // 预览（资源页与分享页消费侧）
 	Rename    = "rename"     // 重命名
 	DeleteOwn = "delete_own" // 删自己的资源
 
@@ -53,8 +54,8 @@ type Definition struct {
 var Definitions = []Definition{
 	{Login, "登录系统", "Sign in to the system"},
 	{Upload, "上传资源", "Upload resources"},
-	{Download, "下载资源", "Download resources"},
-	{Preview, "预览资源", "Preview resources"},
+	{Download, "下载资源（含分享页/取件码/直链）", "Download resources (including share pages, pickup codes and direct links)"},
+	{Preview, "预览资源（含分享页在线预览）", "Preview resources (including share pages)"},
 	{Rename, "重命名自己的资源", "Rename own resources"},
 	{DeleteOwn, "删除自己的资源", "Delete own resources"},
 	{Share, "创建分享页", "Create share pages"},
